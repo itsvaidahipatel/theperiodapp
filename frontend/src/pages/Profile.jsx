@@ -5,8 +5,10 @@ import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import { updateUserProfile, changePassword } from '../utils/api'
 import { Save, Lock } from 'lucide-react'
 import { updateUserData } from '../utils/userPreferences'
+import { useTranslation } from '../utils/translations'
 
 const Profile = () => {
+  const { t } = useTranslation()
   const [user, setUser] = useState(null)
   const [formData, setFormData] = useState({
     name: '',
@@ -67,7 +69,7 @@ const Profile = () => {
       const updatedUser = await updateUserProfile(formData)
       updateUserData(updatedUser) // Use global utility
       setUser(updatedUser)
-      setSuccess('Profile updated successfully!')
+      setSuccess(t('profile.saved'))
     } catch (err) {
       setError(err.message || 'Failed to update profile')
     } finally {
@@ -98,7 +100,7 @@ const Profile = () => {
         current_password: passwordData.current_password,
         new_password: passwordData.new_password,
       })
-      setSuccess('Password changed successfully!')
+      setSuccess(t('profile.passwordChanged'))
       setPasswordData({
         current_password: '',
         new_password: '',
@@ -112,7 +114,7 @@ const Profile = () => {
   }
 
   if (!user) {
-    return <div>Loading...</div>
+    return <div>{t('common.loading')}</div>
   }
 
   return (
@@ -120,7 +122,7 @@ const Profile = () => {
       <Navbar />
       
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <h1 className="text-3xl font-bold text-gray-800 mb-8">Profile Settings</h1>
+        <h1 className="text-3xl font-bold text-gray-800 mb-8">{t('profile.title')}</h1>
 
         {/* Tabs */}
         <div className="flex gap-4 mb-6 border-b">
@@ -132,7 +134,7 @@ const Profile = () => {
                 : 'border-transparent text-gray-600 hover:text-gray-800'
             }`}
           >
-            Profile
+            {t('profile.title')}
           </button>
           <button
             onClick={() => setActiveTab('password')}
@@ -142,7 +144,7 @@ const Profile = () => {
                 : 'border-transparent text-gray-600 hover:text-gray-800'
             }`}
           >
-            Change Password
+            {t('profile.changePassword')}
           </button>
         </div>
 
@@ -151,7 +153,7 @@ const Profile = () => {
           <form onSubmit={handleProfileSubmit} className="bg-white rounded-lg shadow-lg p-6 space-y-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Name
+                {t('profile.name')}
               </label>
               <input
                 type="text"
@@ -165,7 +167,7 @@ const Profile = () => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Language
+                {t('profile.language')}
               </label>
               <select
                 name="language"
@@ -181,7 +183,7 @@ const Profile = () => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Favorite Cuisine
+                {t('profile.favoriteCuisine')}
               </label>
               <select
                 name="favorite_cuisine"
@@ -199,7 +201,7 @@ const Profile = () => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Favorite Exercise Category
+                {t('profile.favoriteExercise')}
               </label>
               <select
                 name="favorite_exercise"
@@ -234,7 +236,7 @@ const Profile = () => {
               className="w-full bg-period-pink text-white py-3 rounded-lg font-semibold hover:bg-opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2"
             >
               <Save className="h-5 w-5" />
-              {loading ? 'Saving...' : 'Save Changes'}
+              {loading ? t('common.loading') : t('profile.save')}
             </button>
           </form>
         )}
@@ -244,7 +246,7 @@ const Profile = () => {
           <form onSubmit={handlePasswordSubmit} className="bg-white rounded-lg shadow-lg p-6 space-y-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Current Password
+                {t('profile.currentPassword')}
               </label>
               <input
                 type="password"
@@ -258,7 +260,7 @@ const Profile = () => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                New Password
+                {t('profile.newPassword')}
               </label>
               <input
                 type="password"
@@ -273,7 +275,7 @@ const Profile = () => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Confirm New Password
+                {t('profile.confirmPassword')}
               </label>
               <input
                 type="password"
@@ -304,7 +306,7 @@ const Profile = () => {
               className="w-full bg-period-pink text-white py-3 rounded-lg font-semibold hover:bg-opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2"
             >
               <Lock className="h-5 w-5" />
-              {loading ? 'Changing...' : 'Change Password'}
+              {loading ? t('common.loading') : t('profile.changePassword')}
             </button>
           </form>
         )}

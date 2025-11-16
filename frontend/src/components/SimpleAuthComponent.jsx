@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
+import { useTranslation } from '../utils/translations'
 
 const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
+  const { t } = useTranslation()
   const [formData, setFormData] = useState({
     name: '',
     email: '',
@@ -44,7 +46,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
       {!isLogin && (
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            Name
+            {t('auth.name')}
           </label>
           <input
             type="text"
@@ -59,7 +61,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
-          Email
+          {t('auth.email')}
         </label>
         <input
           type="email"
@@ -73,7 +75,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
-          Password
+          {t('auth.password')}
         </label>
         <div className="relative">
           <input
@@ -99,7 +101,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
         <>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Last Period Date <span className="text-red-500">*</span>
+              {t('auth.lastPeriodDate')} <span className="text-red-500">*</span>
             </label>
             <input
               type="date"
@@ -110,12 +112,12 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
               max={new Date().toISOString().split('T')[0]}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
-            <p className="text-xs text-gray-500 mt-1">When did your last period start?</p>
+            <p className="text-xs text-gray-500 mt-1">{t('auth.lastPeriodDate')}</p>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Cycle Length (days) <span className="text-red-500">*</span>
+              {t('auth.cycleLength')} <span className="text-red-500">*</span>
             </label>
             <input
               type="number"
@@ -127,7 +129,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
               max={35}
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
-            <p className="text-xs text-gray-500 mt-1">Average days between periods (typically 21-35 days)</p>
+            <p className="text-xs text-gray-500 mt-1">{t('auth.cycleLengthHelp')}</p>
           </div>
 
           <button
@@ -142,7 +144,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
             <div className="space-y-4 p-4 bg-gray-50 rounded-lg">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Language
+                  {t('auth.language')}
                 </label>
                 <select
                   name="language"
@@ -158,7 +160,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Favorite Cuisine
+                  {t('auth.favoriteCuisine')}
                 </label>
                 <select
                   name="favorite_cuisine"
@@ -176,7 +178,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Favorite Exercise Category
+                  {t('auth.favoriteExercise')}
                 </label>
                 <select
                   name="favorite_exercise"
@@ -208,7 +210,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
         disabled={loading}
         className="w-full bg-period-pink text-white py-3 rounded-lg font-semibold hover:bg-opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        {loading ? 'Please wait...' : isLogin ? 'Login' : 'Register'}
+        {loading ? t('common.loading') : isLogin ? t('auth.loginButton') : t('auth.registerButton')}
       </button>
     </form>
   )

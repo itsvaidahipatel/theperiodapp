@@ -23,8 +23,15 @@ const apiRequest = async (endpoint, options = {}) => {
   })
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'An error occurred' }))
-    throw new Error(error.detail || error.message || 'Request failed')
+    let errorData
+    try {
+      errorData = await response.json()
+    } catch {
+      errorData = { detail: `HTTP ${response.status}: ${response.statusText}` }
+    }
+    const error = new Error(errorData.detail || errorData.message || 'Request failed')
+    error.response = { data: errorData, status: response.status }
+    throw error
   }
 
   return response.json()

@@ -1,0 +1,155 @@
+import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { loadDashboardData, loadWellnessData, getCachedWellnessData, refreshAllData } from '../utils/dataLoader'
+import { shouldRefetch, clearCache } from '../utils/dataCache'
+import { getUserLanguage } from '../utils/userPreferences'
+
+const DataContext = createContext()
+
+export const useDataContext = () => {
+  const context = useContext(DataContext)
+  if (!context) {
+    throw new Error('useDataContext must be used within DataProvider')
+  }
+  return context
+}
+
+export const DataProvider = ({ children }) => {
+  const [dashboardData, setDashboardData] = useState(null)
+  const [wellnessData, setWellnessData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [loadingWellness, setLoadingWellness] = useState(false)
+  const [error, setError] = useState(null)
+  const [lastLoadDate, setLastLoadDate] = useState(() => {
+    // Get last load date from localStorage
+    try {
+      return localStorage.getItem('period_gpt_last_load_date')
+    } catch {
+      return null
+    }
+  })
+
+  // Check if we need to refetch (date changed or cache invalid)
+  const checkAndLoadData = useCallback(async (forceRefresh = false) => {
+    try {
+      setLoading(true)
+      setError(null)
+
+      // Load dashboard data first (always fetch, no cache)
+      const dashboard = await loadDashboardData()
+      setDashboardData(dashboard)
+      setLoading(false)
+
+      // Get phase-day ID from dashboard
+      const phaseDayId = dashboard?.currentPhase?.phase_day_id || 
+                         dashboard?.currentPhase?.id
+
+      if (phaseDayId) {
+        const language = getUserLanguage()
+        const needsRefetch = forceRefresh || shouldRefetch(phaseDayId, language)
+
+        if (needsRefetch) {
+          setLoadingWellness(true)
+          // Load wellness data (will cache automatically)
+          const wellness = await loadWellnessData(phaseDayId, language)
+          setWellnessData(wellness)
+          setLoadingWellness(false)
+        } else {
+          // Use cached data
+          const cached = getCachedWellnessData(phaseDayId)
+          if (cached) {
+            console.log('Using cached wellness data')
+            setWellnessData(cached)
+            setLoadingWellness(false)
+          } else {
+            // Cache miss, load fresh
+            setLoadingWellness(true)
+            const wellness = await loadWellnessData(phaseDayId, language)
+            setWellnessData(wellness)
+            setLoadingWellness(false)
+          }
+        }
+      } else {
+        setLoadingWellness(false)
+      }
+
+      const today = new Date().toISOString().split('T')[0]
+      setLastLoadDate(today)
+      localStorage.setItem('period_gpt_last_load_date', today)
+    } catch (err) {
+      console.error('Error loading data:', err)
+      setError(err.message)
+      setLoading(false)
+      setLoadingWellness(false)
+    }
+  }, [])
+
+  // Load data on mount and check date change
+  useEffect(() => {
+    const today = new Date().toISOString().split('T')[0]
+    
+    // Check if date changed
+    if (lastLoadDate && lastLoadDate !== today) {
+      console.log('Date changed, forcing refresh')
+      checkAndLoadData(true) // Force refresh if date changed
+    } else {
+      checkAndLoadData(false)
+    }
+    
+    // Set up interval to check for date change every minute
+    const interval = setInterval(() => {
+      const currentDate = new Date().toISOString().split('T')[0]
+      if (lastLoadDate && lastLoadDate !== currentDate) {
+        console.log('Date changed (detected via interval), forcing refresh')
+        checkAndLoadData(true)
+      }
+    }, 60000) // Check every minute
+    
+    return () => clearInterval(interval)
+  }, [checkAndLoadData]) // Include checkAndLoadData in dependencies
+
+  // Listen for period log events (clear cache and reload)
+  useEffect(() => {
+    const handlePeriodLogged = () => {
+      console.log('Period logged, clearing cache and refreshing all data...')
+      clearCache()
+      checkAndLoadData(true)
+    }
+
+    window.addEventListener('periodLogged', handlePeriodLogged)
+    return () => {
+      window.removeEventListener('periodLogged', handlePeriodLogged)
+    }
+  }, [checkAndLoadData])
+
+  // Listen for language changes (clear cache and reload)
+  useEffect(() => {
+    const handleLanguageChange = () => {
+      console.log('Language changed, clearing cache and refreshing all data...')
+      clearCache()
+      checkAndLoadData(true)
+    }
+
+    window.addEventListener('languageChanged', handleLanguageChange)
+    return () => {
+      window.removeEventListener('languageChanged', handleLanguageChange)
+    }
+  }, [checkAndLoadData])
+
+  // Manual refresh function
+  const refreshData = useCallback(() => {
+    clearCache()
+    checkAndLoadData(true)
+  }, [checkAndLoadData])
+
+  const value = {
+    dashboardData,
+    wellnessData,
+    loading,
+    loadingWellness,
+    error,
+    refreshData
+  }
+
+  return <DataContext.Provider value={value}>{children}</DataContext.Provider>
+}
+

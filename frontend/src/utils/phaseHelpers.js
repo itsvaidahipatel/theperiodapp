@@ -16,14 +16,8 @@ export const getPhaseColorClass = (phase) => {
 
 // Get phase description
 export const getPhaseDescription = (phase) => {
-  const descriptions = {
-    'Period': 'Your body is working hard during menstruation. Rest and take care of yourself.',
-    'Menstrual': 'Your body is working hard during menstruation. Rest and take care of yourself.',
-    'Follicular': 'Energy is building up. Great time for new beginnings and fresh starts.',
-    'Ovulation': 'Peak energy and vitality. Perfect time for important tasks and social activities.',
-    'Luteal': 'Time to slow down and listen to your body. Focus on self-care and preparation.'
-  }
-  return descriptions[phase] || 'Take care of yourself today.'
+  // Phase-specific descriptions removed - return empty string
+  return ''
 }
 
 // Get phase emoji

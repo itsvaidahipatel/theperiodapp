@@ -1,17 +1,22 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getCurrentPhase, getHormonesData } from '../utils/api'
+import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import { ArrowLeft, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getUserLanguage, getLocalizedText } from '../utils/userPreferences'
+import { useTranslation } from '../utils/translations'
+import { translateHormoneLevel } from '../utils/translateHelpers'
 
 const Hormones = () => {
+  const { t } = useTranslation()
+  const { dashboardData, wellnessData, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
-  const [currentPhase, setCurrentPhase] = useState(null)
-  const [hormonesData, setHormonesData] = useState(null)
-  const [loading, setLoading] = useState(false)
   const [language, setLanguage] = useState('en')
   const navigate = useNavigate()
+
+  // Extract data from context
+  const currentPhase = dashboardData?.currentPhase || null
+  const hormonesData = wellnessData?.hormones || null
 
   useEffect(() => {
     const userData = localStorage.getItem('user')
@@ -42,29 +47,6 @@ const Hormones = () => {
     }
   }, [])
 
-  useEffect(() => {
-    const fetchData = async () => {
-      if (!user) return
-
-      setLoading(true)
-      try {
-        // Get today's phase
-        const phase = await getCurrentPhase()
-        setCurrentPhase(phase)
-
-        // Get hormones data (no need for history since we removed graphs)
-        const data = await getHormonesData()
-        setHormonesData(data)
-      } catch (error) {
-        console.error('Failed to fetch hormones data:', error)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [user])
-
   const getTrendIcon = (trend) => {
     if (trend === 'up' || trend === '↑') return <TrendingUp className="h-5 w-5 text-green-600" />
     if (trend === 'down' || trend === '↓') return <TrendingDown className="h-5 w-5 text-red-600" />
@@ -73,17 +55,30 @@ const Hormones = () => {
 
   // Get today's data (either from today field or hormonesData itself for backward compatibility)
   const getTodayData = () => {
-    if (hormonesData?.today) return hormonesData.today
-    if (hormonesData && !hormonesData.today && !hormonesData.history) {
+    if (!hormonesData) return null
+    if (hormonesData.today) return hormonesData.today
+    if (!hormonesData.today && !hormonesData.history) {
       // Check if it's an error message
       if (hormonesData.message) return null
-      return hormonesData
+      // If data is directly in hormonesData (backward compatibility)
+      if (hormonesData.estrogen || hormonesData.progesterone) {
+        return hormonesData
+      }
     }
     return null
   }
 
   const todayData = getTodayData()
   const expectedPhaseDayId = hormonesData?.phase_day_id || currentPhase?.phase_day_id || currentPhase?.id
+
+  // Debug logging
+  useEffect(() => {
+    console.log('Hormones page - dashboardData:', dashboardData)
+    console.log('Hormones page - wellnessData:', wellnessData)
+    console.log('Hormones page - hormonesData:', hormonesData)
+    console.log('Hormones page - todayData:', todayData)
+    console.log('Hormones page - loadingWellness:', loadingWellness)
+  }, [dashboardData, wellnessData, hormonesData, todayData, loadingWellness])
 
   if (!user) {
     return null
@@ -100,24 +95,24 @@ const Hormones = () => {
               className="flex items-center gap-2 px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition"
             >
               <ArrowLeft className="h-5 w-5" />
-              <span>Back to Dashboard</span>
+              <span>{t('nav.backToDashboard')}</span>
             </button>
-            <h1 className="text-2xl font-bold text-period-pink">Hormones</h1>
+            <h1 className="text-2xl font-bold text-period-pink">{t('hormones.title')}</h1>
           </div>
         </div>
       </nav>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
-          <h2 className="text-3xl font-bold text-gray-800 mb-4">Your Hormones Today</h2>
+          <h2 className="text-3xl font-bold text-gray-800 mb-4">{t('hormones.title')}</h2>
           {currentPhase && (
             <p className="text-2xl text-gray-700 font-semibold">
-              Current Phase: <span className="text-period-pink capitalize">{currentPhase.phase}</span> - Day <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
+              {t('hormones.currentPhase')}: <span className="text-period-pink capitalize">{t(`phase.${currentPhase.phase.toLowerCase()}`)}</span> - {t('dashboard.day')} <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
             </p>
           )}
         </div>
 
-        {loading ? (
+        {loadingWellness ? (
           <div className="text-center py-12">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-period-pink mx-auto mb-4"></div>
             <p className="text-gray-600">Loading hormone data...</p>
@@ -129,7 +124,7 @@ const Hormones = () => {
               {/* Mood Insights - Multilingual */}
               {todayData.mood && (
                 <div className="bg-blue-50 rounded-lg p-6 border-l-4 border-blue-400">
-                  <h3 className="text-lg font-semibold mb-3 text-blue-800">Mood Insights</h3>
+                  <h3 className="text-lg font-semibold mb-3 text-blue-800">{t('hormones.moodLevel')}</h3>
                   <p className="text-gray-700">{getLocalizedText(todayData.mood, language) || 'N/A'}</p>
                 </div>
               )}
@@ -137,7 +132,7 @@ const Hormones = () => {
               {/* Energy Insights - Multilingual */}
               {todayData.energy && (
                 <div className="bg-green-50 rounded-lg p-6 border-l-4 border-green-400">
-                  <h3 className="text-lg font-semibold mb-3 text-green-800">Energy Insights</h3>
+                  <h3 className="text-lg font-semibold mb-3 text-green-800">{t('hormones.energyLevel')}</h3>
                   <p className="text-gray-700">{getLocalizedText(todayData.energy, language) || 'N/A'}</p>
                 </div>
               )}
@@ -145,7 +140,7 @@ const Hormones = () => {
               {/* Best Work Type - Multilingual */}
               {todayData.best_work_type && (
                 <div className="bg-purple-50 rounded-lg p-6 border-l-4 border-purple-400">
-                  <h3 className="text-lg font-semibold mb-3 text-purple-800">Best Work Type</h3>
+                  <h3 className="text-lg font-semibold mb-3 text-purple-800">{t('hormones.bestWorkType')}</h3>
                   <p className="text-gray-700">{getLocalizedText(todayData.best_work_type, language) || 'N/A'}</p>
                 </div>
               )}
@@ -154,7 +149,7 @@ const Hormones = () => {
             {/* Brain Note - Full Width Below */}
             {todayData.brain_note && (
               <div className="bg-yellow-50 rounded-lg p-6 border-l-4 border-yellow-400">
-                <h3 className="text-lg font-semibold mb-3 text-yellow-800">Brain Note</h3>
+                <h3 className="text-lg font-semibold mb-3 text-yellow-800">{t('hormones.brainNote')}</h3>
                 <p className="text-gray-700">{getLocalizedText(todayData.brain_note, language) || 'N/A'}</p>
               </div>
             )}
@@ -162,10 +157,10 @@ const Hormones = () => {
             {/* Today's Hormone Values with Trends */}
             <div className="grid md:grid-cols-2 gap-6">
               {[
-                { name: 'Estrogen', value: todayData.estrogen, trend: todayData.estrogen_trend },
-                { name: 'Progesterone', value: todayData.progesterone, trend: todayData.progesterone_trend },
-                { name: 'FSH', value: todayData.fsh, trend: todayData.fsh_trend },
-                { name: 'LH', value: todayData.lh, trend: todayData.lh_trend },
+                { name: t('hormones.estrogen'), value: todayData.estrogen, trend: todayData.estrogen_trend },
+                { name: t('hormones.progesterone'), value: todayData.progesterone, trend: todayData.progesterone_trend },
+                { name: t('hormones.fsh'), value: todayData.fsh, trend: todayData.fsh_trend },
+                { name: t('hormones.lh'), value: todayData.lh, trend: todayData.lh_trend },
               ].map((hormone) => (
                 <div key={hormone.name} className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm hover:shadow-md transition">
                   <div className="flex justify-between items-center mb-3">
@@ -173,7 +168,7 @@ const Hormones = () => {
                     {hormone.trend && getTrendIcon(hormone.trend)}
                   </div>
                   {hormone.value !== null && hormone.value !== undefined && hormone.value !== '' && (
-                    <p className="text-3xl font-bold text-period-pink">{hormone.value}</p>
+                    <p className="text-3xl font-bold text-period-pink">{translateHormoneLevel(hormone.value)}</p>
                   )}
                   {(!hormone.value || hormone.value === '') && (
                     <p className="text-gray-500">Data not available</p>

@@ -1,17 +1,21 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getCurrentPhase, getExerciseData } from '../utils/api'
+import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import { ArrowLeft } from 'lucide-react'
 import { getUserLanguage, getFavoriteExercise } from '../utils/userPreferences'
+import { useTranslation } from '../utils/translations'
 
 const Exercise = () => {
+  const { t } = useTranslation()
+  const { dashboardData, wellnessData, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
-  const [currentPhase, setCurrentPhase] = useState(null)
-  const [allExercises, setAllExercises] = useState([])
   const [selectedCategory, setSelectedCategory] = useState('')
-  const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
+
+  // Extract data from context
+  const currentPhase = dashboardData?.currentPhase || null
+  const allExercises = wellnessData?.exercises?.exercises || []
 
   // Category mapping for display: database value (lowercase) -> display name
   const categoryDisplayMapping = {
@@ -35,7 +39,7 @@ const Exercise = () => {
       const parsedUser = JSON.parse(userData)
       setUser(parsedUser)
       // Set default category to user's favorite_exercise, or default to 'mind'
-      const favoriteExercise = parsedUser.favorite_exercise || ''
+      const favoriteExercise = getFavoriteExercise() || ''
       // Map favorite_exercise to database category value
       if (favoriteExercise) {
         const dbCategory = favoriteExerciseToCategory[favoriteExercise] || favoriteExercise.toLowerCase()
@@ -66,38 +70,6 @@ const Exercise = () => {
       window.removeEventListener('focus', handleLanguageChange)
     }
   }, [])
-
-  useEffect(() => {
-    const fetchData = async () => {
-      if (!user) return
-
-      setLoading(true)
-      try {
-        // Get today's phase
-        const phase = await getCurrentPhase()
-        setCurrentPhase(phase)
-
-        // Get all exercise data (no category filter - fetch all)
-        const language = getUserLanguage()
-        const data = await getExerciseData(null, language, null) // Fetch all exercises
-        console.log('Exercise data received:', data)
-        console.log('Exercises array:', data?.exercises)
-        const exercises = data?.exercises || []
-        console.log('Number of exercises:', exercises.length)
-        if (exercises.length > 0) {
-          console.log('First exercise:', exercises[0])
-          console.log('All categories in data:', [...new Set(exercises.map(ex => ex.category))])
-        }
-        setAllExercises(exercises)
-      } catch (error) {
-        console.error('Failed to fetch exercise data:', error)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [user])
 
   // Filter exercises by selected category (case-insensitive)
   // Note: selectedCategory is required (no "All Categories" option), so always filter
@@ -131,24 +103,24 @@ const Exercise = () => {
               className="flex items-center gap-2 px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition"
             >
               <ArrowLeft className="h-5 w-5" />
-              <span>Back to Dashboard</span>
+              <span>{t('nav.backToDashboard')}</span>
             </button>
-            <h1 className="text-2xl font-bold text-period-pink">Exercise</h1>
+            <h1 className="text-2xl font-bold text-period-pink">{t('exercise.title')}</h1>
           </div>
         </div>
       </nav>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
-          <h2 className="text-3xl font-bold text-gray-800 mb-4">Move with Your Cycle</h2>
+          <h2 className="text-3xl font-bold text-gray-800 mb-4">{t('exercise.moveWithCycle')}</h2>
           {currentPhase && (
             <p className="text-2xl text-gray-700 font-semibold mb-4">
-              Current Phase: <span className="text-period-pink capitalize">{currentPhase.phase}</span> - Day <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
+              {t('exercise.currentPhase')}: <span className="text-period-pink capitalize">{t(`phase.${currentPhase.phase.toLowerCase()}`)}</span> - {t('dashboard.day')} <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
             </p>
           )}
         </div>
 
-        {loading ? (
+        {loadingWellness ? (
           <div className="text-center py-12">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-period-pink mx-auto mb-4"></div>
             <p className="text-gray-600">Loading exercise data...</p>
@@ -159,7 +131,7 @@ const Exercise = () => {
             {energyLevel && (
               <div className="bg-purple-50 rounded-lg p-4 border-l-4 border-purple-400">
                 <p className="text-lg font-semibold text-purple-800">
-                  Energy Level: <span className="text-purple-600">{energyLevel}</span>
+                  {t('exercise.energyLevel')}: <span className="text-purple-600">{energyLevel}</span>
                 </p>
               </div>
             )}
@@ -167,7 +139,7 @@ const Exercise = () => {
             {/* Category Filter */}
             <div className="mb-6">
               <label className="block text-lg font-semibold text-gray-700 mb-3">
-                Filter by Category
+                {t('exercise.filterByCategory')}
               </label>
               <select
                 value={selectedCategory}
@@ -175,7 +147,7 @@ const Exercise = () => {
                 className="px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
               >
                 {Object.entries(categoryDisplayMapping).map(([dbValue, displayName]) => (
-                  <option key={dbValue} value={dbValue}>{displayName}</option>
+                  <option key={dbValue} value={dbValue}>{t(`exercise.category.${dbValue}`)}</option>
                 ))}
               </select>
             </div>
@@ -187,7 +159,7 @@ const Exercise = () => {
                   {filteredExercises.slice(0, 3).map((exercise, index) => (
                     <div key={exercise.id} className="border border-gray-200 rounded-lg p-6 hover:shadow-md transition">
                       <h4 className="text-xl font-semibold mb-4">
-                        Exercise {index + 1}: {exercise.exercise_name}
+                        {t('exercise.exercise')} {index + 1}: {exercise.exercise_name}
                       </h4>
 
                       {exercise.steps && (() => {

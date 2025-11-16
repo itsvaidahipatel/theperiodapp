@@ -260,8 +260,8 @@ async def get_nutrition(
         query = supabase.table(table_name).select("*").eq("hormone_id", hormone_id)
         
         if cuisine:
-            # Map "gujarati" to "kathiyavadi" in database
-            db_cuisine = "kathiyavadi" if cuisine == "gujarati" else cuisine
+            # Use cuisine directly (no mapping needed)
+            db_cuisine = cuisine
             query = query.eq("cuisine", db_cuisine)
         
         recipes_response = query.execute()
