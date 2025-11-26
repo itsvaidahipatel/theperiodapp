@@ -14,7 +14,9 @@ load_dotenv()
 app = FastAPI(title="Period GPT2 API", version="1.0.0")
 
 # CORS Configuration
-origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+# Split by comma and strip whitespace
+origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,5 +48,6 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 

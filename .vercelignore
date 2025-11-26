@@ -1,0 +1,11 @@
+backend/
+node_modules/
+*.md
+.git/
+.env
+.env.local
+*.log
+venv/
+__pycache__/
+*.pyc
+
