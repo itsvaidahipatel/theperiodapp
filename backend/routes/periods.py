@@ -6,7 +6,14 @@ import uuid
 
 from database import supabase
 from routes.auth import get_current_user
-from cycle_utils import generate_cycle_phase_map
+from cycle_utils import (
+    generate_cycle_phase_map, 
+    detect_early_late_period, 
+    update_cycle_length_bayesian,
+    update_luteal_estimate,
+    estimate_luteal,
+    predict_ovulation
+)
 
 router = APIRouter()
 
@@ -60,6 +67,16 @@ async def log_period(
                 detail="Failed to create/update period log"
             )
         
+        # Detect early/late period and calculate new cycle length
+        logged_date = log_data.date
+        previous_period_date = None
+        
+        # Get previous period date for cycle length calculation
+        user_data_before = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+        if user_data_before.data:
+            previous_period_date = user_data_before.data[0].get("last_period_date")
+            old_cycle_length = user_data_before.data[0].get("cycle_length", 28)
+        
         # Update user's last_period_date when period is logged
         updated_user = None
         user_update = supabase.table("users").update({
@@ -67,6 +84,50 @@ async def log_period(
         }).eq("id", user_id).execute()
         if user_update.data:
             updated_user = user_update.data[0]
+        
+        # Calculate new cycle length if we have previous period date
+        if previous_period_date and previous_period_date != logged_date:
+            try:
+                prev_date = datetime.strptime(previous_period_date, "%Y-%m-%d")
+                curr_date = datetime.strptime(logged_date, "%Y-%m-%d")
+                new_cycle_length = (curr_date - prev_date).days
+                
+                if new_cycle_length > 0:
+                    # Update using Bayesian smoothing
+                    update_cycle_length_bayesian(user_id, new_cycle_length)
+                    print(f"Updated cycle_length based on logged period: {old_cycle_length} -> {new_cycle_length} (Bayesian)")
+                    
+                    # Calculate and update luteal length
+                    try:
+                        # Get predicted ovulation for the previous cycle
+                        luteal_mean, luteal_sd = estimate_luteal(user_id)
+                        predicted_ov_date_str, _ = predict_ovulation(
+                            previous_period_date,
+                            float(old_cycle_length),
+                            luteal_mean,
+                            luteal_sd,
+                            cycle_start_sd=1.0
+                        )
+                        predicted_ov_date = datetime.strptime(predicted_ov_date_str, "%Y-%m-%d")
+                        
+                        # Observed luteal length = period_start - predicted_ovulation
+                        observed_luteal = (curr_date - predicted_ov_date).days
+                        
+                        if 10 <= observed_luteal <= 18:  # Valid range
+                            # Check if user has LH/BBT markers (for now, assume False)
+                            has_markers = False  # TODO: Get from user data if available
+                            update_luteal_estimate(user_id, float(observed_luteal), has_markers)
+                            print(f"Updated luteal estimate: observed={observed_luteal} days")
+                    except Exception as luteal_error:
+                        print(f"Warning: Failed to update luteal estimate: {str(luteal_error)}")
+            except Exception as e:
+                print(f"Warning: Failed to update cycle_length from period log: {str(e)}")
+        
+        # Detect early/late period
+        early_late_info = detect_early_late_period(user_id, logged_date)
+        if early_late_info and early_late_info.get("should_adjust"):
+            print(f"⚠️ Early/Late period detected: {early_late_info['difference_days']} days difference")
+            print(f"   Predicted: {early_late_info['predicted_date']}, Actual: {logged_date}")
         
         # Try to auto-generate cycle predictions if we have enough period data
         # Since period_logs might have UNIQUE user_id, we'll use user's last_period_date
@@ -123,12 +184,17 @@ async def log_period(
                     current_date = datetime.now().strftime("%Y-%m-%d")
                     try:
                         print(f"Generating cycle predictions for user {user_id} with {len(past_cycle_data)} cycles")
+                        
+                        # Use partial update if early/late period detected (preserve past data)
+                        update_future_only = early_late_info and early_late_info.get("should_adjust", False)
+                        
                         generate_cycle_phase_map(
                             user_id=user_id,
                             past_cycle_data=past_cycle_data[:6],  # Use up to 6 cycles
-                            current_date=current_date
+                            current_date=current_date,
+                            update_future_only=update_future_only
                         )
-                        print(f"Cycle predictions generated successfully for user {user_id}")
+                        print(f"Cycle predictions generated successfully for user {user_id} (update_future_only={update_future_only})")
                     except Exception as pred_error:
                         # Don't fail the log if prediction fails, but log the error
                         import traceback

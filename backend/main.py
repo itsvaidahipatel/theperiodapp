@@ -7,7 +7,7 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 
-from routes import auth, user, periods, ai_chat, cycles, wellness
+from routes import auth, user, periods, ai_chat, cycles, wellness, feedback
 
 load_dotenv()
 
@@ -34,6 +34,7 @@ app.include_router(periods.router, prefix="/periods", tags=["Periods"])
 app.include_router(ai_chat.router, prefix="/ai", tags=["AI"])
 app.include_router(cycles.router, prefix="/cycles", tags=["Cycles"])
 app.include_router(wellness.router, prefix="/wellness", tags=["Wellness"])
+app.include_router(feedback.router, prefix="/feedback", tags=["Feedback"])
 
 @app.get("/")
 async def root():

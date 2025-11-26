@@ -20,7 +20,6 @@ const Navbar = () => {
 
   const navItems = [
     { path: '/dashboard', icon: Home, label: 'Dashboard' },
-    { path: '/wellness', icon: Activity, label: 'Wellness' },
     { path: '/chat', icon: MessageCircle, label: 'Chat' },
     { path: '/profile', icon: User, label: 'Profile' },
   ]

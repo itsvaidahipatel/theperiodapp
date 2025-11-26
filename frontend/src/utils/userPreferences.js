@@ -27,7 +27,13 @@ export const getFavoriteCuisine = () => {
     const userData = localStorage.getItem('user')
     if (userData) {
       const user = JSON.parse(userData)
-      return user.favorite_cuisine || 'international'
+      const cuisine = user.favorite_cuisine || 'international'
+      // Normalize to standard cuisine names (handles legacy values)
+      const normalized = cuisine.toLowerCase()
+      if (normalized === 'gujarati' || normalized.includes('gujarati') || normalized.includes('kathiya')) {
+        return 'gujarati'
+      }
+      return cuisine
     }
   } catch (error) {
     console.error('Error getting favorite cuisine:', error)

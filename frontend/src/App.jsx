@@ -8,10 +8,10 @@ import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
 import Profile from './pages/Profile'
 import Chat from './pages/Chat'
-import Wellness from './pages/Wellness'
 import Hormones from './pages/Hormones'
 import Nutrition from './pages/Nutrition'
 import Exercise from './pages/Exercise'
+import About from './pages/About'
 import NotFound from './pages/NotFound'
 
 function App() {
@@ -47,14 +47,6 @@ function App() {
           }
         />
         <Route
-          path="/wellness"
-          element={
-            <ProtectedRoute>
-              <Wellness />
-            </ProtectedRoute>
-          }
-        />
-        <Route
           path="/hormones"
           element={
             <ProtectedRoute>
@@ -75,6 +67,14 @@ function App() {
           element={
             <ProtectedRoute>
               <Exercise />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/about"
+          element={
+            <ProtectedRoute>
+              <About />
             </ProtectedRoute>
           }
         />

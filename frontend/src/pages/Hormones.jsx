@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
+import LoadingSpinner from '../components/LoadingSpinner'
 import { ArrowLeft, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getUserLanguage, getLocalizedText } from '../utils/userPreferences'
 import { useTranslation } from '../utils/translations'
@@ -113,11 +114,8 @@ const Hormones = () => {
         </div>
 
         {loadingWellness ? (
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-period-pink mx-auto mb-4"></div>
-            <p className="text-gray-600">Loading hormone data...</p>
-          </div>
-        ) : todayData ? (
+          <LoadingSpinner message="Loading hormone data..." />
+        ) : todayData && todayData !== null ? (
           <div className="space-y-6">
             {/* Mood Insights, Energy Insights, Best Work Type - Side by Side */}
             <div className="grid md:grid-cols-3 gap-6">

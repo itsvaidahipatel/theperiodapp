@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime
 import uuid
 
-from database import supabase
+from database import supabase, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
 
 router = APIRouter()
@@ -27,7 +27,13 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+@retry_supabase_call(max_retries=3, initial_delay=0.5, backoff_factor=2.0)
+def _fetch_user_from_db(user_id: str):
+    """Helper function to fetch user from database with retry logic."""
+    response = supabase.table("users").select("*").eq("id", user_id).execute()
+    return response
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Dependency to get current authenticated user."""
     token = credentials.credentials
     payload = verify_token(token)
@@ -39,8 +45,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             detail="Invalid authentication credentials"
         )
     
-    # Fetch user from database
-    response = supabase.table("users").select("*").eq("id", user_id).execute()
+    try:
+        # Fetch user from database with retry logic and async handling
+        response = await async_supabase_call(_fetch_user_from_db, user_id)
     
     if not response.data:
         raise HTTPException(
@@ -49,13 +56,28 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         )
     
     return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log the error for debugging
+        import traceback
+        print(f"Error fetching user from database: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection error. Please try again."
+        )
 
 @router.post("/register")
 async def register(request: RegisterRequest):
     """Register a new user."""
     try:
         # Check if user already exists
-        existing = supabase.table("users").select("id").eq("email", request.email).execute()
+        @retry_supabase_call(max_retries=3)
+        def _check_existing():
+            return supabase.table("users").select("id").eq("email", request.email).execute()
+        
+        existing = await async_supabase_call(_check_existing)
         
         if existing.data:
             raise HTTPException(
@@ -81,7 +103,11 @@ async def register(request: RegisterRequest):
             "interests": request.interests or []
         }
         
-        response = supabase.table("users").insert(user_data).execute()
+        @retry_supabase_call(max_retries=3)
+        def _insert_user():
+            return supabase.table("users").insert(user_data).execute()
+        
+        response = await async_supabase_call(_insert_user)
         
         if not response.data:
             raise HTTPException(
@@ -149,7 +175,11 @@ async def login(request: LoginRequest):
     try:
         # Find user by email - use password_hash column name
         # Select only columns that exist in the database
-        response = supabase.table("users").select("*").eq("email", request.email).execute()
+        @retry_supabase_call(max_retries=3)
+        def _find_user():
+            return supabase.table("users").select("*").eq("email", request.email).execute()
+        
+        response = await async_supabase_call(_find_user)
         
         if not response.data:
             raise HTTPException(

@@ -153,14 +153,25 @@ export const getPhaseMap = async (startDate, endDate) => {
     if (startDate) params.append('start_date', startDate)
     if (endDate) params.append('end_date', endDate)
     const query = params.toString() ? `?${params.toString()}` : ''
-    return await apiRequest(`/cycles/phase-map${query}`)
+    const response = await apiRequest(`/cycles/phase-map${query}`)
+    console.log('getPhaseMap raw response:', response)
+    return response
   } catch (error) {
+    console.error('getPhaseMap error:', error)
     // If no phase map exists, return empty map instead of throwing
     if (error.message && (error.message.includes('No phase') || error.message.includes('404'))) {
       return { phase_map: [] }
     }
     throw error
   }
+}
+
+// Feedback API functions
+export const submitFeedback = async (subject, message, type = "general") => {
+  return await apiRequest("/feedback/submit", {
+    method: "POST",
+    body: JSON.stringify({ subject, message, type })
+  })
 }
 
 // Wellness API functions

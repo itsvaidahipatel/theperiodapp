@@ -12,6 +12,9 @@ class ErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('Error caught by boundary:', error, errorInfo)
+    console.error('Error stack:', error?.stack)
+    console.error('Error message:', error?.message)
+    console.error('Component stack:', errorInfo?.componentStack)
   }
 
   render() {

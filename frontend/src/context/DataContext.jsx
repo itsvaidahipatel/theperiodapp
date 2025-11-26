@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { loadDashboardData, loadWellnessData, getCachedWellnessData, refreshAllData } from '../utils/dataLoader'
+import { loadDashboardData, loadWellnessData, getCachedWellnessData, refreshAllData, preloadAllWellnessData } from '../utils/dataLoader'
 import { shouldRefetch, clearCache } from '../utils/dataCache'
 import { getUserLanguage } from '../utils/userPreferences'
 
@@ -49,10 +49,24 @@ export const DataProvider = ({ children }) => {
 
         if (needsRefetch) {
           setLoadingWellness(true)
-          // Load wellness data (will cache automatically)
-          const wellness = await loadWellnessData(phaseDayId, language)
-          setWellnessData(wellness)
+          console.log(`🔄 Loading wellness data (needsRefetch=true) for phaseDayId: ${phaseDayId}`)
+          // Load wellness data with favorite category first (for immediate display)
+          const wellness = await loadWellnessData(phaseDayId, language, false)
+          console.log(`📊 Wellness data loaded:`, wellness ? {
+            hasHormones: !!wellness.hormones,
+            hasNutrition: !!wellness.nutrition,
+            nutritionRecipes: wellness.nutrition?.recipes?.length || 0,
+            hasExercises: !!wellness.exercises,
+            exerciseCount: wellness.exercises?.exercises?.length || 0
+          } : 'null')
+          setWellnessData(wellness || null)
           setLoadingWellness(false)
+          
+          // Start background preloading of all categories/cuisines (only if we have data)
+          if (wellness) {
+            console.log('🚀 Starting background preload of all wellness data...')
+            preloadAllWellnessData(phaseDayId, language)
+          }
         } else {
           // Use cached data
           const cached = getCachedWellnessData(phaseDayId)
@@ -60,12 +74,32 @@ export const DataProvider = ({ children }) => {
             console.log('Using cached wellness data')
             setWellnessData(cached)
             setLoadingWellness(false)
+            
+            // If cache doesn't have all preloaded data, preload in background
+            if (!cached.allPreloaded) {
+              console.log('🚀 Cache missing preloaded data, starting background preload...')
+              preloadAllWellnessData(phaseDayId, language)
+            }
           } else {
             // Cache miss, load fresh
             setLoadingWellness(true)
-            const wellness = await loadWellnessData(phaseDayId, language)
-            setWellnessData(wellness)
+            console.log(`🔄 Loading wellness data (cache miss) for phaseDayId: ${phaseDayId}`)
+            const wellness = await loadWellnessData(phaseDayId, language, false)
+            console.log(`📊 Wellness data loaded (cache miss):`, wellness ? {
+              hasHormones: !!wellness.hormones,
+              hasNutrition: !!wellness.nutrition,
+              nutritionRecipes: wellness.nutrition?.recipes?.length || 0,
+              hasExercises: !!wellness.exercises,
+              exerciseCount: wellness.exercises?.exercises?.length || 0
+            } : 'null')
+            setWellnessData(wellness || null)
             setLoadingWellness(false)
+            
+            // Start background preloading of all categories/cuisines (only if we have data)
+            if (wellness) {
+              console.log('🚀 Starting background preload of all wellness data...')
+              preloadAllWellnessData(phaseDayId, language)
+            }
           }
         }
       } else {

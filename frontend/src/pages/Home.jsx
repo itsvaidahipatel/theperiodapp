@@ -39,7 +39,7 @@ const Home = () => {
 
           <div className="bg-white rounded-lg p-6 shadow-lg">
             <Activity className="h-12 w-12 text-period-purple mb-4" />
-            <h3 className="text-xl font-semibold mb-2">Wellness Guidance</h3>
+            <h3 className="text-xl font-semibold mb-2">Health Insights</h3>
             <p className="text-gray-600">
               Get personalized nutrition, exercise, and hormone insights based on your cycle phase.
             </p>

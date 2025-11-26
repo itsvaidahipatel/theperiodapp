@@ -2,20 +2,154 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
+import LoadingSpinner from '../components/LoadingSpinner'
 import { ArrowLeft } from 'lucide-react'
 import { getUserLanguage, getFavoriteExercise } from '../utils/userPreferences'
 import { useTranslation } from '../utils/translations'
+import { getPreloadedExerciseData } from '../utils/dataLoader'
+import { getExerciseData } from '../utils/api'
 
 const Exercise = () => {
   const { t } = useTranslation()
   const { dashboardData, wellnessData, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
   const [selectedCategory, setSelectedCategory] = useState('')
+  const [loadingCategory, setLoadingCategory] = useState(false)
+  const [exercisesByCategory, setExercisesByCategory] = useState({})
   const navigate = useNavigate()
 
   // Extract data from context
   const currentPhase = dashboardData?.currentPhase || null
-  const allExercises = wellnessData?.exercises?.exercises || []
+  const phaseDayId = currentPhase?.phase_day_id || currentPhase?.id
+  
+  // Get exercises from wellnessData
+  // wellnessData.exercises can be:
+  // - null (no data available or empty array was normalized to null)
+  // - {exercises: [...]} (has data)
+  // - undefined (not loaded yet)
+  const defaultExercises = wellnessData?.exercises !== undefined
+    ? (wellnessData.exercises && wellnessData.exercises.exercises && Array.isArray(wellnessData.exercises.exercises) && wellnessData.exercises.exercises.length > 0
+        ? wellnessData.exercises.exercises
+        : null)  // null means tried to load but no data
+    : undefined  // undefined means not loaded yet
+  
+  // Initialize exercisesByCategory with default exercises (favorite category)
+  useEffect(() => {
+    // Only initialize if we have actual data (not null, not undefined)
+    if (defaultExercises !== undefined && defaultExercises !== null && !exercisesByCategory[selectedCategory]) {
+      if (Array.isArray(defaultExercises) && defaultExercises.length > 0) {
+        console.log(`📝 Exercise: Initializing with default exercises for ${selectedCategory}:`, defaultExercises.length, 'exercises')
+        setExercisesByCategory(prev => ({
+          ...prev,
+          [selectedCategory]: defaultExercises
+        }))
+      }
+    }
+    // If defaultExercises is null, it means wellnessData tried to load but got empty - don't mark as tried yet,
+    // let the fetch effect handle it
+  }, [defaultExercises, selectedCategory, exercisesByCategory])
+  
+  // Get exercises for selected category (from cache or API)
+  const allExercises = (() => {
+    // If we have cached exercises for this category, use them
+    if (exercisesByCategory[selectedCategory] !== undefined) {
+      return exercisesByCategory[selectedCategory]
+    }
+    // Otherwise use default exercises (favorite category) - could be array, null, or undefined
+    return defaultExercises
+  })()
+  
+  // Debug: Log what we have
+  useEffect(() => {
+    console.log('🔍 Exercise Debug:', {
+      wellnessData,
+      exercises: wellnessData?.exercises,
+      defaultExercises,
+      selectedCategory,
+      exercisesByCategory,
+      allExercises
+    })
+  }, [wellnessData, defaultExercises, selectedCategory, exercisesByCategory, allExercises])
+  
+  // Load exercises for selected category if not in cache
+  useEffect(() => {
+    if (!selectedCategory || !phaseDayId) {
+      console.log(`⏸️ Exercise: Skipping load - selectedCategory: ${selectedCategory}, phaseDayId: ${phaseDayId}`)
+      return
+    }
+    
+    // Check if we already have valid data for this category
+    const existingData = exercisesByCategory[selectedCategory]
+    if (existingData !== undefined && 
+        existingData !== null &&
+        Array.isArray(existingData) &&
+        existingData.length > 0) {
+      console.log(`⏸️ Exercise: Already have ${existingData.length} exercises for ${selectedCategory}`)
+      return
+    }
+    
+    // If we have null, it means we tried before and got no data - don't retry unless phaseDayId changed
+    // (This prevents infinite loops when there's genuinely no data)
+    if (existingData === null) {
+      console.log(`⏸️ Exercise: Already tried loading ${selectedCategory} and got no data (skipping retry)`)
+      return
+    }
+    
+    console.log(`🔄 Exercise: Loading data for category: ${selectedCategory}, phaseDayId: ${phaseDayId}`)
+    
+    // Check preloaded data first
+    const preloaded = getPreloadedExerciseData(phaseDayId, selectedCategory)
+    if (preloaded && preloaded.exercises && Array.isArray(preloaded.exercises) && preloaded.exercises.length > 0) {
+      console.log(`✅ Using preloaded exercise data for ${selectedCategory}:`, preloaded.exercises.length, 'exercises')
+      setExercisesByCategory(prev => ({
+        ...prev,
+        [selectedCategory]: preloaded.exercises
+      }))
+      return
+    } else if (preloaded && preloaded.exercises && Array.isArray(preloaded.exercises) && preloaded.exercises.length === 0) {
+      // Preloaded but empty - mark as no data
+      console.log(`⚠️ Preloaded exercise data for ${selectedCategory} is empty`)
+      setExercisesByCategory(prev => ({
+        ...prev,
+        [selectedCategory]: null
+      }))
+      return
+    }
+    
+    // If not preloaded, fetch from API
+    setLoadingCategory(true)
+    const language = getUserLanguage()
+    console.log(`🌐 Exercise: Making API call - phaseDayId: ${phaseDayId}, category: ${selectedCategory}, language: ${language}`)
+    getExerciseData(phaseDayId, language, selectedCategory)
+      .then(data => {
+        console.log(`📥 Exercise: API response received:`, data)
+        // Backend returns {exercises: [...]} or {exercises: []}
+        if (data && data.exercises && Array.isArray(data.exercises) && data.exercises.length > 0) {
+          console.log(`✅ Exercise: Got ${data.exercises.length} exercises for ${selectedCategory}`)
+          setExercisesByCategory(prev => ({
+            ...prev,
+            [selectedCategory]: data.exercises
+          }))
+        } else {
+          // Empty array or no data - mark as null (no data available)
+          console.log(`⚠️ Exercise: No exercises in response for ${selectedCategory}`)
+          setExercisesByCategory(prev => ({
+            ...prev,
+            [selectedCategory]: null
+          }))
+        }
+      })
+      .catch(err => {
+        console.error(`❌ Error loading exercises for ${selectedCategory}:`, err)
+        setExercisesByCategory(prev => ({
+          ...prev,
+          [selectedCategory]: null
+        }))
+      })
+      .finally(() => {
+        setLoadingCategory(false)
+      })
+  }, [selectedCategory, phaseDayId, exercisesByCategory, wellnessData])
 
   // Category mapping for display: database value (lowercase) -> display name
   const categoryDisplayMapping = {
@@ -41,17 +175,24 @@ const Exercise = () => {
       // Set default category to user's favorite_exercise, or default to 'mind'
       const favoriteExercise = getFavoriteExercise() || ''
       // Map favorite_exercise to database category value
+      let dbCategory = 'mind' // Default
       if (favoriteExercise) {
-        const dbCategory = favoriteExerciseToCategory[favoriteExercise] || favoriteExercise.toLowerCase()
-        setSelectedCategory(dbCategory)
-      } else {
-        // Default to 'mind' if no favorite exercise is set
-        setSelectedCategory('mind')
+        dbCategory = favoriteExerciseToCategory[favoriteExercise] || favoriteExercise.toLowerCase()
       }
+      console.log(`💪 Exercise: Setting selectedCategory to: ${dbCategory}`)
+      setSelectedCategory(dbCategory)
     } else {
       navigate('/login')
     }
   }, [navigate])
+  
+  // Force reload when phaseDayId changes - reset cache to allow fresh fetch
+  useEffect(() => {
+    if (phaseDayId && selectedCategory) {
+      console.log(`🔄 Exercise: phaseDayId changed to ${phaseDayId}, resetting cache`)
+      setExercisesByCategory({})
+    }
+  }, [phaseDayId])
 
   // Listen for language changes
   useEffect(() => {
@@ -73,14 +214,22 @@ const Exercise = () => {
 
   // Filter exercises by selected category (case-insensitive)
   // Note: selectedCategory is required (no "All Categories" option), so always filter
-  const filteredExercises = allExercises.filter(ex => {
-    // Compare case-insensitively
-    const matches = ex.category?.toLowerCase() === selectedCategory.toLowerCase()
-    return matches
-  })
+  const filteredExercises = (() => {
+    // Handle null, undefined, or non-array values
+    if (!allExercises || !Array.isArray(allExercises)) {
+      return []
+    }
+    
+    return allExercises.filter(ex => {
+      // Compare case-insensitively
+      const matches = ex.category?.toLowerCase() === selectedCategory.toLowerCase()
+      return matches
+    })
+  })()
   
   console.log('Selected category:', selectedCategory)
-  console.log('All exercises count:', allExercises.length)
+  console.log('All exercises:', allExercises)
+  console.log('All exercises count:', allExercises ? (Array.isArray(allExercises) ? allExercises.length : 'not an array') : 'null/undefined')
   console.log('Filtered exercises count:', filteredExercises.length)
 
   // Get unique energy level from filtered exercises (if all have same energy level)
@@ -120,12 +269,9 @@ const Exercise = () => {
           )}
         </div>
 
-        {loadingWellness ? (
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-period-pink mx-auto mb-4"></div>
-            <p className="text-gray-600">Loading exercise data...</p>
-          </div>
-        ) : allExercises.length > 0 ? (
+        {(loadingWellness || loadingCategory) ? (
+          <LoadingSpinner message="Loading exercise data..." />
+        ) : filteredExercises && Array.isArray(filteredExercises) && filteredExercises.length > 0 ? (
           <div className="space-y-6">
             {/* Energy Level */}
             {energyLevel && (
@@ -138,10 +284,12 @@ const Exercise = () => {
 
             {/* Category Filter */}
             <div className="mb-6">
-              <label className="block text-lg font-semibold text-gray-700 mb-3">
+              <label htmlFor="category-filter" className="block text-lg font-semibold text-gray-700 mb-3">
                 {t('exercise.filterByCategory')}
               </label>
               <select
+                id="category-filter"
+                name="category"
                 value={selectedCategory}
                 onChange={(e) => setSelectedCategory(e.target.value)}
                 className="px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
@@ -224,16 +372,6 @@ const Exercise = () => {
                   ))}
                 </div>
               </div>
-            ) : allExercises.length > 0 ? (
-              <div className="bg-white rounded-lg shadow-lg p-6 text-center">
-                <p className="text-gray-600 mb-2">No exercises available for the selected category.</p>
-                <p className="text-sm text-gray-500">
-                  Available categories: {[...new Set(allExercises.map(ex => ex.category))].join(', ')}
-                </p>
-                <p className="text-sm text-gray-500 mt-2">
-                  Selected category: {selectedCategory || 'None (showing all)'}
-                </p>
-              </div>
             ) : (
               <div className="bg-white rounded-lg shadow-lg p-6 text-center">
                 <p className="text-gray-600 mb-2">No exercise data available for this phase day.</p>
@@ -247,7 +385,7 @@ const Exercise = () => {
           <div className="text-center py-12 bg-white rounded-lg shadow-lg">
             <p className="text-gray-600 mb-4">No exercise data available for this phase day.</p>
             <p className="text-sm text-gray-500">
-              Data will be available once cycle predictions are generated.
+              Data will be available once cycle predictions are generated and exercises are added to the database.
             </p>
           </div>
         )}

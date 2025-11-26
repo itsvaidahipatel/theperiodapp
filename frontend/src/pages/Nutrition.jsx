@@ -2,22 +2,161 @@ import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
+import LoadingSpinner from '../components/LoadingSpinner'
 import { ArrowLeft } from 'lucide-react'
 import { getUserLanguage, getFavoriteCuisine } from '../utils/userPreferences'
 import { parseMarkdown, parseInlineMarkdown } from '../utils/markdown'
 import { useTranslation } from '../utils/translations'
 import { translateNutrientName, translateCuisineName } from '../utils/translateHelpers'
+import { getPreloadedNutritionData } from '../utils/dataLoader'
+import { getNutritionData } from '../utils/api'
 
 const Nutrition = () => {
   const { t } = useTranslation()
   const { dashboardData, wellnessData, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
   const [selectedCuisine, setSelectedCuisine] = useState('')
+  const [loadingCuisine, setLoadingCuisine] = useState(false)
+  const [recipesByCuisine, setRecipesByCuisine] = useState({})
   const navigate = useNavigate()
 
   // Extract data from context
   const currentPhase = dashboardData?.currentPhase || null
-  const allRecipes = wellnessData?.nutrition?.recipes || []
+  const phaseDayId = currentPhase?.phase_day_id || currentPhase?.id
+  
+  // Get recipes from wellnessData
+  // wellnessData.nutrition can be:
+  // - null (no data available or empty array was normalized to null)
+  // - {recipes: [...], wholefoods: []} (has data)
+  // - undefined (not loaded yet)
+  const defaultRecipes = wellnessData?.nutrition !== undefined
+    ? (wellnessData.nutrition && wellnessData.nutrition.recipes && Array.isArray(wellnessData.nutrition.recipes) && wellnessData.nutrition.recipes.length > 0
+        ? wellnessData.nutrition.recipes
+        : null)  // null means tried to load but no data
+    : undefined  // undefined means not loaded yet
+  
+  // Initialize recipesByCuisine with default recipes (favorite cuisine)
+  useEffect(() => {
+    // Only initialize if we have actual data (not null, not undefined)
+    if (defaultRecipes !== undefined && defaultRecipes !== null && !recipesByCuisine[selectedCuisine]) {
+      if (Array.isArray(defaultRecipes) && defaultRecipes.length > 0) {
+        console.log(`📝 Nutrition: Initializing with default recipes for ${selectedCuisine}:`, defaultRecipes.length, 'recipes')
+        setRecipesByCuisine(prev => ({
+          ...prev,
+          [selectedCuisine]: defaultRecipes
+        }))
+      }
+    }
+    // If defaultRecipes is null, it means wellnessData tried to load but got empty - don't mark as tried yet,
+    // let the fetch effect handle it
+  }, [defaultRecipes, selectedCuisine, recipesByCuisine])
+  
+  // Get recipes for selected cuisine (from cache or API)
+  const allRecipes = useMemo(() => {
+    // If we have cached recipes for this cuisine, use them
+    if (recipesByCuisine[selectedCuisine] !== undefined) {
+      return recipesByCuisine[selectedCuisine]
+    }
+    // Otherwise use default recipes (favorite cuisine) - could be array, null, or undefined
+    return defaultRecipes
+  }, [recipesByCuisine, selectedCuisine, defaultRecipes])
+  
+  // Debug: Log what we have
+  useEffect(() => {
+    console.log('🔍 Nutrition Debug:', {
+      wellnessData,
+      nutrition: wellnessData?.nutrition,
+      defaultRecipes,
+      selectedCuisine,
+      recipesByCuisine,
+      allRecipes
+    })
+  }, [wellnessData, defaultRecipes, selectedCuisine, recipesByCuisine, allRecipes])
+  
+  // Load recipes for selected cuisine if not in cache
+  useEffect(() => {
+    if (!selectedCuisine || !phaseDayId) {
+      console.log(`⏸️ Nutrition: Skipping load - selectedCuisine: ${selectedCuisine}, phaseDayId: ${phaseDayId}`)
+      return
+    }
+    
+    // Check if we already have valid data for this cuisine
+    const existingData = recipesByCuisine[selectedCuisine]
+    if (existingData !== undefined && 
+        existingData !== null &&
+        Array.isArray(existingData) &&
+        existingData.length > 0) {
+      console.log(`⏸️ Nutrition: Already have ${existingData.length} recipes for ${selectedCuisine}`)
+      return
+    }
+    
+    // If we have null, it means we tried before and got no data - don't retry unless phaseDayId changed
+    // (This prevents infinite loops when there's genuinely no data)
+    if (existingData === null) {
+      console.log(`⏸️ Nutrition: Already tried loading ${selectedCuisine} and got no data (skipping retry)`)
+      return
+    }
+    
+    console.log(`🔄 Nutrition: Loading data for cuisine: ${selectedCuisine}, phaseDayId: ${phaseDayId}`)
+    
+    // Check preloaded data first
+    const preloaded = getPreloadedNutritionData(phaseDayId, selectedCuisine)
+    if (preloaded && preloaded.recipes && Array.isArray(preloaded.recipes) && preloaded.recipes.length > 0) {
+      console.log(`✅ Using preloaded nutrition data for ${selectedCuisine}:`, preloaded.recipes.length, 'recipes')
+      setRecipesByCuisine(prev => ({
+        ...prev,
+        [selectedCuisine]: preloaded.recipes
+      }))
+      return
+    } else if (preloaded && preloaded.recipes && Array.isArray(preloaded.recipes) && preloaded.recipes.length === 0) {
+      // Preloaded but empty - mark as no data
+      console.log(`⚠️ Preloaded nutrition data for ${selectedCuisine} is empty`)
+      setRecipesByCuisine(prev => ({
+        ...prev,
+        [selectedCuisine]: null
+      }))
+      return
+    }
+    
+    // If not preloaded, fetch from API
+    setLoadingCuisine(true)
+    const language = getUserLanguage()
+    // Normalize cuisine name to standard values (handles legacy values)
+    const normalizedCuisine = selectedCuisine.toLowerCase()
+    const apiCuisine = (normalizedCuisine === 'gujarati' || normalizedCuisine.includes('gujarati') || normalizedCuisine.includes('kathiya'))
+      ? 'gujarati'
+      : selectedCuisine
+    console.log(`🌐 Nutrition: Making API call - phaseDayId: ${phaseDayId}, cuisine: ${selectedCuisine} -> ${apiCuisine}, language: ${language}`)
+    getNutritionData(phaseDayId, language, apiCuisine)
+      .then(data => {
+        console.log(`📥 Nutrition: API response received:`, data)
+        // Backend returns {recipes: [...]} or {recipes: []}
+        if (data && data.recipes && Array.isArray(data.recipes) && data.recipes.length > 0) {
+          console.log(`✅ Nutrition: Got ${data.recipes.length} recipes for ${selectedCuisine}`)
+          setRecipesByCuisine(prev => ({
+            ...prev,
+            [selectedCuisine]: data.recipes
+          }))
+        } else {
+          // Empty array or no data - mark as null (no data available)
+          console.log(`⚠️ Nutrition: No recipes in response for ${selectedCuisine}`)
+          setRecipesByCuisine(prev => ({
+            ...prev,
+            [selectedCuisine]: null
+          }))
+        }
+      })
+      .catch(err => {
+        console.error(`❌ Error loading nutrition for ${selectedCuisine}:`, err)
+        setRecipesByCuisine(prev => ({
+          ...prev,
+          [selectedCuisine]: null
+        }))
+      })
+      .finally(() => {
+        setLoadingCuisine(false)
+      })
+  }, [selectedCuisine, phaseDayId, recipesByCuisine, wellnessData])
   
   // Debug logging
   useEffect(() => {
@@ -28,8 +167,21 @@ const Nutrition = () => {
   
   // Filter recipes by selected cuisine on the frontend
   const filteredRecipes = useMemo(() => {
+    // Handle different data types: array, null, or undefined
+    if (allRecipes === null || allRecipes === undefined) {
+      return null
+    }
+    
+    if (!Array.isArray(allRecipes)) {
+      console.warn('allRecipes is not an array:', allRecipes)
+      return null
+    }
+    
+    if (allRecipes.length === 0) {
+      return null
+    }
+    
     if (!selectedCuisine || selectedCuisine === 'all') {
-      console.log('No cuisine filter, returning all recipes:', allRecipes.length)
       return allRecipes
     }
     
@@ -38,19 +190,14 @@ const Nutrition = () => {
     
     const filtered = allRecipes.filter(recipe => {
       const recipeCuisine = recipe.cuisine?.toLowerCase()
-      const matches = recipeCuisine === dbCuisine.toLowerCase()
-      if (!matches) {
-        console.log(`Recipe ${recipe.recipe_name} cuisine "${recipeCuisine}" doesn't match "${dbCuisine}"`)
-      }
-      return matches
+      return recipeCuisine === dbCuisine.toLowerCase()
     })
     
-    console.log(`Filtered ${filtered.length} recipes for cuisine "${dbCuisine}" from ${allRecipes.length} total recipes`)
-    return filtered
+    return filtered.length > 0 ? filtered : null
   }, [allRecipes, selectedCuisine])
   
   // Create nutritionData object with filtered recipes
-  const nutritionData = filteredRecipes.length > 0 ? { recipes: filteredRecipes } : null
+  const nutritionData = filteredRecipes && filteredRecipes.length > 0 ? { recipes: filteredRecipes } : null
 
   useEffect(() => {
     const userData = localStorage.getItem('user')
@@ -59,11 +206,20 @@ const Nutrition = () => {
       setUser(parsedUser)
       // Use favorite cuisine from user preferences
       const favoriteCuisine = getFavoriteCuisine() || 'international'
+      console.log(`🍽️ Nutrition: Setting selectedCuisine to: ${favoriteCuisine}`)
       setSelectedCuisine(favoriteCuisine)
     } else {
       navigate('/login')
     }
   }, [navigate])
+  
+  // Force reload when phaseDayId changes - reset cache to allow fresh fetch
+  useEffect(() => {
+    if (phaseDayId && selectedCuisine) {
+      console.log(`🔄 Nutrition: phaseDayId changed to ${phaseDayId}, resetting cache`)
+      setRecipesByCuisine({})
+    }
+  }, [phaseDayId])
 
   // Listen for language changes
   useEffect(() => {
@@ -142,10 +298,12 @@ const Nutrition = () => {
 
         {/* Cuisine Filter */}
         <div className="mb-6">
-          <label className="block text-lg font-semibold text-gray-700 mb-3">
+          <label htmlFor="cuisine-filter" className="block text-lg font-semibold text-gray-700 mb-3">
             {t('nutrition.filterByCuisine')}
           </label>
           <select
+            id="cuisine-filter"
+            name="cuisine"
             value={selectedCuisine}
             onChange={(e) => setSelectedCuisine(e.target.value)}
             className="px-4 py-3 text-base border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
@@ -157,12 +315,9 @@ const Nutrition = () => {
           </select>
         </div>
 
-        {loadingWellness ? (
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-period-pink mx-auto mb-4"></div>
-            <p className="text-gray-600">Loading nutrition data...</p>
-          </div>
-        ) : filteredRecipes && filteredRecipes.length > 0 ? (
+        {(loadingWellness || loadingCuisine) ? (
+          <LoadingSpinner message="Loading nutrition data..." />
+        ) : filteredRecipes && Array.isArray(filteredRecipes) && filteredRecipes.length > 0 ? (
           <div className="space-y-6">
             {/* Recipes */}
             <div className="bg-white rounded-lg shadow-lg p-6">
@@ -226,16 +381,11 @@ const Nutrition = () => {
                 </div>
               </div>
           </div>
-        ) : allRecipes.length > 0 ? (
-          <div className="bg-white rounded-lg shadow-lg p-6 text-center">
-            <p className="text-gray-600">No recipes available for the selected cuisine.</p>
-            <p className="text-sm text-gray-500 mt-2">Try selecting a different cuisine.</p>
-          </div>
         ) : (
           <div className="text-center py-12 bg-white rounded-lg shadow-lg">
             <p className="text-gray-600 mb-4">No nutrition data available for this phase day.</p>
             <p className="text-sm text-gray-500">
-              Data will be available once cycle predictions are generated.
+              Data will be available once cycle predictions are generated and nutrition data is added to the database.
             </p>
           </div>
         )}

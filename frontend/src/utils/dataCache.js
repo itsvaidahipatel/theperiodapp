@@ -9,7 +9,8 @@ const CACHE_DATE_KEY = 'period_gpt_cache_date'
 const CACHE_EXPIRY_HOURS = 24 // Cache expires after 24 hours
 
 /**
- * Generate cache key for today's data
+ * Generate cache key for a specific date's data
+ * Cache is date-specific - only valid for the date it was cached
  */
 const getCacheKey = (date, phaseDayId, language) => {
   return `${CACHE_PREFIX}${date}_${phaseDayId}_${language}`
@@ -43,19 +44,20 @@ const isCacheValid = (cachedDate) => {
 }
 
 /**
- * Get cached data
+ * Get cached data for a specific date
+ * Cache is date-specific - only returns data for the requested date
  */
-export const getCachedData = (phaseDayId, language) => {
+export const getCachedData = (phaseDayId, language, date = null) => {
   try {
-    const today = getTodayDate()
+    const targetDate = date || getTodayDate()
     const cachedDate = localStorage.getItem(CACHE_DATE_KEY)
     
-    // Check if cache is for today and valid
-    if (!isCacheValid(cachedDate)) {
+    // Check if cache is for the target date and valid
+    if (cachedDate !== targetDate || !isCacheValid(cachedDate)) {
       return null
     }
     
-    const cacheKey = getCacheKey(today, phaseDayId, language)
+    const cacheKey = getCacheKey(targetDate, phaseDayId, language)
     const cached = localStorage.getItem(cacheKey)
     
     if (cached) {
@@ -70,18 +72,25 @@ export const getCachedData = (phaseDayId, language) => {
 }
 
 /**
- * Save data to cache
+ * Save data to cache for a specific date
+ * Cache is date-specific - only valid for the date it was saved
  */
-export const setCachedData = (phaseDayId, language, data) => {
+export const setCachedData = (phaseDayId, language, data, date = null) => {
   try {
-    const today = getTodayDate()
-    const cacheKey = getCacheKey(today, phaseDayId, language)
+    const targetDate = date || getTodayDate()
+    const cacheKey = getCacheKey(targetDate, phaseDayId, language)
     
-    localStorage.setItem(CACHE_DATE_KEY, today)
+    // Only cache if we have actual data (not null or empty structures)
+    if (!data || (data.hormones === null && data.nutrition === null && data.exercises === null)) {
+      console.log('Skipping cache - no data to cache')
+      return
+    }
+    
+    localStorage.setItem(CACHE_DATE_KEY, targetDate)
     localStorage.setItem(cacheKey, JSON.stringify(data))
     localStorage.setItem(`${CACHE_PREFIX}timestamp`, Date.now().toString())
     
-    console.log('Data cached successfully:', cacheKey)
+    console.log('Data cached successfully for date:', targetDate, cacheKey)
   } catch (error) {
     console.error('Error saving cache:', error)
     // If storage is full, try to clear old cache
