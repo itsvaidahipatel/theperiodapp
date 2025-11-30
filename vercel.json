@@ -1,7 +1,3 @@
 {
-  "projects": [],
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
   "rootDirectory": "frontend"
 }
-

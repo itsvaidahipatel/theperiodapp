@@ -233,3 +233,7 @@ If you encounter issues:
 3. Check CORS configuration matches your frontend URL
 4. Ensure database is accessible from Railway
 
+
+
+
+
