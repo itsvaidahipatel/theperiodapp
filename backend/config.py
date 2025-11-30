@@ -1,19 +1,29 @@
+from pydantic_settings import BaseSettings
 import os
 from dotenv import load_dotenv
 
+# Load .env for local development (Railway uses actual env vars)
 load_dotenv()
 
-class Settings:
-    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
-    # Support both SUPABASE_KEY and SUPABASE_ANON_KEY for flexibility
-    SUPABASE_KEY: str = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY", "")
-    SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    RAPIDAPI_KEY: str = os.getenv("RAPIDAPI_KEY", "")
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
-    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+class Settings(BaseSettings):
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+    RAPIDAPI_KEY: str = ""
+    JWT_SECRET_KEY: str = "your-secret-key-change-in-production"
+    JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_DAYS: int = 7
     RAPIDAPI_BASE_URL: str = "https://womens-health-menstrual-cycle-phase-predictions-insights.p.rapidapi.com"
+    
+    class Config:
+        env_file = ".env"  # Safe for local development
+        extra = "ignore"
 
+# Create settings instance
 settings = Settings()
+
+# Support SUPABASE_ANON_KEY as fallback for SUPABASE_KEY (for backward compatibility)
+if not settings.SUPABASE_KEY:
+    settings.SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "")
 
