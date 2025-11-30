@@ -49,13 +49,13 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         # Fetch user from database with retry logic and async handling
         response = await async_supabase_call(_fetch_user_from_db, user_id)
     
-    if not response.data:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
-        )
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found"
+            )
     
-    return response.data[0]
+        return response.data[0]
     except HTTPException:
         raise
     except Exception as e:
