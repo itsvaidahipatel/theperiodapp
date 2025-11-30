@@ -9,5 +9,6 @@ requests==2.32.3
 python-multipart==0.0.12
 pydantic==2.9.2
 pydantic-settings==2.5.2
+email-validator>=2.0.0
 dateutils==0.6.12
 
