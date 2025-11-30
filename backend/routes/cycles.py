@@ -264,15 +264,15 @@ async def get_phase_map(
                 else:
                     # Fall back to synthetic cycles (generate more cycles for better accuracy)
                     print(f"📊 Using synthetic cycles (only {len(period_logs)} period logs available)")
-                last_period_dt = datetime.strptime(last_period_date_str, "%Y-%m-%d")
-                cycle_length_int = int(cycle_length) if cycle_length else 28
+                    last_period_dt = datetime.strptime(last_period_date_str, "%Y-%m-%d")
+                    cycle_length_int = int(cycle_length) if cycle_length else 28
                     # Generate 12 cycles going backwards (RapidAPI typically needs 6-12 cycles)
                     for i in range(12):
-                    cycle_date = last_period_dt - timedelta(days=cycle_length_int * i)
-                    past_cycle_data.append({
-                        "cycle_start_date": cycle_date.strftime("%Y-%m-%d"),
-                        "period_length": 5
-                    })
+                        cycle_date = last_period_dt - timedelta(days=cycle_length_int * i)
+                        past_cycle_data.append({
+                            "cycle_start_date": cycle_date.strftime("%Y-%m-%d"),
+                            "period_length": 5
+                        })
                 
                 # Ensure we have at least 6 cycles (RapidAPI minimum requirement)
                 if len(past_cycle_data) < 6:
