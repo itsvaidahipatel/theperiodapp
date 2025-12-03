@@ -29,6 +29,22 @@ const apiRequest = async (endpoint, options = {}) => {
     } catch {
       errorData = { detail: `HTTP ${response.status}: ${response.statusText}` }
     }
+    
+    // Handle authentication errors (401/403) - clear invalid token
+    if (response.status === 401 || response.status === 403) {
+      // Clear invalid token
+      localStorage.removeItem('access_token')
+      localStorage.removeItem('user')
+      
+      // Only redirect if not already on login/register page
+      if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
+        // Redirect to login after a short delay to allow error to be logged
+        setTimeout(() => {
+          window.location.href = '/login'
+        }, 100)
+      }
+    }
+    
     const error = new Error(errorData.detail || errorData.message || 'Request failed')
     error.response = { data: errorData, status: response.status }
     throw error

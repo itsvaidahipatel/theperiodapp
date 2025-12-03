@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str = ""
     GEMINI_API_KEY: str = ""
     RAPIDAPI_KEY: str = ""
-    JWT_SECRET_KEY: str = "your-secret-key-change-in-production"
-    JWT_ALGORITHM: str = "HS256"
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_EXPIRATION_DAYS: int = 7
     RAPIDAPI_BASE_URL: str = "https://womens-health-menstrual-cycle-phase-predictions-insights.p.rapidapi.com"
     

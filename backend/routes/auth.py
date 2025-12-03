@@ -220,9 +220,17 @@ async def login(request: LoginRequest):
         import traceback
         error_details = traceback.format_exc()
         print(f"Login error: {error_details}")  # Log to console for debugging
+        
+        # Provide more specific error messages
+        error_message = str(e)
+        if "JWT_SECRET_KEY" in error_message or "secret" in error_message.lower():
+            error_message = "Server configuration error: JWT_SECRET_KEY not properly configured"
+        elif "connection" in error_message.lower() or "database" in error_message.lower():
+            error_message = "Database connection error. Please try again."
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Login failed: {str(e)}"
+            detail=f"Login failed: {error_message}"
         )
 
 @router.get("/me")
