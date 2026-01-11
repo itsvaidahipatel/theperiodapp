@@ -151,62 +151,9 @@ const About = () => {
               </div>
             </div>
 
-            {/* Other 3 Team Members - Below in Grid */}
-            <div className="grid md:grid-cols-3 gap-6">
-              {/* Friend 1 - Placeholder */}
-              <div className="bg-period-purple bg-opacity-10 rounded-lg p-6 border-2 border-period-purple">
-                <div className="flex flex-col items-center text-center">
-                  <div className="w-32 h-32 rounded-full mb-4 overflow-hidden border-4 border-period-purple bg-period-purple flex items-center justify-center">
-                    {t('about.contributor1Photo') ? (
-                      <img 
-                        src={t('about.contributor1Photo')} 
-                        alt={t('about.contributor1Name')}
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          e.target.style.display = 'none'
-                          e.target.nextSibling.style.display = 'flex'
-                        }}
-                      />
-                    ) : null}
-                    <div className={`w-full h-full ${t('about.contributor1Photo') ? 'hidden' : 'flex'} items-center justify-center text-white text-4xl font-bold`}>
-                      {t('about.contributor1Initials') || '?'}
-                    </div>
-                  </div>
-                  <h3 className="text-xl font-bold text-period-purple mb-2">{t('about.contributor1')}</h3>
-                  <p className="text-gray-800 font-semibold mb-1">{t('about.contributor1Name')}</p>
-                  <p className="text-gray-600 text-sm mb-2">{t('about.contributor1Occupation')}</p>
-                  <p className="text-gray-500 text-xs">{t('about.contributor1Place')}</p>
-                </div>
-              </div>
-
-              {/* Friend 2 - Placeholder */}
-              <div className="bg-period-lavender bg-opacity-10 rounded-lg p-6 border-2 border-period-lavender">
-                <div className="flex flex-col items-center text-center">
-                  <div className="w-32 h-32 rounded-full mb-4 overflow-hidden border-4 border-period-lavender bg-period-lavender flex items-center justify-center">
-                    {t('about.contributor2Photo') ? (
-                      <img 
-                        src={t('about.contributor2Photo')} 
-                        alt={t('about.contributor2Name')}
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          e.target.style.display = 'none'
-                          e.target.nextSibling.style.display = 'flex'
-                        }}
-                      />
-                    ) : null}
-                    <div className={`w-full h-full ${t('about.contributor2Photo') ? 'hidden' : 'flex'} items-center justify-center text-white text-4xl font-bold`}>
-                      {t('about.contributor2Initials') || '?'}
-                    </div>
-                  </div>
-                  <h3 className="text-xl font-bold text-period-lavender mb-2">{t('about.contributor2')}</h3>
-                  <p className="text-gray-800 font-semibold mb-1">{t('about.contributor2Name')}</p>
-                  <p className="text-gray-600 text-sm mb-2">{t('about.contributor2Occupation')}</p>
-                  <p className="text-gray-500 text-xs">{t('about.contributor2Place')}</p>
-                </div>
-              </div>
-
-              {/* Medical Support */}
-              <div className="bg-teal-50 rounded-lg p-6 border-2 border-teal-300">
+            {/* Medical Support */}
+            <div className="flex justify-center">
+              <div className="bg-teal-50 rounded-lg p-6 border-2 border-teal-300 max-w-md">
                 <div className="flex flex-col items-center text-center">
                   <div className="w-32 h-32 rounded-full mb-4 overflow-hidden border-4 border-teal-500 bg-teal-500 flex items-center justify-center">
                     {t('about.doctorPhoto') ? (

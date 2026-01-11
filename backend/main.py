@@ -15,7 +15,8 @@ app = FastAPI(title="Period GPT2 API", version="1.0.0")
 
 # CORS Configuration
 cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
-# Split by comma and strip whitespace
+# Remove all newlines and carriage returns, then split by comma and strip whitespace
+cors_origins_str = cors_origins_str.replace("\n", "").replace("\r", "")
 origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
 
 app.add_middleware(
