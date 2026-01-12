@@ -74,7 +74,7 @@ const translations = {
     'nutrition.serves': 'Serves',
     'nutrition.ingredients': 'Ingredients',
     'nutrition.steps': 'Steps',
-    'nutrition.nutrients': 'Nutrients',
+    'nutrition.nutrients': 'Nutrients you will get with this recipe:',
     'nutrition.noRecipes': 'No recipes available for this phase.',
     
     // Exercise page
@@ -327,7 +327,7 @@ const translations = {
     'nutrition.serves': 'सर्विंग्स',
     'nutrition.ingredients': 'सामग्री',
     'nutrition.steps': 'चरण',
-    'nutrition.nutrients': 'पोषक तत्व',
+    'nutrition.nutrients': 'इस व्यंजन से आपको मिलने वाले पोषक तत्व:',
     'nutrition.noRecipes': 'इस चरण के लिए कोई व्यंजन उपलब्ध नहीं है।',
     
     // Exercise page
@@ -580,7 +580,7 @@ const translations = {
     'nutrition.serves': 'સર્વિંગ્સ',
     'nutrition.ingredients': 'ઘટકો',
     'nutrition.steps': 'પગલાઓ',
-    'nutrition.nutrients': 'પોષક તત્વો',
+    'nutrition.nutrients': 'આ વ્યંજનમાંથી તમે મેળવશો તે પોષક તત્વો:',
     'nutrition.noRecipes': 'આ તબક્કા માટે કોઈ વ્યંજનો ઉપલબ્ધ નથી.',
     
     // Exercise page

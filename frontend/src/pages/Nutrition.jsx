@@ -362,7 +362,7 @@ const Nutrition = () => {
 
                       {recipe.nutrients && typeof recipe.nutrients === 'object' && (
                         <div className="mt-4 p-3 bg-gray-50 rounded-lg">
-                          <p className="font-semibold mb-2">{t('nutrition.nutrients')}:</p>
+                          <p className="font-semibold mb-2">{t('nutrition.nutrients')}</p>
                           <div className="flex gap-3 text-sm overflow-x-auto">
                             {Object.entries(recipe.nutrients).map(([key, value]) => {
                               const translatedNutrientName = translateNutrientName(key)
