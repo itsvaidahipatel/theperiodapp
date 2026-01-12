@@ -1,4 +1,4 @@
--- Period GPT2 Database Schema
+-- PeriodCycle.AI Database Schema
 -- Run this in your Supabase SQL editor
 
 -- Enable UUID extension

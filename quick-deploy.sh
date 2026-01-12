@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🚀 Period GPT2 - Quick Deployment Helper"
+echo "🚀 PeriodCycle.AI - Quick Deployment Helper"
 echo "========================================"
 echo ""
 echo "This script helps you prepare for deployment."

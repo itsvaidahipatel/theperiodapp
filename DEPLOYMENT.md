@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide explains how to deploy the Period GPT2 application to Vercel (frontend) and Railway (backend).
+This guide explains how to deploy the PeriodCycle.AI application to Vercel (frontend) and Railway (backend).
 
 ## Prerequisites
 
@@ -232,6 +232,10 @@ If you encounter issues:
 2. Verify all environment variables are set
 3. Check CORS configuration matches your frontend URL
 4. Ensure database is accessible from Railway
+
+
+
+
 
 
 

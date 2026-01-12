@@ -11,13 +11,10 @@ from routes import auth, user, periods, ai_chat, cycles, wellness, feedback
 
 load_dotenv()
 
-app = FastAPI(title="Period GPT2 API", version="1.0.0")
+app = FastAPI(title="PeriodCycle.AI API", version="1.0.0")
 
 # CORS Configuration
-cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
-# Remove all newlines and carriage returns, then split by comma and strip whitespace
-cors_origins_str = cors_origins_str.replace("\n", "").replace("\r", "")
-origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,7 +39,7 @@ app.include_router(feedback.router, prefix="/feedback", tags=["Feedback"])
 
 @app.get("/")
 async def root():
-    return {"message": "Period GPT2 API", "status": "running"}
+    return {"message": "PeriodCycle.AI API", "status": "running"}
 
 @app.get("/health")
 async def health_check():

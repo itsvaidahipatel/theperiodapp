@@ -49,3 +49,5 @@ Don't forget to set in Vercel Dashboard → Settings → Environment Variables:
 - **Key**: `VITE_API_BASE_URL`
 - **Value**: Your Railway backend URL (e.g., `https://your-app.up.railway.app`)
 
+
+

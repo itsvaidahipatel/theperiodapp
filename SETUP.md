@@ -1,4 +1,4 @@
-# Period GPT2 - Setup Guide
+# PeriodCycle.AI - Setup Guide
 
 ## Prerequisites
 

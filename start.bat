@@ -1,6 +1,6 @@
 @echo off
 echo ========================================
-echo   Starting Period GPT2 Application
+echo   Starting PeriodCycle.AI Application
 echo ========================================
 
 REM Check if backend virtual environment exists

@@ -145,3 +145,5 @@ CORS_ORIGINS=https://theperiodapp.vercel.app,http://localhost:5173
 - ✅ Users are redirected to login when tokens expire
 - ✅ Better error messages for debugging
 
+
+

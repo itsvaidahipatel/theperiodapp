@@ -58,3 +58,7 @@ openssl rand -hex 32
 3. Go to your API subscriptions
 4. Copy your API key → `RAPIDAPI_KEY`
 
+
+
+
+

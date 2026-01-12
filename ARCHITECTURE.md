@@ -1,4 +1,4 @@
-# Period GPT2 - Architecture Overview
+# PeriodCycle.AI - Architecture Overview
 
 ## Project Structure
 

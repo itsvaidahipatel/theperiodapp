@@ -1,8 +1,8 @@
-# Period GPT2 - Complete Application Summary
+# PeriodCycle.AI - Complete Application Summary
 
 ## 📱 Application Overview
 
-**Period GPT2** is a comprehensive, AI-powered menstrual cycle tracking application that provides personalized health insights, cycle predictions, and wellness recommendations. The app combines advanced machine learning algorithms with user-friendly design to help users understand and manage their menstrual health.
+**PeriodCycle.AI** is a comprehensive, AI-powered menstrual cycle tracking application that provides personalized health insights, cycle predictions, and wellness recommendations. The app combines advanced machine learning algorithms with user-friendly design to help users understand and manage their menstrual health.
 
 ---
 
@@ -463,4 +463,8 @@ frontend/src/
 ---
 
 This application represents a sophisticated blend of **medical science**, **machine learning**, and **user experience design** to provide accurate, personalized menstrual health tracking and guidance.
+
+
+
+
 

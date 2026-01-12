@@ -1,5 +1,5 @@
 /**
- * Data caching utility for Period GPT2
+ * Data caching utility for PeriodCycle.AI
  * Caches dashboard, hormones, nutrition, and exercises data
  * Cache key: {date}_{phase_day_id}_{language}
  */

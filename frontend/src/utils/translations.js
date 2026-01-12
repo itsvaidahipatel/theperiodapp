@@ -9,7 +9,7 @@ import { getUserLanguage } from './userPreferences'
 const translations = {
   en: {
     // Navigation
-    'nav.periodGPT': 'Period GPT',
+    'nav.periodGPT': 'PeriodCycle.AI',
     'nav.profile': 'Profile',
     'nav.logout': 'Logout',
     'nav.backToDashboard': 'Back to Dashboard',
@@ -203,8 +203,8 @@ const translations = {
     
     // About page
     'about.title': 'About the App',
-    'about.whatIs': 'What is Period GPT?',
-    'about.description': 'Period GPT is a comprehensive menstrual cycle tracking application designed to help you understand and manage your menstrual health. Our app provides personalized insights, cycle predictions, and health recommendations based on your unique cycle patterns.',
+    'about.whatIs': 'What is PeriodCycle.AI?',
+    'about.description': 'PeriodCycle.AI is a comprehensive menstrual cycle tracking application designed to help you understand and manage your menstrual health. Our app provides personalized insights, cycle predictions, and health recommendations based on your unique cycle patterns.',
     'about.features': 'Key Features',
     'about.feature1': 'Intelligent cycle tracking with phase predictions',
     'about.feature2': 'Personalized hormone level insights',
@@ -241,7 +241,7 @@ const translations = {
     'about.doctorName': 'Dr. Mexa Patel',
     'about.doctorOccupation': 'Medical Advisor',
     'about.doctorPlace': 'Details coming soon',
-    'about.footer': 'Thank you for using Period GPT. We are committed to providing you with the best menstrual health tracking experience.',
+    'about.footer': 'Thank you for using PeriodCycle.AI. We are committed to providing you with the best menstrual health tracking experience.',
     'about.feedback': 'We\'d Love to Hear From You!',
     'about.feedbackDesc': 'Have a question, suggestion, or feedback? We\'re here to help!',
     'about.feedbackSubject': 'Subject',
@@ -262,7 +262,7 @@ const translations = {
   
   hi: {
     // Navigation
-    'nav.periodGPT': 'पीरियड GPT',
+    'nav.periodGPT': 'PeriodCycle.AI',
     'nav.profile': 'प्रोफ़ाइल',
     'nav.logout': 'लॉग आउट',
     'nav.backToDashboard': 'डैशबोर्ड पर वापस जाएं',
@@ -456,8 +456,8 @@ const translations = {
     
     // About page
     'about.title': 'ऐप के बारे में',
-    'about.whatIs': 'Period GPT क्या है?',
-    'about.description': 'Period GPT एक व्यापक मासिक धर्म चक्र ट्रैकिंग एप्लिकेशन है जो आपको अपने मासिक धर्म स्वास्थ्य को समझने और प्रबंधित करने में मदद करने के लिए डिज़ाइन किया गया है। हमारा ऐप आपके अद्वितीय चक्र पैटर्न के आधार पर व्यक्तिगत अंतर्दृष्टि, चक्र भविष्यवाणियां और स्वास्थ्य सिफारिशें प्रदान करता है।',
+    'about.whatIs': 'PeriodCycle.AI क्या है?',
+    'about.description': 'PeriodCycle.AI एक व्यापक मासिक धर्म चक्र ट्रैकिंग एप्लिकेशन है जो आपको अपने मासिक धर्म स्वास्थ्य को समझने और प्रबंधित करने में मदद करने के लिए डिज़ाइन किया गया है। हमारा ऐप आपके अद्वितीय चक्र पैटर्न के आधार पर व्यक्तिगत अंतर्दृष्टि, चक्र भविष्यवाणियां और स्वास्थ्य सिफारिशें प्रदान करता है।',
     'about.features': 'मुख्य विशेषताएं',
     'about.feature1': 'चरण भविष्यवाणियों के साथ बुद्धिमान चक्र ट्रैकिंग',
     'about.feature2': 'व्यक्तिगत हार्मोन स्तर अंतर्दृष्टि',
@@ -494,7 +494,7 @@ const translations = {
     'about.doctorName': 'डॉ. Mexa Patel',
     'about.doctorOccupation': 'चिकित्सा सलाहकार',
     'about.doctorPlace': 'विवरण जल्द ही आ रहा है',
-    'about.footer': 'Period GPT का उपयोग करने के लिए धन्यवाद। हम आपको सर्वोत्तम मासिक धर्म स्वास्थ्य ट्रैकिंग अनुभव प्रदान करने के लिए प्रतिबद्ध हैं।',
+    'about.footer': 'PeriodCycle.AI का उपयोग करने के लिए धन्यवाद। हम आपको सर्वोत्तम मासिक धर्म स्वास्थ्य ट्रैकिंग अनुभव प्रदान करने के लिए प्रतिबद्ध हैं।',
     'about.feedback': 'हम आपसे सुनना पसंद करेंगे!',
     'about.feedbackDesc': 'कोई प्रश्न, सुझाव या प्रतिक्रिया है? हम मदद के लिए यहाँ हैं!',
     'about.feedbackSubject': 'विषय',
@@ -515,7 +515,7 @@ const translations = {
   
   gu: {
     // Navigation
-    'nav.periodGPT': 'પીરિયડ GPT',
+    'nav.periodGPT': 'PeriodCycle.AI',
     'nav.profile': 'પ્રોફાઇલ',
     'nav.logout': 'લૉગ આઉટ',
     'nav.backToDashboard': 'ડેશબોર્ડ પર પાછા જાઓ',
@@ -709,8 +709,8 @@ const translations = {
     
     // About page
     'about.title': 'એપ્લિકેશન વિશે',
-    'about.whatIs': 'Period GPT શું છે?',
-    'about.description': 'Period GPT એ એક વ્યાપક માસિક ચક્ર ટ્રેકિંગ એપ્લિકેશન છે જે તમારા માસિક ચક્ર સ્વાસ્થ્યને સમજવામાં અને સંચાલિત કરવામાં મદદ કરવા માટે ડિઝાઇન કરવામાં આવ્યું છે. અમારી એપ્લિકેશન તમારા અનન્ય ચક્ર પેટર્નના આધારે વ્યક્તિગત અંતર્દૃષ્ટિ, ચક્ર આગાહીઓ અને આરોગ્ય ભલામણો પ્રદાન કરે છે.',
+    'about.whatIs': 'PeriodCycle.AI શું છે?',
+    'about.description': 'PeriodCycle.AI એ એક વ્યાપક માસિક ચક્ર ટ્રેકિંગ એપ્લિકેશન છે જે તમારા માસિક ચક્ર સ્વાસ્થ્યને સમજવામાં અને સંચાલિત કરવામાં મદદ કરવા માટે ડિઝાઇન કરવામાં આવ્યું છે. અમારી એપ્લિકેશન તમારા અનન્ય ચક્ર પેટર્નના આધારે વ્યક્તિગત અંતર્દૃષ્ટિ, ચક્ર આગાહીઓ અને આરોગ્ય ભલામણો પ્રદાન કરે છે.',
     'about.features': 'મુખ્ય વિશેષતાઓ',
     'about.feature1': 'ચબક્કા આગાહીઓ સાથે બુદ્ધિશાળી ચક્ર ટ્રેકિંગ',
     'about.feature2': 'વ્યક્તિગત હોર્મોન સ્તર અંતર્દૃષ્ટિ',
@@ -747,7 +747,7 @@ const translations = {
     'about.doctorName': 'ડૉ. Mexa Patel',
     'about.doctorOccupation': 'તબીબી સલાહકાર',
     'about.doctorPlace': 'વિગતો ટૂંક સમયમાં આવશે',
-    'about.footer': 'Period GPT નો ઉપયોગ કરવા બદલ આભાર. અમે તમને શ્રેષ્ઠ માસિક સ્વાસ્થ્ય ટ્રેકિંગ અનુભવ પ્રદાન કરવા માટે પ્રતિબદ્ધ છીએ.',
+    'about.footer': 'PeriodCycle.AI નો ઉપયોગ કરવા બદલ આભાર. અમે તમને શ્રેષ્ઠ માસિક સ્વાસ્થ્ય ટ્રેકિંગ અનુભવ પ્રદાન કરવા માટે પ્રતિબદ્ધ છીએ.',
     'about.feedback': 'અમે તમારાથી સાંભળવા માગીએ છીએ!',
     'about.feedbackDesc': 'કોઈ પ્રશ્ન, સૂચના અથવા પ્રતિસાદ છે? અમે મદદ માટે અહીં છીએ!',
     'about.feedbackSubject': 'વિષય',

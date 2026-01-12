@@ -1,4 +1,4 @@
-# Period GPT2 - Menstrual Cycle Tracking Application
+# PeriodCycle.AI - Menstrual Cycle Tracking Application
 
 A comprehensive menstrual cycle tracking application with AI-powered health recommendations, cycle predictions, and personalized wellness guidance.
 
