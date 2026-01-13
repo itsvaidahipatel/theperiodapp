@@ -2,7 +2,7 @@ import { useTranslation } from '../utils/translations'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import { ArrowLeft, Send } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { submitFeedback } from '../utils/api'
 
 const About = () => {
@@ -15,6 +15,11 @@ const About = () => {
   })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitStatus, setSubmitStatus] = useState(null) // 'success' or 'error'
+  
+  // Scroll to top when component mounts
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [])
   
   const handleFeedbackChange = (e) => {
     const { name, value } = e.target
@@ -123,39 +128,38 @@ const About = () => {
           <div>
             <h2 className="text-2xl font-bold text-gray-800 mb-6">{t('about.team')}</h2>
             
-            {/* Main Creator - Big Format */}
-            <div className="mb-8 bg-gradient-to-br from-period-pink/20 to-period-pink/5 rounded-xl p-8 border-4 border-period-pink shadow-lg">
-              <div className="flex flex-col md:flex-row items-center md:items-start gap-6">
-                <div className="w-48 h-48 rounded-full overflow-hidden border-4 border-period-pink bg-period-pink flex items-center justify-center flex-shrink-0 shadow-lg">
-                  {t('about.creatorPhoto') ? (
-                    <img 
-                      src={t('about.creatorPhoto')} 
-                      alt={t('about.creatorName')}
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        e.target.style.display = 'none'
-                        e.target.nextSibling.style.display = 'flex'
-                      }}
-                    />
-                  ) : null}
-                  <div className={`w-full h-full ${t('about.creatorPhoto') ? 'hidden' : 'flex'} items-center justify-center text-white text-6xl font-bold`}>
-                    {t('about.creatorInitials')}
+            {/* Team Members - Side by Side Grid */}
+            <div className="grid md:grid-cols-2 gap-6 mb-8">
+              {/* Main Creator */}
+              <div className="bg-gradient-to-br from-period-pink/20 to-period-pink/5 rounded-xl p-6 border-4 border-period-pink shadow-lg">
+                <div className="flex flex-col items-center text-center">
+                  <div className="w-40 h-40 rounded-full overflow-hidden border-4 border-period-pink bg-period-pink flex items-center justify-center flex-shrink-0 shadow-lg mb-4">
+                    {t('about.creatorPhoto') ? (
+                      <img 
+                        src={t('about.creatorPhoto')} 
+                        alt={t('about.creatorName')}
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          e.target.style.display = 'none'
+                          e.target.nextSibling.style.display = 'flex'
+                        }}
+                      />
+                    ) : null}
+                    <div className={`w-full h-full ${t('about.creatorPhoto') ? 'hidden' : 'flex'} items-center justify-center text-white text-5xl font-bold`}>
+                      {t('about.creatorInitials')}
+                    </div>
                   </div>
-                </div>
-                <div className="flex-1 text-center md:text-left">
-                  <h3 className="text-3xl font-bold text-period-pink mb-3">{t('about.mainCreator')}</h3>
-                  <p className="text-2xl font-bold text-gray-800 mb-2">{t('about.creatorName')}</p>
-                  <p className="text-xl text-gray-700 mb-3">{t('about.creatorOccupation')}</p>
-                  <p className="text-lg text-gray-600">{t('about.creatorPlace')}</p>
+                  <h3 className="text-2xl font-bold text-period-pink mb-2">{t('about.mainCreator')}</h3>
+                  <p className="text-xl font-bold text-gray-800 mb-2">{t('about.creatorName')}</p>
+                  <p className="text-lg text-gray-700 mb-2">{t('about.creatorOccupation')}</p>
+                  <p className="text-sm text-gray-600">{t('about.creatorPlace')}</p>
                 </div>
               </div>
-            </div>
 
-            {/* Medical Support */}
-            <div className="flex justify-center">
-              <div className="bg-teal-50 rounded-lg p-6 border-2 border-teal-300 max-w-md">
+              {/* Medical Support */}
+              <div className="bg-gradient-to-br from-teal-50 to-teal-100 rounded-xl p-6 border-4 border-teal-400 shadow-lg">
                 <div className="flex flex-col items-center text-center">
-                  <div className="w-32 h-32 rounded-full mb-4 overflow-hidden border-4 border-teal-500 bg-teal-500 flex items-center justify-center">
+                  <div className="w-40 h-40 rounded-full mb-4 overflow-hidden border-4 border-teal-500 bg-teal-500 flex items-center justify-center shadow-lg">
                     {t('about.doctorPhoto') ? (
                       <img 
                         src={t('about.doctorPhoto')} 
@@ -167,14 +171,14 @@ const About = () => {
                         }}
                       />
                     ) : null}
-                    <div className={`w-full h-full ${t('about.doctorPhoto') ? 'hidden' : 'flex'} items-center justify-center text-white text-4xl font-bold`}>
+                    <div className={`w-full h-full ${t('about.doctorPhoto') ? 'hidden' : 'flex'} items-center justify-center text-white text-5xl font-bold`}>
                       {t('about.doctorInitials')}
                     </div>
                   </div>
-                  <h3 className="text-xl font-bold text-teal-700 mb-2">{t('about.medicalSupport')}</h3>
-                  <p className="text-gray-800 font-semibold mb-1">{t('about.doctorName')}</p>
-                  <p className="text-gray-600 text-sm mb-2">{t('about.doctorOccupation')}</p>
-                  <p className="text-gray-500 text-xs">{t('about.doctorPlace')}</p>
+                  <h3 className="text-2xl font-bold text-teal-700 mb-2">{t('about.medicalSupport')}</h3>
+                  <p className="text-xl font-bold text-gray-800 mb-2">{t('about.doctorName')}</p>
+                  <p className="text-lg text-gray-700 mb-2">{t('about.doctorOccupation')}</p>
+                  <p className="text-sm text-gray-600">{t('about.doctorPlace')}</p>
                 </div>
               </div>
             </div>
