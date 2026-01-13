@@ -10,7 +10,7 @@ import { translateHormoneLevel } from '../utils/translateHelpers'
 
 const Hormones = () => {
   const { t } = useTranslation()
-  const { dashboardData, wellnessData, loadingWellness } = useDataContext()
+  const { dashboardData, wellnessData, loading, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
   const [language, setLanguage] = useState('en')
   const navigate = useNavigate()
@@ -113,7 +113,7 @@ const Hormones = () => {
           )}
         </div>
 
-        {loadingWellness ? (
+        {(loading || loadingWellness) ? (
           <LoadingSpinner message="Loading hormone data..." />
         ) : todayData && todayData !== null ? (
           <div className="space-y-6">

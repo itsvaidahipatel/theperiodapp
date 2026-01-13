@@ -11,7 +11,7 @@ import { getExerciseData } from '../utils/api'
 
 const Exercise = () => {
   const { t } = useTranslation()
-  const { dashboardData, wellnessData, loadingWellness } = useDataContext()
+  const { dashboardData, wellnessData, loading, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
   const [selectedCategory, setSelectedCategory] = useState('')
   const [loadingCategory, setLoadingCategory] = useState(false)
@@ -269,7 +269,7 @@ const Exercise = () => {
           )}
         </div>
 
-        {(loadingWellness || loadingCategory) ? (
+        {(loading || loadingWellness || loadingCategory) ? (
           <LoadingSpinner message="Loading exercise data..." />
         ) : filteredExercises && Array.isArray(filteredExercises) && filteredExercises.length > 0 ? (
           <div className="space-y-6">

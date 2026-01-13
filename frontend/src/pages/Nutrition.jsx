@@ -13,7 +13,7 @@ import { getNutritionData } from '../utils/api'
 
 const Nutrition = () => {
   const { t } = useTranslation()
-  const { dashboardData, wellnessData, loadingWellness } = useDataContext()
+  const { dashboardData, wellnessData, loading, loadingWellness } = useDataContext()
   const [user, setUser] = useState(null)
   const [selectedCuisine, setSelectedCuisine] = useState('')
   const [loadingCuisine, setLoadingCuisine] = useState(false)
@@ -315,7 +315,7 @@ const Nutrition = () => {
           </select>
         </div>
 
-        {(loadingWellness || loadingCuisine) ? (
+        {(loading || loadingWellness || loadingCuisine) ? (
           <LoadingSpinner message="Loading nutrition data..." />
         ) : filteredRecipes && Array.isArray(filteredRecipes) && filteredRecipes.length > 0 ? (
           <div className="space-y-6">
