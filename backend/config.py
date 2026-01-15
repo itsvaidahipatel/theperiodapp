@@ -26,4 +26,3 @@ settings = Settings()
 # Support SUPABASE_ANON_KEY as fallback for SUPABASE_KEY (for backward compatibility)
 if not settings.SUPABASE_KEY:
     settings.SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "")
-

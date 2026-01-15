@@ -20,7 +20,7 @@ export const getPhaseDescription = (phase) => {
   return ''
 }
 
-// Get phase emoji
+// Get phase emoji (deprecated - use getPhaseIcon component instead)
 export const getPhaseEmoji = (phase) => {
   const emojis = {
     'Period': '🌙',
@@ -30,6 +30,43 @@ export const getPhaseEmoji = (phase) => {
     'Luteal': '🍂'
   }
   return emojis[phase] || '💜'
+}
+
+// Get phase icon component props for lucide-react icons
+export const getPhaseIconProps = (phase) => {
+  const iconProps = {
+    'Period': { 
+      name: 'Droplet',
+      size: 40,
+      color: '#F8BBD9',
+      className: 'drop-shadow-sm'
+    },
+    'Menstrual': { 
+      name: 'Droplet',
+      size: 40,
+      color: '#F8BBD9',
+      className: 'drop-shadow-sm'
+    },
+    'Follicular': { 
+      name: 'Flower2',
+      size: 40,
+      color: '#B2DFDB',
+      className: 'drop-shadow-sm'
+    },
+    'Ovulation': { 
+      name: 'Sun',
+      size: 40,
+      color: '#FFB74D',
+      className: 'drop-shadow-sm'
+    },
+    'Luteal': { 
+      name: 'Cloud',
+      size: 40,
+      color: '#E1BEE7',
+      className: 'drop-shadow-sm'
+    }
+  }
+  return iconProps[phase] || { name: 'Droplet', size: 40, color: '#F8BBD9', className: 'drop-shadow-sm' }
 }
 
 // Get daily tips for phase

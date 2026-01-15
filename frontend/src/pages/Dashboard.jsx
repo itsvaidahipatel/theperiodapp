@@ -11,7 +11,103 @@ import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import PeriodLogModal from '../components/PeriodLogModal'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { useTranslation } from '../utils/translations'
-import { User, LogOut, MessageCircle, Calendar as CalendarIcon, Activity, Apple, Dumbbell, Plus, Home } from 'lucide-react'
+import { User, LogOut, MessageCircle, Calendar as CalendarIcon, Activity, Apple, Dumbbell, Plus, Home, ClipboardCheck, Droplet } from 'lucide-react'
+
+// Phase Icon Component - matches the design from the image
+const PhaseIcon = ({ phase, size = 40 }) => {
+  const iconSize = size
+  
+  switch (phase) {
+    case 'Period':
+    case 'Menstrual':
+      // Teardrop with waves (reddish-pink)
+      return (
+        <div className="relative flex items-center justify-center" style={{ width: iconSize, height: iconSize }}>
+          <svg width={iconSize} height={iconSize} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Teardrop shape - main body */}
+            <path d="M20 6C20 6 10 13 10 22C10 29.731 16.269 36 24 36C31.731 36 38 29.731 38 22C38 13 28 6 20 6Z" fill="#F8BBD9" stroke="white" strokeWidth="2"/>
+            {/* Inner teardrop (blood drop) */}
+            <path d="M20 10C20 10 14 15 14 21C14 25.9706 18.0294 30 23 30C27.9706 30 32 25.9706 32 21C32 15 26 10 20 10Z" fill="white" fillOpacity="0.7"/>
+            {/* Waves below */}
+            <path d="M8 30Q10 28 12 30T16 30" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round"/>
+            <path d="M24 30Q26 28 28 30T32 30" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round"/>
+            <path d="M8 34Q10 32 12 34T16 34" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round"/>
+            <path d="M24 34Q26 32 28 34T32 34" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round"/>
+          </svg>
+        </div>
+      )
+    case 'Follicular':
+      // Tulip flower (mint green) - clean and elegant
+      return (
+        <div className="relative flex items-center justify-center" style={{ width: iconSize, height: iconSize }}>
+          <svg width={iconSize} height={iconSize} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Stem - straight stem */}
+            <line x1="20" y1="23" x2="20" y2="35" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            
+            {/* Left leaf - elegant curved leaf */}
+            <path d="M20 26C18 28.5 16 28 15.5 26.5C15 25 16.5 24 18.5 24.5C19.5 25 19.8 26 20 26Z" 
+                  fill="white" fillOpacity="0.5" stroke="white" strokeWidth="2" strokeLinejoin="round"/>
+            
+            {/* Right leaf - elegant curved leaf */}
+            <path d="M20 26C22 28.5 24 28 24.5 26.5C25 25 23.5 24 21.5 24.5C20.5 25 20.2 26 20 26Z" 
+                  fill="white" fillOpacity="0.5" stroke="white" strokeWidth="2" strokeLinejoin="round"/>
+            
+            {/* Tulip flower - simple and elegant cup shape */}
+            {/* Main flower - classic tulip cup */}
+            <path d="M12 9C12 9 14 8 16 9C18 10 19 11.5 20 13C21 11.5 22 10 24 9C26 8 28 9 28 9C28 13 26 17 20 21C14 17 12 13 12 9Z" 
+                  fill="#B2DFDB" stroke="white" strokeWidth="2.5" strokeLinejoin="round"/>
+            
+            {/* Left petal detail */}
+            <path d="M12 9C12 11 13 13 14.5 14.5" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.7"/>
+            
+            {/* Right petal detail */}
+            <path d="M28 9C28 11 27 13 25.5 14.5" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.7"/>
+            
+            {/* Center petal highlight for depth */}
+            <path d="M18 12C18 12 19 13 20 14C21 13 22 12 22 12" stroke="white" strokeWidth="1.5" fill="none" strokeLinecap="round" opacity="0.6"/>
+          </svg>
+        </div>
+      )
+    case 'Ovulation':
+      // Sun with rays (orange/peach)
+      return (
+        <div className="relative flex items-center justify-center" style={{ width: iconSize, height: iconSize }}>
+          <svg width={iconSize} height={iconSize} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Sun rays - dashed lines */}
+            <line x1="20" y1="4" x2="20" y2="9" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="20" y1="31" x2="20" y2="36" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="4" y1="20" x2="9" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="31" y1="20" x2="36" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="8.464" y1="8.464" x2="12.121" y2="12.121" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="27.879" y1="27.879" x2="31.536" y2="31.536" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="8.464" y1="31.536" x2="12.121" y2="27.879" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            <line x1="27.879" y1="12.121" x2="31.536" y2="8.464" stroke="white" strokeWidth="2" strokeLinecap="round" strokeDasharray="2 2"/>
+            {/* Sun center circle */}
+            <circle cx="20" cy="20" r="7" fill="#FFB74D" stroke="white" strokeWidth="2"/>
+            <circle cx="20" cy="20" r="4" fill="white" fillOpacity="0.3"/>
+          </svg>
+        </div>
+      )
+    case 'Luteal':
+      // Cloud with moon (lavender/purple)
+      return (
+        <div className="relative flex items-center justify-center" style={{ width: iconSize, height: iconSize }}>
+          <svg width={iconSize} height={iconSize} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+            {/* Cloud shape */}
+            <ellipse cx="20" cy="24" rx="12" ry="8" fill="#E1BEE7" stroke="white" strokeWidth="2"/>
+            <ellipse cx="14" cy="24" rx="6" ry="7" fill="#E1BEE7" stroke="white" strokeWidth="2"/>
+            <ellipse cx="26" cy="24" rx="6" ry="7" fill="#E1BEE7" stroke="white" strokeWidth="2"/>
+            <ellipse cx="20" cy="18" rx="9" ry="7" fill="#E1BEE7" stroke="white" strokeWidth="2"/>
+            {/* Moon crescent inside cloud upper right */}
+            <path d="M27 12C28.6569 12 30 10.6569 30 9C30 7.34315 28.6569 6 27 6C25.3431 6 24 7.34315 24 9C24 10.6569 25.3431 12 27 12Z" fill="white" stroke="white" strokeWidth="1.5"/>
+            <circle cx="28.5" cy="9.5" r="2.5" fill="#E1BEE7"/>
+          </svg>
+        </div>
+      )
+    default:
+      return <Droplet size={iconSize} className="text-period-pink" />
+  }
+}
 
 const Dashboard = () => {
   const { t } = useTranslation()
@@ -125,21 +221,45 @@ const Dashboard = () => {
           lastCalculationRef.current = calculationKey
           isCalculatingRef.current = true
           try {
-            const lastPeriod = new Date(parsedUser.last_period_date)
             const today = new Date()
+            today.setHours(0, 0, 0, 0)
             
-            // Validate dates
-            if (isNaN(lastPeriod.getTime()) || isNaN(today.getTime())) {
-              console.warn('Invalid date in user data')
-              return
+            // Check if last_period_date exists
+            let daysSince = null
+            let daysUntil = null
+            
+            if (parsedUser.last_period_date) {
+              const lastPeriod = new Date(parsedUser.last_period_date)
+              
+              // Validate date
+              if (isNaN(lastPeriod.getTime())) {
+                console.warn('Invalid date in user data')
+                return
+              }
+              
+              lastPeriod.setHours(0, 0, 0, 0)
+              const cycleLength = parsedUser.cycle_length || 28
+              
+              // Calculate days since last period start date
+              // If today is the last period date, daysSince = 0
+              // If today is the day after, daysSince = 1, etc.
+              daysSince = Math.max(0, Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24)))
+              
+              // Calculate next period start date
+              // Start with last period + cycle length
+              let nextPeriodDate = new Date(lastPeriod)
+              nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
+              
+              // If the next period date has passed or is today, move to the following cycle
+              while (nextPeriodDate <= today) {
+                nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
+              }
+              
+              // Calculate days until next period (always positive)
+              daysUntil = Math.floor((nextPeriodDate - today) / (1000 * 60 * 60 * 24))
             }
             
-            today.setHours(0, 0, 0, 0)
-            lastPeriod.setHours(0, 0, 0, 0)
-            
-            const daysSince = Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24))
             const cycleLength = parsedUser.cycle_length || 28
-            const daysUntil = daysSince >= 0 ? (cycleLength - daysSince) : cycleLength
             
             // Calculate additional statistics from period logs (use ref to avoid dependency issues)
             const logsToUse = periodLogsRef.current || []
@@ -240,16 +360,19 @@ const Dashboard = () => {
                 
                 // Calculate predicted ovulation date (cycle_length - luteal_mean)
                 // Estimate luteal phase (typically 14 days, but can vary)
-                try {
-                  lutealEstimate = 14 // Default, could be improved with actual data
-                  const ovulationOffset = cycleLength - lutealEstimate
-                  const nextOvulation = new Date(lastPeriod)
-                  if (!isNaN(nextOvulation.getTime())) {
-                    nextOvulation.setDate(nextOvulation.getDate() + ovulationOffset)
-                    predictedOvulationDate = nextOvulation
+                if (parsedUser.last_period_date) {
+                  try {
+                    const lastPeriod = new Date(parsedUser.last_period_date)
+                    lutealEstimate = 14 // Default, could be improved with actual data
+                    const ovulationOffset = cycleLength - lutealEstimate
+                    const nextOvulation = new Date(lastPeriod)
+                    if (!isNaN(nextOvulation.getTime())) {
+                      nextOvulation.setDate(nextOvulation.getDate() + ovulationOffset)
+                      predictedOvulationDate = nextOvulation
+                    }
+                  } catch (ovulationError) {
+                    console.warn('Error calculating ovulation date:', ovulationError)
                   }
-                } catch (ovulationError) {
-                  console.warn('Error calculating ovulation date:', ovulationError)
                 }
               } catch (statsCalcError) {
                 console.warn('Error in cycle stats calculation:', statsCalcError)
@@ -259,8 +382,8 @@ const Dashboard = () => {
             // Set cycle stats after all calculations
             setCycleStats({
               cycleLength,
-              daysSince: daysSince >= 0 ? daysSince : 0,
-              daysUntil: daysUntil > 0 ? daysUntil : cycleLength + daysUntil,
+              daysSince: daysSince, // Days since last period start date (always >= 0)
+              daysUntil: daysUntil, // Days until next period start date (always positive)
               avgPeriodLength,
               cyclesTracked,
               cycleRegularity,
@@ -274,10 +397,32 @@ const Dashboard = () => {
             // Set basic stats even if calculation fails
             try {
               const fallbackCycleLength = parsedUser?.cycle_length || 28
+              // Only set daysSince and daysUntil if last_period_date exists
+              let fallbackDaysSince = null
+              let fallbackDaysUntil = null
+              
+              if (parsedUser?.last_period_date) {
+                const lastPeriod = new Date(parsedUser.last_period_date)
+                const today = new Date()
+                today.setHours(0, 0, 0, 0)
+                lastPeriod.setHours(0, 0, 0, 0)
+                
+                if (!isNaN(lastPeriod.getTime())) {
+                  fallbackDaysSince = Math.max(0, Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24)))
+                  
+                  let nextPeriodDate = new Date(lastPeriod)
+                  nextPeriodDate.setDate(nextPeriodDate.getDate() + fallbackCycleLength)
+                  while (nextPeriodDate <= today) {
+                    nextPeriodDate.setDate(nextPeriodDate.getDate() + fallbackCycleLength)
+                  }
+                  fallbackDaysUntil = Math.floor((nextPeriodDate - today) / (1000 * 60 * 60 * 24))
+                }
+              }
+              
               setCycleStats({
                 cycleLength: fallbackCycleLength,
-                daysSince: 0,
-                daysUntil: fallbackCycleLength,
+                daysSince: fallbackDaysSince,
+                daysUntil: fallbackDaysUntil,
                 avgPeriodLength: 5,
                 cyclesTracked: 0,
                 cycleRegularity: 'Regular',
@@ -488,19 +633,37 @@ const Dashboard = () => {
         setUser(result.user)
         
         // Update cycle stats
+        const cycleLength = result.user?.cycle_length || 28
+        let daysSince = null
+        let daysUntil = null
+        
         if (result.user?.last_period_date) {
           const lastPeriod = new Date(result.user.last_period_date)
           const today = new Date()
-          const daysSince = Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24))
-          const cycleLength = result.user.cycle_length || 28
-          const daysUntil = cycleLength - daysSince
+          today.setHours(0, 0, 0, 0)
+          lastPeriod.setHours(0, 0, 0, 0)
           
-          setCycleStats({
-            cycleLength,
-            daysSince: daysSince >= 0 ? daysSince : 0,
-            daysUntil: daysUntil > 0 ? daysUntil : cycleLength + daysUntil
-          })
+          // Calculate days since last period start date
+          daysSince = Math.max(0, Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24)))
+          
+          // Calculate next period start date
+          let nextPeriodDate = new Date(lastPeriod)
+          nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
+          
+          // If the next period date has passed or is today, move to the following cycle
+          while (nextPeriodDate <= today) {
+            nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
+          }
+          
+          // Calculate days until next period (always positive)
+          daysUntil = Math.floor((nextPeriodDate - today) / (1000 * 60 * 60 * 24))
         }
+        
+        setCycleStats({
+          cycleLength,
+          daysSince: daysSince, // Days since last period start date (null if no last_period_date)
+          daysUntil: daysUntil  // Days until next period start date (null if no last_period_date)
+        })
       }
       
       // Dispatch event to clear cache and refresh all data
@@ -727,10 +890,10 @@ const Dashboard = () => {
             <div className="flex items-start justify-between">
               <div className="flex-1">
                 <div className="flex items-center gap-2 sm:gap-3">
-                  <span className="text-3xl sm:text-4xl">{getPhaseEmoji(currentPhase.phase)}</span>
+                  <PhaseIcon phase={currentPhase.phase} size={isMobile ? 36 : 48} />
                   <div>
                     <h3 className="text-lg sm:text-xl lg:text-2xl font-bold text-gray-800 capitalize">
-                      {t(`phase.${currentPhase.phase.toLowerCase()}`)} {t('dashboard.currentPhase')}
+                      {t('dashboard.currentPhase')}: {t(`phase.${currentPhase.phase.toLowerCase()}`)}
                     </h3>
                     {(currentPhase.phase_day_id || currentPhase.id) && (
                       <p className="text-sm sm:text-base text-gray-600">{t('dashboard.day')} {currentPhase.phase_day_id || currentPhase.id}</p>
@@ -847,7 +1010,7 @@ const Dashboard = () => {
             <div className="bg-white rounded-lg shadow-lg p-4 sm:p-6">
               <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
                 <MessageCircle className="h-5 w-5 sm:h-6 sm:w-6 text-period-purple" />
-                <h3 className="text-lg sm:text-xl font-bold">{t('dashboard.aiAssistant')}</h3>
+                <h3 className="text-lg sm:text-xl font-bold text-gray-800">{t('dashboard.aiAssistant')}</h3>
               </div>
               <p className="text-sm sm:text-base text-gray-600 mb-3 sm:mb-4">
                 {t('dashboard.aiDescription')}
@@ -857,6 +1020,23 @@ const Dashboard = () => {
                 className="w-full bg-period-purple text-white py-3 sm:py-2 rounded-lg font-semibold hover:bg-opacity-90 transition min-h-[44px] text-sm sm:text-base"
               >
                 {t('dashboard.startChat')}
+              </button>
+            </div>
+
+            {/* Self-Tests Card - Mobile Optimized */}
+            <div className="bg-white rounded-lg shadow-lg p-4 sm:p-6">
+              <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
+                <ClipboardCheck className="h-5 w-5 sm:h-6 sm:w-6 text-period-pink flex-shrink-0" />
+                <h3 className="text-lg sm:text-xl font-bold text-gray-800">{t('dashboard.selftests')}</h3>
+              </div>
+              <p className="text-sm sm:text-base text-gray-600 mb-3 sm:mb-4">
+                {t('dashboard.selftestsDesc')}
+              </p>
+              <button
+                onClick={() => navigate('/selftests')}
+                className="w-full bg-period-pink text-white py-3 sm:py-2 rounded-lg font-semibold hover:bg-opacity-90 transition min-h-[44px] text-sm sm:text-base"
+              >
+                Take Self Tests
               </button>
             </div>
 
@@ -898,19 +1078,29 @@ const Dashboard = () => {
                   <div className="pb-3 border-b border-gray-200">
                     <div className="flex justify-between items-center mb-2">
                       <span className="text-sm text-gray-600">{t('dashboard.daysSincePeriod')}:</span>
-                      <span className="font-semibold">{cycleStats.daysSince} {t('dashboard.days')}</span>
+                      <span className="font-semibold">
+                        {cycleStats.daysSince !== null && cycleStats.daysSince !== undefined 
+                          ? `${cycleStats.daysSince} ${t('dashboard.days')}` 
+                          : '—'}
+                      </span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-600">{t('dashboard.daysUntilNext')}:</span>
-                      <span className="font-semibold text-period-pink">{cycleStats.daysUntil} {t('dashboard.days')}</span>
+                      <span className="font-semibold text-period-pink">
+                        {cycleStats.daysUntil !== null && cycleStats.daysUntil !== undefined 
+                          ? `${cycleStats.daysUntil} ${t('dashboard.days')}` 
+                          : '—'}
+                      </span>
                     </div>
                     {/* Progress bar */}
-                    <div className="mt-3 w-full bg-gray-200 rounded-full h-2">
-                      <div 
-                        className="bg-gradient-to-r from-period-pink to-period-purple h-2 rounded-full transition-all duration-300"
-                        style={{ width: `${Math.min(100, (cycleStats.daysSince / cycleStats.cycleLength) * 100)}%` }}
-                      ></div>
-                    </div>
+                    {cycleStats.daysSince !== null && cycleStats.daysSince !== undefined && (
+                      <div className="mt-3 w-full bg-gray-200 rounded-full h-2">
+                        <div 
+                          className="bg-gradient-to-r from-period-pink to-period-purple h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.min(100, (cycleStats.daysSince / cycleStats.cycleLength) * 100)}%` }}
+                        ></div>
+                      </div>
+                    )}
                   </div>
                   
                   {/* Advanced Stats */}
@@ -982,7 +1172,7 @@ const Dashboard = () => {
           >
             <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
               <Activity className="h-6 w-6 sm:h-8 sm:w-8 text-period-pink flex-shrink-0" />
-              <h3 className="text-lg sm:text-xl font-bold">{t('dashboard.hormones')}</h3>
+              <h3 className="text-lg sm:text-xl font-bold text-gray-800">{t('dashboard.hormones')}</h3>
             </div>
             <p className="text-sm sm:text-base text-gray-600">
               {t('dashboard.hormonesDesc')}
@@ -995,7 +1185,7 @@ const Dashboard = () => {
           >
             <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
               <Apple className="h-6 w-6 sm:h-8 sm:w-8 text-period-purple flex-shrink-0" />
-              <h3 className="text-lg sm:text-xl font-bold">{t('dashboard.nutrition')}</h3>
+              <h3 className="text-lg sm:text-xl font-bold text-gray-800">{t('dashboard.nutrition')}</h3>
             </div>
             <p className="text-sm sm:text-base text-gray-600">
               {t('dashboard.nutritionDesc')}
@@ -1004,11 +1194,11 @@ const Dashboard = () => {
 
           <button
             onClick={() => navigate('/exercise')}
-            className="bg-white rounded-lg shadow-lg p-4 sm:p-6 hover:shadow-xl transition text-left min-h-[44px] active:scale-95 sm:col-span-2 lg:col-span-1"
+            className="bg-white rounded-lg shadow-lg p-4 sm:p-6 hover:shadow-xl transition text-left min-h-[44px] active:scale-95"
           >
             <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
               <Dumbbell className="h-6 w-6 sm:h-8 sm:w-8 text-period-lavender flex-shrink-0" />
-              <h3 className="text-lg sm:text-xl font-bold">{t('dashboard.exercise')}</h3>
+              <h3 className="text-lg sm:text-xl font-bold text-gray-800">{t('dashboard.exercise')}</h3>
             </div>
             <p className="text-sm sm:text-base text-gray-600">
               {t('dashboard.exerciseDesc')}
@@ -1022,7 +1212,7 @@ const Dashboard = () => {
             onClick={() => navigate('/about')}
             className="bg-white rounded-lg shadow-lg px-6 sm:px-8 py-3 sm:py-4 hover:shadow-xl transition text-center border-2 border-period-pink hover:bg-period-pink hover:text-white min-h-[44px] w-full sm:w-auto active:scale-95"
           >
-            <h3 className="text-base sm:text-lg font-bold">{t('about.title')}</h3>
+            <h3 className="text-base sm:text-lg font-bold text-gray-800">{t('about.title')}</h3>
           </button>
         </div>
 

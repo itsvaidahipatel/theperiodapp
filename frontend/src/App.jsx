@@ -11,6 +11,7 @@ import Chat from './pages/Chat'
 import Hormones from './pages/Hormones'
 import Nutrition from './pages/Nutrition'
 import Exercise from './pages/Exercise'
+import SelfTests from './pages/SelfTests'
 import About from './pages/About'
 import NotFound from './pages/NotFound'
 
@@ -67,6 +68,14 @@ function App() {
           element={
             <ProtectedRoute>
               <Exercise />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/selftests"
+          element={
+            <ProtectedRoute>
+              <SelfTests />
             </ProtectedRoute>
           }
         />

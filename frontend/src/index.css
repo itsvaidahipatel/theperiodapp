@@ -52,7 +52,6 @@ body {
 }
 
 .react-calendar__navigation button:disabled {
-  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -167,3 +166,115 @@ body {
   margin: 0.25rem;
 }
 
+
+/* ============================================
+   ENHANCED BUTTON STYLES - Override defaults
+   Better shadows, hover effects, and clickability
+   ============================================ */
+
+/* Enhanced base button */
+button {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  position: relative !important;
+}
+
+button:disabled {
+  transform: none !important;
+}
+
+button:not(:disabled):active {
+  transform: scale(0.97) !important;
+  transition: transform 0.1s ease-in-out !important;
+}
+
+/* Enhanced primary buttons */
+button.bg-period-pink,
+button.bg-period-purple,
+button.bg-period-lavender,
+button[class*="bg-gradient-to-r"],
+button[class*="bg-gradient-to-br"] {
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.08) !important;
+}
+
+button.bg-period-pink:hover:not(:disabled),
+button.bg-period-purple:hover:not(:disabled),
+button.bg-period-lavender:hover:not(:disabled),
+button[class*="bg-gradient-to-r"]:hover:not(:disabled),
+button[class*="bg-gradient-to-br"]:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.01) !important;
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.18), 0 4px 8px rgba(0, 0, 0, 0.12) !important;
+}
+
+button.bg-period-pink:active:not(:disabled),
+button.bg-period-purple:active:not(:disabled),
+button.bg-period-lavender:active:not(:disabled),
+button[class*="bg-gradient-to-r"]:active:not(:disabled),
+button[class*="bg-gradient-to-br"]:active:not(:disabled) {
+  transform: translateY(0) scale(0.97) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Enhanced secondary buttons */
+button.bg-white,
+button.bg-gray-100,
+button.bg-gray-200 {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+}
+
+button.bg-white:hover:not(:disabled),
+button.bg-gray-100:hover:not(:disabled),
+button.bg-gray-200:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.01) !important;
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.12), 0 3px 6px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Enhanced shadow-lg buttons */
+button.shadow-lg:hover:not(:disabled) {
+  transform: translateY(-3px) scale(1.02) !important;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.18), 0 10px 10px -5px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Enhanced shadow-xl buttons */
+button.shadow-xl:hover:not(:disabled) {
+  transform: translateY(-3px) scale(1.02) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Enhanced buttons without explicit shadow */
+button:not([class*="shadow"]):not([class*="bg-white"]):not([class*="bg-gray"]):not([class*="text-"]):not([class*="border-transparent"]):hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.01) !important;
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.18), 0 4px 8px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Enhanced border-2 buttons */
+button[class*="border-2"] {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+}
+
+button[class*="border-2"]:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.01) !important;
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15), 0 3px 6px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Ensure text on white backgrounds is visible - default to dark text */
+.bg-white h1:not([class*="text-"]),
+.bg-white h2:not([class*="text-"]),
+.bg-white h3:not([class*="text-"]),
+.bg-white h4:not([class*="text-"]),
+.bg-white h5:not([class*="text-"]),
+.bg-white h6:not([class*="text-"]),
+.bg-white p:not([class*="text-"]),
+.bg-white span:not([class*="text-"]),
+.bg-white div:not([class*="text-"]) {
+  color: #1f2937 !important; /* gray-800 */
+}
+
+/* Ensure buttons with white background have dark text by default */
+button.bg-white:not([class*="text-"]) {
+  color: #1f2937 !important; /* gray-800 */
+}
+
+/* Ensure text in white cards is visible */
+.bg-white *:not([class*="text-"]):not(button):not(a) {
+  color: inherit;
+}
