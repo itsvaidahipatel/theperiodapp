@@ -19,8 +19,12 @@ import { getCachedData, setCachedData, shouldRefetch, clearCache } from './dataC
  */
 export const loadDashboardData = async () => {
   try {
-    // Get current phase first
-    const currentPhase = await getCurrentPhase().catch(() => null)
+    // Get current phase first (with timeout)
+    const currentPhasePromise = getCurrentPhase().catch(() => null)
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Timeout')), 15000)
+    )
+    const currentPhase = await Promise.race([currentPhasePromise, timeoutPromise]).catch(() => null)
     
     // Get phase map for calendar (3 months: previous, current, next)
     let phaseMap = {}
@@ -32,7 +36,15 @@ export const loadDashboardData = async () => {
       const startDateStr = startDate.toISOString().split('T')[0]
       const endDateStr = endDate.toISOString().split('T')[0]
       
-      const phaseMapResponse = await getPhaseMap(startDateStr, endDateStr)
+      // Add timeout to prevent hanging
+      const phaseMapPromise = getPhaseMap(startDateStr, endDateStr)
+      const phaseMapTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Phase map timeout')), 30000)
+      )
+      const phaseMapResponse = await Promise.race([phaseMapPromise, phaseMapTimeout]).catch((err) => {
+        console.warn('Phase map request timed out or failed:', err)
+        return { phase_map: [] }
+      })
       console.log('📅 Phase map response in dataLoader:', {
         hasPhaseMap: !!phaseMapResponse?.phase_map,
         length: phaseMapResponse?.phase_map?.length || 0,
@@ -74,8 +86,12 @@ export const loadDashboardData = async () => {
       console.log('No phase map data available yet:', mapError)
     }
     
-    // Get period logs
-    const periodLogs = await getPeriodLogs().catch(() => null)
+    // Get period logs (with timeout)
+    const periodLogsPromise = getPeriodLogs().catch(() => null)
+    const periodLogsTimeout = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Period logs timeout')), 10000)
+    )
+    const periodLogs = await Promise.race([periodLogsPromise, periodLogsTimeout]).catch(() => null)
     
     return {
       currentPhase: currentPhase || null,

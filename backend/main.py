@@ -9,6 +9,15 @@ from dotenv import load_dotenv
 
 from routes import auth, user, periods, ai_chat, cycles, wellness, feedback
 
+# Optional notification service (graceful degradation if apscheduler not installed)
+try:
+    from notification_service import notification_service
+    NOTIFICATION_SERVICE_AVAILABLE = True
+except ImportError:
+    print("⚠️ Notification service not available (apscheduler not installed). Run: pip install apscheduler")
+    NOTIFICATION_SERVICE_AVAILABLE = False
+    notification_service = None
+
 load_dotenv()
 
 app = FastAPI(title="PeriodCycle.AI API", version="1.0.0")
@@ -44,6 +53,26 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.on_event("startup")
+async def startup_event():
+    """Start notification scheduler on app startup."""
+    if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
+        try:
+            notification_service.start()
+            print("✅ Smart Notification Agent started")
+        except Exception as e:
+            print(f"⚠️ Failed to start notification scheduler: {str(e)}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop notification scheduler on app shutdown."""
+    if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
+        try:
+            notification_service.stop()
+            print("🛑 Smart Notification Agent stopped")
+        except Exception as e:
+            print(f"⚠️ Error stopping notification scheduler: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

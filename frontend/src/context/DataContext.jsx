@@ -35,7 +35,13 @@ export const DataProvider = ({ children }) => {
       setError(null)
 
       // Load dashboard data first (always fetch, no cache)
-      const dashboard = await loadDashboardData()
+      // Add timeout to prevent hanging
+      const dashboardPromise = loadDashboardData()
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Dashboard data loading timeout after 30 seconds')), 30000)
+      )
+      
+      const dashboard = await Promise.race([dashboardPromise, timeoutPromise])
       setDashboardData(dashboard)
       setLoading(false)
 
@@ -111,35 +117,53 @@ export const DataProvider = ({ children }) => {
       localStorage.setItem('period_gpt_last_load_date', today)
     } catch (err) {
       console.error('Error loading data:', err)
-      setError(err.message)
+      setError(err.message || 'Failed to load data')
+      // Always set loading to false, even on error
       setLoading(false)
       setLoadingWellness(false)
+      // Set empty data structure to prevent rendering issues
+      setDashboardData(prev => prev || { currentPhase: null, phaseMap: null, periodLogs: null })
     }
-  }, [])
+  }, []) // Empty deps - stable function
 
   // Load data on mount and check date change
   useEffect(() => {
-    const today = new Date().toISOString().split('T')[0]
+    let isMounted = true
+    let interval = null
     
-    // Check if date changed
-    if (lastLoadDate && lastLoadDate !== today) {
-      console.log('Date changed, forcing refresh')
-      checkAndLoadData(true) // Force refresh if date changed
-    } else {
-      checkAndLoadData(false)
+    const loadInitialData = async () => {
+      if (!isMounted) return
+      
+      const today = new Date().toISOString().split('T')[0]
+      
+      // Check if date changed
+      if (lastLoadDate && lastLoadDate !== today) {
+        console.log('Date changed, forcing refresh')
+        await checkAndLoadData(true) // Force refresh if date changed
+      } else {
+        await checkAndLoadData(false)
+      }
     }
     
+    loadInitialData()
+    
     // Set up interval to check for date change every minute
-    const interval = setInterval(() => {
+    interval = setInterval(() => {
+      if (!isMounted) return
       const currentDate = new Date().toISOString().split('T')[0]
-      if (lastLoadDate && lastLoadDate !== currentDate) {
+      const storedLastLoadDate = localStorage.getItem('period_gpt_last_load_date')
+      if (storedLastLoadDate && storedLastLoadDate !== currentDate) {
         console.log('Date changed (detected via interval), forcing refresh')
         checkAndLoadData(true)
       }
     }, 60000) // Check every minute
     
-    return () => clearInterval(interval)
-  }, [checkAndLoadData]) // Include checkAndLoadData in dependencies
+    return () => {
+      isMounted = false
+      if (interval) clearInterval(interval)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Only run on mount - checkAndLoadData is stable (useCallback with empty deps)
 
   // Listen for period log events (clear cache and reload)
   useEffect(() => {

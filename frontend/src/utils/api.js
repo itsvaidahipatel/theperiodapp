@@ -114,6 +114,18 @@ export const removeFromSaved = async (type, item) => {
   })
 }
 
+// Notification Preferences API functions
+export const getNotificationPreferences = async () => {
+  return apiRequest('/user/notification-preferences')
+}
+
+export const updateNotificationPreferences = async (preferences) => {
+  return apiRequest('/user/notification-preferences', {
+    method: 'POST',
+    body: JSON.stringify(preferences),
+  })
+}
+
 // Period API functions
 export const logPeriod = async (logData) => {
   return apiRequest('/periods/log', {

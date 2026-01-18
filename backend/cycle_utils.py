@@ -225,16 +225,37 @@ def estimate_period_length(user_id: str, user_observations: Optional[List[float]
     if user_observations is None:
         try:
             # Try to get from period_logs table
-            period_logs = supabase.table("period_logs").select("start_date, end_date").eq("user_id", user_id).order("start_date", desc=True).limit(12).execute()
+            # Note: period_logs table uses 'date' column (each row is one day of period)
+            period_logs_response = supabase.table("period_logs").select("date").eq("user_id", user_id).order("date", desc=True).limit(60).execute()
             
-            if period_logs.data and len(period_logs.data) > 0:
+            if period_logs_response.data and len(period_logs_response.data) > 0:
+                # Group consecutive dates to form periods
+                dates = sorted([datetime.strptime(log["date"], "%Y-%m-%d") for log in period_logs_response.data if log.get("date")])
+                
+                # Group consecutive dates into periods
+                periods = []
+                if dates:
+                    current_period_start = dates[0]
+                    for i in range(1, len(dates)):
+                        # If gap > 1 day, start new period
+                        if (dates[i] - dates[i-1]).days > 1:
+                            periods.append({
+                                "start": current_period_start,
+                                "end": dates[i-1]
+                            })
+                            current_period_start = dates[i]
+                    # Add last period
+                    periods.append({
+                        "start": current_period_start,
+                        "end": dates[-1]
+                    })
+                
                 user_observations = []
-                for log in period_logs.data:
-                    start = datetime.strptime(log["start_date"], "%Y-%m-%d")
-                    end = datetime.strptime(log["end_date"], "%Y-%m-%d")
-                    period_length = (end - start).days + 1
+                for period in periods[-12:]:  # Last 12 periods
+                    period_length = (period["end"] - period["start"]).days + 1
                     user_observations.append(float(period_length))
-        except:
+        except Exception as e:
+            print(f"⚠️ Error calculating period length from logs: {str(e)}")
             user_observations = []
     
     if not user_observations or len(user_observations) == 0:
@@ -870,7 +891,7 @@ def store_cycle_phase_map(
                 if "column" in str(insert_error).lower() or "does not exist" in str(insert_error).lower():
                     print(f"⚠️ Insert failed with optional columns, retrying without optional fields...")
                     insert_data_simple = []
-                    optional_fields = ["source", "confidence", "fertility_prob", "predicted_ovulation_date", "luteal_estimate", "ovulation_sd"]
+                    optional_fields = ["source", "confidence", "fertility_prob", "predicted_ovulation_date", "luteal_estimate", "luteal_sd", "ovulation_sd"]
                     for item in insert_data:
                         simple_item = {k: v for k, v in item.items() if k not in optional_fields}
                         insert_data_simple.append(simple_item)
@@ -892,7 +913,7 @@ def store_cycle_phase_map(
                 if "column" in str(insert_error).lower() or "does not exist" in str(insert_error).lower():
                     print(f"⚠️ Insert failed with optional columns, retrying without optional fields...")
                     insert_data_simple = []
-                    optional_fields = ["source", "confidence", "fertility_prob", "predicted_ovulation_date", "luteal_estimate", "ovulation_sd"]
+                    optional_fields = ["source", "confidence", "fertility_prob", "predicted_ovulation_date", "luteal_estimate", "luteal_sd", "ovulation_sd"]
                     for item in insert_data:
                         simple_item = {k: v for k, v in item.items() if k not in optional_fields}
                         insert_data_simple.append(simple_item)

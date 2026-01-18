@@ -236,31 +236,47 @@ async def get_phase_map(
             past_cycle_data = []
             try:
                 # First, try to get actual period logs from database
-                period_logs_response = supabase.table("period_logs").select("start_date, end_date").eq("user_id", user_id).order("start_date", desc=True).limit(12).execute()
+                # Note: period_logs table uses 'date' column (each row is one day of period)
+                period_logs_response = supabase.table("period_logs").select("date").eq("user_id", user_id).order("date", desc=True).limit(60).execute()
                 period_logs = period_logs_response.data or []
                 
                 if period_logs and len(period_logs) >= 3:
-                    # Use actual period logs (RapidAPI prefers real data)
-                    print(f"📊 Using {len(period_logs)} actual period logs for RapidAPI")
-                    for log in reversed(period_logs):  # Reverse to get chronological order
-                        start_date = log.get("start_date")
-                        end_date = log.get("end_date")
-                        if start_date:
-                            # Calculate period length
-                            if end_date:
-                                try:
-                                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-                                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-                                    period_length = max(1, (end_dt - start_dt).days + 1)
-                                except:
-                                    period_length = 5
-                            else:
-                                period_length = 5  # Default if no end_date
+                    # Group consecutive dates to form periods
+                    # Sort dates chronologically
+                    dates = sorted([datetime.strptime(log["date"], "%Y-%m-%d") for log in period_logs if log.get("date")])
+                    
+                    # Group consecutive dates into periods
+                    periods = []
+                    if dates:
+                        current_period_start = dates[0]
+                        for i in range(1, len(dates)):
+                            # If gap > 1 day, start new period
+                            if (dates[i] - dates[i-1]).days > 1:
+                                periods.append({
+                                    "start": current_period_start,
+                                    "end": dates[i-1]
+                                })
+                                current_period_start = dates[i]
+                        # Add last period
+                        periods.append({
+                            "start": current_period_start,
+                            "end": dates[-1]
+                        })
+                    
+                    if len(periods) >= 3:
+                        # Use actual period logs (RapidAPI prefers real data)
+                        print(f"📊 Using {len(periods)} periods from period logs for RapidAPI")
+                        for period in reversed(periods[-12:]):  # Last 12 periods
+                            start_date = period["start"].strftime("%Y-%m-%d")
+                            end_date = period["end"].strftime("%Y-%m-%d")
+                            period_length = max(1, (period["end"] - period["start"]).days + 1)
                             
                             past_cycle_data.append({
                                 "cycle_start_date": start_date,
                                 "period_length": period_length
                             })
+                    else:
+                        period_logs = []  # Not enough periods, fall through to synthetic
                 else:
                     # Fall back to synthetic cycles (generate more cycles for better accuracy)
                     print(f"📊 Using synthetic cycles (only {len(period_logs)} period logs available)")

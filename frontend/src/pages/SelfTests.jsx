@@ -31,9 +31,8 @@ const SelfTests = () => {
     { id: 'endometriosis', title: t('selftests.endometriosis.title'), description: t('selftests.endometriosis.description') },
     { id: 'pms', title: t('selftests.pms.title'), description: t('selftests.pms.description') },
     { id: 'irregularities', title: t('selftests.irregularities.title'), description: t('selftests.irregularities.description') },
-    { id: 'thyroid', title: t('selftests.thyroid.title'), description: t('selftests.thyroid.description') },
     { id: 'anemia', title: t('selftests.anemia.title'), description: t('selftests.anemia.description') },
-    { id: 'diabetes', title: t('selftests.diabetes.title'), description: t('selftests.diabetes.description') },
+    { id: 'fibroids', title: t('selftests.fibroids.title'), description: t('selftests.fibroids.description') },
     { id: 'sti', title: t('selftests.sti.title'), description: t('selftests.sti.description') },
   ]
 
@@ -94,9 +93,8 @@ const SelfTests = () => {
         {activeTest === 'endometriosis' && <EndometriosisChecker onBack={() => setActiveTest(null)} />}
         {activeTest === 'pms' && <PMSChecker onBack={() => setActiveTest(null)} />}
         {activeTest === 'irregularities' && <IrregularitiesChecker onBack={() => setActiveTest(null)} />}
-        {activeTest === 'thyroid' && <ThyroidChecker onBack={() => setActiveTest(null)} />}
         {activeTest === 'anemia' && <AnemiaChecker onBack={() => setActiveTest(null)} />}
-        {activeTest === 'diabetes' && <DiabetesChecker onBack={() => setActiveTest(null)} />}
+        {activeTest === 'fibroids' && <FibroidsChecker onBack={() => setActiveTest(null)} />}
         {activeTest === 'sti' && <STIChecker onBack={() => setActiveTest(null)} />}
 
         {/* Safety Disclaimer - At the bottom when no test is active */}
@@ -125,6 +123,10 @@ const TestComponent = ({
 }) => {
   const { t } = useTranslation()
   const allAnswered = questions.every(q => {
+    // Optional questions don't need to be answered
+    if (q.optional) {
+      return true
+    }
     if (q.type === 'date') {
       return answers[q.id] !== undefined && answers[q.id] !== ''
     }
@@ -189,6 +191,7 @@ const TestComponent = ({
               <div key={q.id} className="border border-gray-200 rounded-lg p-4">
                 <p className="font-semibold text-gray-800 mb-4">
                   {index + 1}. {q.question}
+                  {q.optional && <span className="ml-2 text-sm text-gray-500 font-normal">({t('selftests.optional')})</span>}
                 </p>
                 {q.type === 'yesno' ? (
                   <div className="flex gap-4">
@@ -258,6 +261,8 @@ const TestComponent = ({
               ? 'bg-red-50 border-red-400'
               : result.riskLevel === 'medium'
               ? 'bg-yellow-50 border-yellow-400'
+              : result.riskLevel === 'very_low'
+              ? 'bg-blue-50 border-blue-400'
               : 'bg-green-50 border-green-400'
           }`}>
             <div className="flex items-center gap-3 mb-4">
@@ -265,6 +270,8 @@ const TestComponent = ({
                 <AlertCircle className="h-8 w-8 text-red-600" />
               ) : result.riskLevel === 'medium' ? (
                 <AlertCircle className="h-8 w-8 text-yellow-600" />
+              ) : result.riskLevel === 'very_low' ? (
+                <CheckCircle2 className="h-8 w-8 text-blue-600" />
               ) : (
                 <CheckCircle2 className="h-8 w-8 text-green-600" />
               )}
@@ -384,6 +391,7 @@ const PregnancyChecker = ({ onBack }) => {
   const [loading, setLoading] = useState(false)
 
   const questions = [
+    { id: 'sexually_active', question: t('selftests.pregnancy.questions.sexually_active'), type: 'yesno' },
     { id: 'missed_period', question: t('selftests.pregnancy.questions.missed_period'), type: 'yesno' },
     { id: 'nausea', question: t('selftests.pregnancy.questions.nausea'), type: 'yesno' },
     { id: 'breast_tenderness', question: t('selftests.pregnancy.questions.breast_tenderness'), type: 'yesno' },
@@ -392,12 +400,29 @@ const PregnancyChecker = ({ onBack }) => {
     { id: 'food_cravings', question: t('selftests.pregnancy.questions.food_cravings'), type: 'yesno' },
     { id: 'mood_changes', question: t('selftests.pregnancy.questions.mood_changes'), type: 'yesno' },
     { id: 'last_period_date', question: t('selftests.pregnancy.questions.last_period_date'), type: 'date' },
+    { id: 'urine_test', question: t('selftests.pregnancy.questions.urine_test'), type: 'yesno', optional: true },
   ]
 
   const calculateResult = (answers, questions) => {
-    const yesCount = Object.values(answers).filter(a => a === 'yes').length
-    const totalYesNoQuestions = questions.filter(q => q.type === 'yesno').length
-    const percentage = (yesCount / totalYesNoQuestions) * 100
+    // If not sexually active, return very low risk result
+    if (answers.sexually_active === 'no') {
+      return {
+        riskLevel: 'very_low',
+        percentage: 0,
+        yesCount: 0,
+        totalQuestions: 0,
+        recommendation: t('selftests.pregnancy.results.very_low.rec'),
+        score: '0/0 (0%)'
+      }
+    }
+
+    // If sexually active, proceed with normal calculation but exclude sexually_active question
+    const answeredYesNoQuestions = questions.filter(q => 
+      q.type === 'yesno' && answers[q.id] !== undefined && q.id !== 'sexually_active'
+    )
+    const yesCount = answeredYesNoQuestions.filter(q => answers[q.id] === 'yes').length
+    const totalYesNoQuestions = answeredYesNoQuestions.length
+    const percentage = totalYesNoQuestions > 0 ? (yesCount / totalYesNoQuestions) * 100 : 0
 
     let riskLevel = 'low'
     let recommendation = t('selftests.pregnancy.results.low.rec')
@@ -663,63 +688,6 @@ const IrregularitiesChecker = ({ onBack }) => {
   )
 }
 
-// Thyroid Function Checker
-const ThyroidChecker = ({ onBack }) => {
-  const { t } = useTranslation()
-  const [answers, setAnswers] = useState({})
-  const [result, setResult] = useState(null)
-  const [loading, setLoading] = useState(false)
-
-  const questions = [
-    { id: 'fatigue', question: t('selftests.thyroid.questions.fatigue'), type: 'yesno' },
-    { id: 'weight_changes', question: t('selftests.thyroid.questions.weight_changes'), type: 'yesno' },
-    { id: 'hair_loss', question: t('selftests.thyroid.questions.hair_loss'), type: 'yesno' },
-    { id: 'cold_intolerance', question: t('selftests.thyroid.questions.cold_intolerance'), type: 'yesno' },
-    { id: 'irregular_periods', question: t('selftests.thyroid.questions.irregular_periods'), type: 'yesno' },
-    { id: 'mood_changes', question: t('selftests.thyroid.questions.mood_changes'), type: 'yesno' },
-    { id: 'constipation', question: t('selftests.thyroid.questions.constipation'), type: 'yesno' },
-    { id: 'dry_skin', question: t('selftests.thyroid.questions.dry_skin'), type: 'yesno' },
-  ]
-
-  const calculateResult = (answers, questions) => {
-    const yesCount = Object.values(answers).filter(a => a === 'yes').length
-    const percentage = (yesCount / questions.length) * 100
-
-    let riskLevel = 'low'
-    let recommendation = t('selftests.thyroid.results.low.rec')
-    
-    if (percentage >= 60) {
-      riskLevel = 'high'
-      recommendation = t('selftests.thyroid.results.high.rec')
-    } else if (percentage >= 40) {
-      riskLevel = 'medium'
-      recommendation = t('selftests.thyroid.results.medium.rec')
-    }
-
-    return {
-      riskLevel,
-      percentage: Math.round(percentage),
-      recommendation,
-      score: `${yesCount}/${questions.length} (${Math.round(percentage)}%)`
-    }
-  }
-
-  return (
-    <TestComponent
-      testId="thyroid"
-      onBack={onBack}
-      questions={questions}
-      calculateResult={calculateResult}
-      result={result}
-      setResult={setResult}
-      answers={answers}
-      setAnswers={setAnswers}
-      loading={loading}
-      setLoading={setLoading}
-    />
-  )
-}
-
 // Anemia/Iron Deficiency Checker
 const AnemiaChecker = ({ onBack }) => {
   const { t } = useTranslation()
@@ -777,22 +745,22 @@ const AnemiaChecker = ({ onBack }) => {
   )
 }
 
-// Diabetes/Insulin Resistance Checker
-const DiabetesChecker = ({ onBack }) => {
+// Uterine Fibroids Checker
+const FibroidsChecker = ({ onBack }) => {
   const { t } = useTranslation()
   const [answers, setAnswers] = useState({})
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
 
   const questions = [
-    { id: 'increased_thirst', question: t('selftests.diabetes.questions.increased_thirst'), type: 'yesno' },
-    { id: 'frequent_urination', question: t('selftests.diabetes.questions.frequent_urination'), type: 'yesno' },
-    { id: 'increased_hunger', question: t('selftests.diabetes.questions.increased_hunger'), type: 'yesno' },
-    { id: 'weight_loss', question: t('selftests.diabetes.questions.weight_loss'), type: 'yesno' },
-    { id: 'fatigue', question: t('selftests.diabetes.questions.fatigue'), type: 'yesno' },
-    { id: 'blurred_vision', question: t('selftests.diabetes.questions.blurred_vision'), type: 'yesno' },
-    { id: 'slow_healing', question: t('selftests.diabetes.questions.slow_healing'), type: 'yesno' },
-    { id: 'family_history', question: t('selftests.diabetes.questions.family_history'), type: 'yesno' },
+    { id: 'heavy_bleeding', question: t('selftests.fibroids.questions.heavy_bleeding'), type: 'yesno' },
+    { id: 'prolonged_periods', question: t('selftests.fibroids.questions.prolonged_periods'), type: 'yesno' },
+    { id: 'pelvic_pressure', question: t('selftests.fibroids.questions.pelvic_pressure'), type: 'yesno' },
+    { id: 'frequent_urination', question: t('selftests.fibroids.questions.frequent_urination'), type: 'yesno' },
+    { id: 'difficulty_emptying', question: t('selftests.fibroids.questions.difficulty_emptying'), type: 'yesno' },
+    { id: 'constipation', question: t('selftests.fibroids.questions.constipation'), type: 'yesno' },
+    { id: 'backache_leg_pain', question: t('selftests.fibroids.questions.backache_leg_pain'), type: 'yesno' },
+    { id: 'pain_during_sex', question: t('selftests.fibroids.questions.pain_during_sex'), type: 'yesno' },
   ]
 
   const calculateResult = (answers, questions) => {
@@ -800,14 +768,14 @@ const DiabetesChecker = ({ onBack }) => {
     const percentage = (yesCount / questions.length) * 100
 
     let riskLevel = 'low'
-    let recommendation = t('selftests.diabetes.results.low.rec')
+    let recommendation = t('selftests.fibroids.results.low.rec')
     
     if (percentage >= 60) {
       riskLevel = 'high'
-      recommendation = t('selftests.diabetes.results.high.rec')
+      recommendation = t('selftests.fibroids.results.high.rec')
     } else if (percentage >= 40) {
       riskLevel = 'medium'
-      recommendation = t('selftests.diabetes.results.medium.rec')
+      recommendation = t('selftests.fibroids.results.medium.rec')
     }
 
     return {
@@ -820,7 +788,7 @@ const DiabetesChecker = ({ onBack }) => {
 
   return (
     <TestComponent
-      testId="diabetes"
+      testId="fibroids"
       onBack={onBack}
       questions={questions}
       calculateResult={calculateResult}
