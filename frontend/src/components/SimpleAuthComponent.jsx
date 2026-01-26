@@ -1,9 +1,13 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
 import { useTranslation } from '../utils/translations'
+import { getSelectedLanguage } from '../utils/userPreferences'
 
 const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
-  const { t } = useTranslation()
+  // For login page, use saved language. For register page, use selectedLanguage
+  const { t } = useTranslation(isLogin)
+  const selectedLanguage = getSelectedLanguage()
+  
   const [formData, setFormData] = useState({
     name: '',
     email: '',
@@ -11,13 +15,26 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
     last_period_date: '',
     cycle_length: 28,
     allergies: [],
-    language: 'en',
+    language: selectedLanguage,
     favorite_cuisine: '',
     favorite_exercise: '',
     interests: [],
   })
   const [showPassword, setShowPassword] = useState(false)
-  const [showAdditionalFields, setShowAdditionalFields] = useState(false)
+
+  // Update language when selected language changes
+  useEffect(() => {
+    const handleLanguageChange = () => {
+      const newLanguage = getSelectedLanguage()
+      setFormData(prev => ({
+        ...prev,
+        language: newLanguage
+      }))
+    }
+    
+    window.addEventListener('languageChanged', handleLanguageChange)
+    return () => window.removeEventListener('languageChanged', handleLanguageChange)
+  }, [])
 
   const handleChange = (e) => {
     const { name, value } = e.target
@@ -42,10 +59,10 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5">
       {!isLogin && (
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
             {t('auth.name')}
           </label>
           <input
@@ -54,13 +71,13 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
             value={formData.name}
             onChange={handleChange}
             required
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
+            className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
           />
         </div>
       )}
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
+        <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
           {t('auth.email')}
         </label>
         <input
@@ -69,12 +86,13 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
           value={formData.email}
           onChange={handleChange}
           required
-          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
+          autoComplete="email"
+          className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
+        <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
           {t('auth.password')}
         </label>
         <div className="relative">
@@ -85,14 +103,16 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
             onChange={handleChange}
             required
             minLength={6}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent pr-10"
+            autoComplete={isLogin ? "current-password" : "new-password"}
+            className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent pr-12"
           />
           <button
             type="button"
             onClick={() => setShowPassword(!showPassword)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 p-1 touch-manipulation"
+            aria-label={showPassword ? 'Hide password' : 'Show password'}
           >
-            {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+            {showPassword ? <EyeOff className="h-5 w-5 sm:h-4 sm:w-4" /> : <Eye className="h-5 w-5 sm:h-4 sm:w-4" />}
           </button>
         </div>
       </div>
@@ -100,7 +120,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
       {!isLogin && (
         <>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
               {t('auth.lastPeriodDate')} <span className="text-red-500">*</span>
             </label>
             <input
@@ -110,13 +130,13 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
               onChange={handleChange}
               required
               max={new Date().toISOString().split('T')[0]}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
+              className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
-            <p className="text-xs text-gray-500 mt-1">{t('auth.lastPeriodDate')}</p>
+            <p className="text-xs text-gray-500 mt-1.5">{t('auth.lastPeriodDate')}</p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
               {t('auth.cycleLength')} <span className="text-red-500">*</span>
             </label>
             <input
@@ -127,80 +147,70 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
               required
               min={21}
               max={35}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
+              className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
-            <p className="text-xs text-gray-500 mt-1">{t('auth.cycleLengthHelp')}</p>
+            <p className="text-xs text-gray-500 mt-1.5">{t('auth.cycleLengthHelp')}</p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowAdditionalFields(!showAdditionalFields)}
-            className="text-sm text-period-pink hover:underline"
-          >
-            {showAdditionalFields ? 'Hide' : 'Show'} Additional Preferences
-          </button>
-
-          {showAdditionalFields && (
-            <div className="space-y-4 p-4 bg-gray-50 rounded-lg">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {t('auth.language')}
-                </label>
-                <select
-                  name="language"
-                  value={formData.language}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
-                >
-                  <option value="en">English</option>
-                  <option value="hi">Hindi</option>
-                  <option value="gu">Gujarati</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {t('auth.favoriteCuisine')}
-                </label>
-                <select
-                  name="favorite_cuisine"
-                  value={formData.favorite_cuisine}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
-                >
-                  <option value="">Select Cuisine</option>
-                  <option value="international">International</option>
-                  <option value="south_indian">South Indian</option>
-                  <option value="north_indian">North Indian</option>
-                  <option value="gujarati">Gujarati</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {t('auth.favoriteExercise')}
-                </label>
-                <select
-                  name="favorite_exercise"
-                  value={formData.favorite_exercise}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
-                >
-                  <option value="">Select Exercise Category</option>
-                  <option value="Yoga">Yoga</option>
-                  <option value="Cardio">Cardio</option>
-                  <option value="Strength">Strength</option>
-                  <option value="Mind">Mind</option>
-                  <option value="Stretching">Stretching</option>
-                </select>
-              </div>
+          <div className="space-y-4 pt-2">
+            <div>
+              <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
+                {t('auth.language')}
+              </label>
+              <select
+                name="language"
+                value={formData.language}
+                onChange={handleChange}
+                className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent bg-white"
+              >
+                <option value="en">English</option>
+                <option value="hi">Hindi</option>
+                <option value="gu">Gujarati</option>
+              </select>
             </div>
-          )}
+
+            <div>
+              <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
+                {t('auth.favoriteCuisine')}
+              </label>
+              <select
+                name="favorite_cuisine"
+                value={formData.favorite_cuisine}
+                onChange={handleChange}
+                className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent bg-white"
+              >
+                <option value="">Select Cuisine</option>
+                <option value="international">International</option>
+                <option value="south_indian">South Indian</option>
+                <option value="north_indian">North Indian</option>
+                <option value="gujarati">Gujarati</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
+                {t('auth.favoriteExercise')}
+              </label>
+              <select
+                name="favorite_exercise"
+                value={formData.favorite_exercise}
+                onChange={handleChange}
+                className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent bg-white"
+              >
+                <option value="">Select Exercise Category</option>
+                <option value="Yoga">Yoga</option>
+                <option value="Cardio">Cardio</option>
+                <option value="Strength">Strength</option>
+                <option value="Mind">Mind</option>
+                <option value="Stretching">Stretching</option>
+              </select>
+            </div>
+          </div>
         </>
       )}
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm sm:text-base">
           {error}
         </div>
       )}
@@ -208,7 +218,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
       <button
         type="submit"
         disabled={loading}
-        className="w-full bg-period-pink text-white py-3 rounded-lg font-semibold hover:bg-opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        className="w-full bg-period-pink text-white py-3.5 sm:py-3 rounded-lg font-semibold text-base sm:text-sm hover:bg-opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation active:scale-[0.98]"
       >
         {loading ? t('common.loading') : isLogin ? t('auth.loginButton') : t('auth.registerButton')}
       </button>

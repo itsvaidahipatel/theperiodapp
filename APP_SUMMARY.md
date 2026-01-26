@@ -17,8 +17,9 @@
 ### Technology Stack
 
 #### Backend
-- **Framework**: FastAPI 0.115.0 (Python 3.13)
+- **Framework**: FastAPI 0.115.0 (Python 3.11.9)
 - **Database**: Supabase (PostgreSQL)
+- **⚠️ Python Version**: Python 3.11.9 is used for production stability (see `PYTHON_VERSION_COMPATIBILITY.md`)
 - **Authentication**: JWT tokens (7-day expiration)
 - **Password Security**: pbkdf2_sha256 hashing
 - **API Integration**: 
@@ -393,9 +394,10 @@ updated_cycle_length = 0.7 × old_cycle_length + 0.3 × new_cycle_length
 - **Environment**: `VITE_API_BASE_URL`
 
 ### Backend (Railway)
-- **Runtime**: Python 3.13
+- **Runtime**: Python 3.11.9 (configured in `runtime.txt`)
 - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - **Environment Variables**: All API keys and database credentials
+- **⚠️ Note**: Python 3.13 is not recommended for production (see `PYTHON_VERSION_COMPATIBILITY.md`)
 
 ---
 

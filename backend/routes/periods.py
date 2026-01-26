@@ -101,23 +101,44 @@ async def log_period(
                     try:
                         # Get predicted ovulation for the previous cycle
                         luteal_mean, luteal_sd = estimate_luteal(user_id)
-                        predicted_ov_date_str, _ = predict_ovulation(
+                        # cycle_start_sd will be estimated adaptively based on cycle variance and logging consistency
+                        predicted_ov_date_str, ovulation_sd, _ = predict_ovulation(
                             previous_period_date,
                             float(old_cycle_length),
                             luteal_mean,
                             luteal_sd,
-                            cycle_start_sd=1.0
+                            cycle_start_sd=None,  # Will be estimated adaptively
+                            user_id=user_id
                         )
                         predicted_ov_date = datetime.strptime(predicted_ov_date_str, "%Y-%m-%d")
                         
                         # Observed luteal length = period_start - predicted_ovulation
                         observed_luteal = (curr_date - predicted_ov_date).days
                         
+                        # Confidence gating: Only update if ovulation prediction was high confidence
+                        # This prevents training on incorrect ovulation predictions from:
+                        # - Stress cycles
+                        # - PCOS-like patterns
+                        # - Anovulatory cycles
+                        # - Early app usage (limited data)
+                        # - Missed ovulation
+                        confidence_threshold = 1.5  # High confidence threshold (days)
+                        
                         if 10 <= observed_luteal <= 18:  # Valid range
-                            # Check if user has LH/BBT markers (for now, assume False)
-                            has_markers = False  # TODO: Get from user data if available
-                            update_luteal_estimate(user_id, float(observed_luteal), has_markers)
-                            print(f"Updated luteal estimate: observed={observed_luteal} days")
+                            if ovulation_sd <= confidence_threshold:
+                                # High confidence ovulation prediction - safe to learn from
+                                # Check if user has LH/BBT markers (for now, assume False)
+                                has_markers = False  # TODO: Get from user data if available
+                                update_luteal_estimate(user_id, float(observed_luteal), has_markers)
+                                print(f"✅ Updated luteal estimate: observed={observed_luteal} days (ovulation_sd={ovulation_sd:.2f} <= {confidence_threshold})")
+                            else:
+                                # Low confidence ovulation prediction - skip update to avoid bad training
+                                print(f"⚠️ Skipped luteal update: low confidence ovulation prediction (ovulation_sd={ovulation_sd:.2f} > {confidence_threshold})")
+                                print(f"   Observed luteal={observed_luteal} days, but ovulation prediction uncertainty too high")
+                                print(f"   This prevents training on incorrect predictions from stress cycles, PCOS patterns, or anovulatory cycles")
+                        else:
+                            # Observed luteal outside valid range (10-18 days)
+                            print(f"⚠️ Skipped luteal update: observed_luteal={observed_luteal} days outside valid range (10-18 days)")
                     except Exception as luteal_error:
                         print(f"Warning: Failed to update luteal estimate: {str(luteal_error)}")
             except Exception as e:

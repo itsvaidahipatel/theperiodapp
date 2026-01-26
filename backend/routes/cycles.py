@@ -129,9 +129,16 @@ async def get_current_phase(
 async def get_phase_map(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    force_recalculate: bool = False,
     current_user: dict = Depends(get_current_user)
 ):
-    """Get phase mappings for a date range. Calculates on the fly if not in database."""
+    """Get phase mappings for a date range. Calculates on the fly if not in database.
+    
+    Args:
+        start_date: Start date for phase map (YYYY-MM-DD)
+        end_date: End date for phase map (YYYY-MM-DD)
+        force_recalculate: If True, force regeneration even if data exists in database
+    """
     try:
         user_id = current_user["id"]
         
@@ -152,8 +159,23 @@ async def get_phase_map(
         
         print(f"Retrieved {len(stored_data)} stored phase mappings for user {user_id}")
         
-        # If we have stored data (from RapidAPI), return it
-        if stored_data:
+        # If force_recalculate is True, delete old data first
+        if force_recalculate and stored_data:
+            print("🔄 Force recalculation requested - clearing old phase map data...")
+            try:
+                delete_query = supabase.table("user_cycle_days").delete().eq("user_id", user_id)
+                if start_date:
+                    delete_query = delete_query.gte("date", start_date)
+                if end_date:
+                    delete_query = delete_query.lte("date", end_date)
+                delete_query.execute()
+                print("✅ Old phase map data cleared")
+                stored_data = []  # Clear stored_data so we regenerate
+            except Exception as delete_error:
+                print(f"⚠️ Error clearing old data (non-fatal): {str(delete_error)}")
+        
+        # If we have stored data (from RapidAPI), return it (unless force_recalculate is True)
+        if stored_data and not force_recalculate:
             print("✅ Returning stored RapidAPI phase predictions from database")
             # Convert stored data to the expected format
             formatted_data = []
@@ -328,6 +350,9 @@ async def get_phase_map(
                 if stored_data:
                     print(f"✅ Retrieved {len(stored_data)} RapidAPI predictions from database")
                     formatted_data = []
+                    # ⚠️ MEDICAL SAFETY: Minimum confidence threshold for fertility data
+                    MIN_CONFIDENCE_FOR_FERTILITY = 0.5  # Only show fertility_prob if prediction_confidence >= 0.5
+                    
                     for item in stored_data:
                         formatted_entry = {
                             "date": item.get("date"),
@@ -336,10 +361,20 @@ async def get_phase_map(
                         }
                         # Add new adaptive fields if present in stored data
                         # Note: These may need to be recalculated if not stored
-                        if "fertility_prob" in item:
+                        
+                        # ⚠️ MEDICAL SAFETY: Suppress fertility_prob if prediction_confidence is too low
+                        prediction_confidence = item.get("prediction_confidence") or item.get("confidence", 0.0)  # Backward compatibility
+                        if "fertility_prob" in item and prediction_confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
                             formatted_entry["fertility_prob"] = item["fertility_prob"]
+                        # If prediction_confidence is low, do NOT include fertility_prob (suppressed for safety)
+                        
+                        # Always include predicted_ovulation_date but mark as "estimated"
                         if "predicted_ovulation_date" in item:
                             formatted_entry["predicted_ovulation_date"] = item["predicted_ovulation_date"]
+                            formatted_entry["predicted_ovulation_date_label"] = "Estimated ovulation date"  # Medical safety wording
+                        
+                        if "ovulation_offset" in item:
+                            formatted_entry["ovulation_offset"] = item["ovulation_offset"]
                         if "luteal_estimate" in item:
                             formatted_entry["luteal_estimate"] = item["luteal_estimate"]
                         if "luteal_sd" in item:
@@ -348,8 +383,12 @@ async def get_phase_map(
                             formatted_entry["ovulation_sd"] = item["ovulation_sd"]
                         if "source" in item:
                             formatted_entry["source"] = item["source"]
-                        if "confidence" in item:
-                            formatted_entry["confidence"] = item["confidence"]
+                        if "prediction_confidence" in item:
+                            formatted_entry["prediction_confidence"] = item["prediction_confidence"]
+                        elif "confidence" in item:  # Backward compatibility
+                            formatted_entry["prediction_confidence"] = item["confidence"]
+                        if "is_predicted" in item:
+                            formatted_entry["is_predicted"] = item["is_predicted"]
                         formatted_data.append(formatted_entry)
                     print("=" * 60)
                     return {"phase_map": formatted_data}
@@ -395,6 +434,9 @@ async def get_phase_map(
             
             # Format for response (include new fields for Flutter frontend)
             formatted_map = []
+            # ⚠️ MEDICAL SAFETY: Minimum confidence threshold for fertility data
+            MIN_CONFIDENCE_FOR_FERTILITY = 0.5  # Only show fertility_prob if prediction_confidence >= 0.5
+            
             for item in calculated_map:
                 formatted_entry = {
                     "date": item["date"],
@@ -402,10 +444,20 @@ async def get_phase_map(
                     "phase_day_id": item["phase_day_id"]
                 }
                 # Add new adaptive fields if present
-                if "fertility_prob" in item:
+                
+                # ⚠️ MEDICAL SAFETY: Suppress fertility_prob if prediction_confidence is too low
+                prediction_confidence = item.get("prediction_confidence") or item.get("confidence", 0.0)  # Backward compatibility
+                if "fertility_prob" in item and prediction_confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
                     formatted_entry["fertility_prob"] = item["fertility_prob"]
+                # If prediction_confidence is low, do NOT include fertility_prob (suppressed for safety)
+                
+                # Always include predicted_ovulation_date but mark as "estimated"
                 if "predicted_ovulation_date" in item:
                     formatted_entry["predicted_ovulation_date"] = item["predicted_ovulation_date"]
+                    formatted_entry["predicted_ovulation_date_label"] = "Estimated ovulation date"  # Medical safety wording
+                
+                if "ovulation_offset" in item:
+                    formatted_entry["ovulation_offset"] = item["ovulation_offset"]
                 if "luteal_estimate" in item:
                     formatted_entry["luteal_estimate"] = item["luteal_estimate"]
                 if "luteal_sd" in item:
@@ -414,8 +466,12 @@ async def get_phase_map(
                     formatted_entry["ovulation_sd"] = item["ovulation_sd"]
                 if "source" in item:
                     formatted_entry["source"] = item["source"]
-                if "confidence" in item:
-                    formatted_entry["confidence"] = item["confidence"]
+                if "prediction_confidence" in item:
+                    formatted_entry["prediction_confidence"] = item["prediction_confidence"]
+                elif "confidence" in item:  # Backward compatibility
+                    formatted_entry["prediction_confidence"] = item["confidence"]
+                if "is_predicted" in item:
+                    formatted_entry["is_predicted"] = item["is_predicted"]
                 formatted_map.append(formatted_entry)
             
             print(f"✅ Calculated {len(formatted_map)} phase mappings (improved fallback)")

@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect } from 'react'
-import { getUserLanguage } from './userPreferences'
+import { getUserLanguage, getUserSavedLanguage } from './userPreferences'
 
 const translations = {
   en: {
@@ -442,6 +442,12 @@ const translations = {
     'auth.submit': 'Submit',
     'auth.loginButton': 'Login',
     'auth.registerButton': 'Create Account',
+    'auth.createAccount': 'Create Account',
+    'auth.registerDescription': 'Start your journey to better cycle health',
+    'auth.welcomeBack': 'Welcome Back',
+    'auth.loginDescription': 'Login to continue tracking your cycle',
+    'auth.loginError': 'Login failed. Please check your credentials.',
+    'auth.registerError': 'Registration failed. Please try again.',
     'auth.switchToLogin': 'Already have an account? Login',
     'auth.switchToRegister': "Don't have an account? Register",
     'auth.showPassword': 'Show Password',
@@ -466,6 +472,11 @@ const translations = {
     'safety.title': 'Important Health Information',
     'safety.note': 'Safety Note: If you experience severe symptoms or have concerns about your health, please consult with a healthcare professional.',
     'safety.disclaimer': 'Disclaimer: This information is for educational purposes only and should not replace professional medical advice. Always seek the advice of your physician or other qualified health provider with any questions you may have regarding a medical condition.',
+    'safety.contraception': '⚠️ NOT FOR CONTRACEPTION: This app is NOT a contraceptive method. Do NOT rely on fertility predictions for birth control. Use FDA-approved contraceptive methods if you wish to prevent pregnancy.',
+    'safety.diagnosis': '⚠️ NOT FOR DIAGNOSIS: This app does NOT diagnose medical conditions. Cycle predictions are estimates based on patterns and should not be used to diagnose or treat health conditions. Consult a healthcare professional for diagnosis.',
+    'safety.estimated': 'Estimated',
+    'safety.predicted': 'Predicted',
+    'safety.likely': 'Likely',
     
     // Hormone levels
     'hormoneLevel.low': 'Low',
@@ -980,6 +991,12 @@ const translations = {
     'auth.submit': 'सबमिट करें',
     'auth.loginButton': 'लॉगिन',
     'auth.registerButton': 'खाता बनाएं',
+    'auth.createAccount': 'खाता बनाएं',
+    'auth.registerDescription': 'बेहतर चक्र स्वास्थ्य की अपनी यात्रा शुरू करें',
+    'auth.welcomeBack': 'वापसी पर स्वागत है',
+    'auth.loginDescription': 'अपने चक्र को ट्रैक करना जारी रखने के लिए लॉगिन करें',
+    'auth.loginError': 'लॉगिन विफल। कृपया अपनी साख जांचें।',
+    'auth.registerError': 'पंजीकरण विफल। कृपया पुनः प्रयास करें।',
     'auth.switchToLogin': 'पहले से खाता है? लॉगिन करें',
     'auth.switchToRegister': 'खाता नहीं है? रजिस्टर करें',
     'auth.showPassword': 'पासवर्ड दिखाएं',
@@ -1003,7 +1020,12 @@ const translations = {
     // Safety Disclaimer
     'safety.title': 'महत्वपूर्ण स्वास्थ्य जानकारी',
     'safety.note': 'सुरक्षा नोट: यदि आपको गंभीर लक्षण अनुभव होते हैं या आपके स्वास्थ्य के बारे में चिंताएं हैं, तो कृपया एक स्वास्थ्य देखभाल पेशेवर से परामर्श करें।',
+    'safety.contraception': '⚠️ गर्भनिरोधक के लिए नहीं: यह ऐप गर्भनिरोधक विधि नहीं है। जन्म नियंत्रण के लिए प्रजनन क्षमता की भविष्यवाणी पर भरोसा न करें। यदि आप गर्भावस्था को रोकना चाहते हैं, तो FDA-अनुमोदित गर्भनिरोधक विधियों का उपयोग करें।',
+    'safety.diagnosis': '⚠️ निदान के लिए नहीं: यह ऐप चिकित्सा स्थितियों का निदान नहीं करता है। चक्र भविष्यवाणियां पैटर्न के आधार पर अनुमान हैं और स्वास्थ्य स्थितियों के निदान या उपचार के लिए उपयोग नहीं की जानी चाहिए। निदान के लिए एक स्वास्थ्य देखभाल पेशेवर से परामर्श करें।',
     'safety.disclaimer': 'अस्वीकरण: यह जानकारी केवल शैक्षिक उद्देश्यों के लिए है और इसे पेशेवर चिकित्सा सलाह का विकल्प नहीं माना जाना चाहिए। किसी भी चिकित्सा स्थिति के बारे में आपके किसी भी प्रश्न के लिए हमेशा अपने चिकित्सक या अन्य योग्य स्वास्थ्य प्रदाता की सलाह लें।',
+    'safety.estimated': 'अनुमानित',
+    'safety.predicted': 'भविष्यवाणी',
+    'safety.likely': 'संभावित',
     
     // Hormone levels
     'hormoneLevel.low': 'कम',
@@ -1518,6 +1540,12 @@ const translations = {
     'auth.submit': 'સબમિટ કરો',
     'auth.loginButton': 'લૉગિન',
     'auth.registerButton': 'એકાઉન્ટ બનાવો',
+    'auth.createAccount': 'એકાઉન્ટ બનાવો',
+    'auth.registerDescription': 'સારા ચક્ર આરોગ્યની તમારી યાત્રા શરૂ કરો',
+    'auth.welcomeBack': 'પાછા સ્વાગત છે',
+    'auth.loginDescription': 'તમારા ચક્રને ટ્રેક કરવાનું ચાલુ રાખવા માટે લૉગિન કરો',
+    'auth.loginError': 'લૉગિન નિષ્ફળ. કૃપા કરીને તમારી સાચીતી તપાસો.',
+    'auth.registerError': 'નોંધણી નિષ્ફળ. કૃપા કરીને ફરી પ્રયાસ કરો.',
     'auth.switchToLogin': 'પહેલેથી એકાઉન્ટ છે? લૉગિન કરો',
     'auth.switchToRegister': 'એકાઉન્ટ નથી? રજિસ્ટર કરો',
     'auth.showPassword': 'પાસવર્ડ બતાવો',
@@ -1541,7 +1569,12 @@ const translations = {
     // Safety Disclaimer
     'safety.title': 'મહત્વપૂર્ણ આરોગ્ય માહિતી',
     'safety.note': 'સુરક્ષા નોંધ: જો તમને ગંભીર લક્ષણોનો અનુભવ થાય છે અથવા તમારા આરોગ્ય વિશે ચિંતાઓ છે, તો કૃપા કરીને આરોગ્ય સંભાળ વ્યવસાયિકની સલાહ લો.',
+    'safety.contraception': '⚠️ ગર્ભનિરોધક માટે નહીં: આ એપ્લિકેશન ગર્ભનિરોધક પદ્ધતિ નથી. જન્મ નિયંત્રણ માટે ફળદ્રુપતા આગાહીઓ પર ભરોસો ન કરો. જો તમે ગર્ભાવસ્થાને અટકાવવા માંગો છો, તો FDA-મંજૂર ગર્ભનિરોધક પદ્ધતિઓનો ઉપયોગ કરો.',
+    'safety.diagnosis': '⚠️ નિદાન માટે નહીં: આ એપ્લિકેશન તબીબી સ્થિતિઓનું નિદાન કરતી નથી. ચક્ર આગાહીઓ પેટર્નના આધારે અંદાજ છે અને આરોગ્ય સ્થિતિઓના નિદાન અથવા સારવાર માટે ઉપયોગ કરવી જોઈએ નહીં. નિદાન માટે આરોગ્ય સંભાળ વ્યવસાયિકની સલાહ લો.',
     'safety.disclaimer': 'અસ્વીકરણ: આ માહિતી ફક્ત શૈક્ષણિક હેતુઓ માટે છે અને તેને વ્યાવસાયિક તબીબી સલાહનો વિકલ્પ ન ગણવી જોઈએ. કોઈપણ તબીબી સ્થિતિ વિશે તમારા કોઈપણ પ્રશ્નો માટે હંમેશા તમારા ચિકિત્સક અથવા અન્ય યોગ્ય આરોગ્ય પ્રદાતાની સલાહ લો.',
+    'safety.estimated': 'અંદાજિત',
+    'safety.predicted': 'આગાહી',
+    'safety.likely': 'સંભવિત',
     
     // Hormone levels
     'hormoneLevel.low': 'નીચું',
@@ -1652,28 +1685,70 @@ const translations = {
  */
 export const t = (key, language = null) => {
   const lang = language || getUserLanguage()
-  return translations[lang]?.[key] || translations.en?.[key] || key
+  const translation = translations[lang]?.[key] || translations.en?.[key] || key
+  
+  // Debug logging for missing translations
+  if (!translations[lang]?.[key] && lang !== 'en') {
+    console.log(`Translation missing for key "${key}" in language "${lang}", using English fallback`)
+  }
+  
+  return translation
 }
 
 /**
  * Hook to use translations in React components
  * Automatically updates when language changes
+ * @param {boolean} useSavedLanguage - If true, uses user's saved language (for login page). If false, prioritizes selectedLanguage (for register page)
  */
-export const useTranslation = () => {
-  const [language, setLanguage] = useState(() => getUserLanguage())
+export const useTranslation = (useSavedLanguage = false) => {
+  // Choose the appropriate language getter function
+  const getLanguageFn = useSavedLanguage ? getUserSavedLanguage : getUserLanguage
+  
+  // Read language directly from localStorage on mount
+  const [language, setLanguage] = useState(() => {
+    const lang = getLanguageFn()
+    console.log('useTranslation: Initial language:', lang, 'useSavedLanguage:', useSavedLanguage)
+    return lang
+  })
   
   useEffect(() => {
-    const handleLanguageChange = () => {
-      setLanguage(getUserLanguage())
+    // On mount, always re-read from localStorage to ensure we have the latest value
+    // This handles the case where language was set just before navigation
+    const currentLang = getLanguageFn()
+    console.log('useTranslation: useEffect on mount, current language:', currentLang, 'state:', language)
+    if (currentLang !== language) {
+      console.log('useTranslation: Updating language state from', language, 'to', currentLang)
+      setLanguage(currentLang)
+    }
+    
+    // Listen for language change events
+    const handleLanguageChange = (event) => {
+      // Get language from event detail or re-read from localStorage
+      const newLang = event?.detail?.language || getLanguageFn()
+      console.log('useTranslation: Language changed event, new language:', newLang)
+      setLanguage(newLang)
     }
     
     window.addEventListener('languageChanged', handleLanguageChange)
     return () => window.removeEventListener('languageChanged', handleLanguageChange)
-  }, [])
+  }, []) // Only run on mount
   
   return {
-    t: (key) => t(key, language),
-    language,
+    t: (key) => {
+      // Always use current language state, but fallback to reading from localStorage if needed
+      const currentLang = language || getLanguageFn()
+      
+      // Use the global t function, not the hook's t function (avoid recursion)
+      const translation = translations[currentLang]?.[key] || translations.en?.[key] || key
+      
+      // Debug: Log translation lookups for auth keys
+      if (key.startsWith('auth.')) {
+        console.log(`Translation lookup: key="${key}", language="${currentLang}", found="${!!translations[currentLang]?.[key]}", result="${translation}"`)
+      }
+      
+      return translation
+    },
+    language: language || getLanguageFn(),
   }
 }
 

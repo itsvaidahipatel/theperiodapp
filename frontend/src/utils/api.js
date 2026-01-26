@@ -62,6 +62,8 @@ export const registerUser = async (payload) => {
   if (data.access_token) {
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('user', JSON.stringify(data.user))
+    // Clear selectedLanguage after successful registration - user now has saved preference
+    localStorage.removeItem('selectedLanguage')
   }
   return data
 }
@@ -74,6 +76,8 @@ export const loginUser = async (payload) => {
   if (data.access_token) {
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('user', JSON.stringify(data.user))
+    // Clear selectedLanguage after successful login - user should use saved preference
+    localStorage.removeItem('selectedLanguage')
   }
   return data
 }
@@ -175,14 +179,30 @@ export const getCurrentPhase = async (date) => {
   }
 }
 
-export const getPhaseMap = async (startDate, endDate) => {
+export const getPhaseMap = async (startDate, endDate, forceRecalculate = false) => {
   try {
     const params = new URLSearchParams()
     if (startDate) params.append('start_date', startDate)
     if (endDate) params.append('end_date', endDate)
+    if (forceRecalculate) params.append('force_recalculate', 'true')
     const query = params.toString() ? `?${params.toString()}` : ''
     const response = await apiRequest(`/cycles/phase-map${query}`)
     console.log('getPhaseMap raw response:', response)
+    
+    // Auto-detect if ovulation phases are missing and trigger recalculation
+    if (!forceRecalculate && response?.phase_map && Array.isArray(response.phase_map)) {
+      const hasOvulation = response.phase_map.some(item => 
+        item.phase === 'Ovulation' || (item.phase_day_id && item.phase_day_id.toLowerCase().startsWith('o'))
+      )
+      
+      // If we have data but no ovulation phases, and we have enough dates to expect ovulation
+      if (!hasOvulation && response.phase_map.length > 14) {
+        console.log('⚠️ No ovulation phases detected in phase map. Triggering recalculation...')
+        // Recursively call with force_recalculate
+        return await getPhaseMap(startDate, endDate, true)
+      }
+    }
+    
     return response
   } catch (error) {
     console.error('getPhaseMap error:', error)
