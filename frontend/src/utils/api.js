@@ -130,6 +130,12 @@ export const updateNotificationPreferences = async (preferences) => {
   })
 }
 
+export const resetCycleData = async () => {
+  return apiRequest('/user/reset-cycle-data', {
+    method: 'POST',
+  })
+}
+
 // Period API functions
 export const logPeriod = async (logData) => {
   return apiRequest('/periods/log', {
@@ -153,6 +159,10 @@ export const deletePeriodLog = async (logId) => {
   return apiRequest(`/periods/log/${logId}`, {
     method: 'DELETE',
   })
+}
+
+export const getPeriodEpisodes = async () => {
+  return apiRequest('/periods/episodes')
 }
 
 // Cycle API functions
@@ -186,7 +196,45 @@ export const getPhaseMap = async (startDate, endDate, forceRecalculate = false) 
     if (endDate) params.append('end_date', endDate)
     if (forceRecalculate) params.append('force_recalculate', 'true')
     const query = params.toString() ? `?${params.toString()}` : ''
-    const response = await apiRequest(`/cycles/phase-map${query}`)
+    
+    // Calculate date range to determine appropriate timeout
+    let timeoutDuration = 30000 // Default 30 seconds
+    if (startDate && endDate) {
+      try {
+        const start = new Date(startDate)
+        const end = new Date(endDate)
+        const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24))
+        
+        // Longer timeout for larger date ranges (initial load = 7 months = ~210 days)
+        if (daysDiff > 180) {
+          timeoutDuration = 45000 // 45 seconds for large ranges (initial load)
+        } else if (daysDiff > 90) {
+          timeoutDuration = 35000 // 35 seconds for medium ranges
+        }
+        // For small ranges (< 90 days), use default 30 seconds
+      } catch {
+        // If date parsing fails, use default timeout
+      }
+    }
+    
+    // Add timeout - longer for initial loads, shorter for navigation
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeoutDuration)
+    
+    let response
+    try {
+      response = await apiRequest(`/cycles/phase-map${query}`, { signal: controller.signal })
+      clearTimeout(timeoutId)
+    } catch (error) {
+      clearTimeout(timeoutId)
+      // Only show timeout error for actual timeouts, not other errors
+      if (error.name === 'AbortError') {
+        throw new Error('Request timeout - predictions are being generated in background. Please try again in a moment.')
+      }
+      // Don't wrap other errors - let them pass through
+      throw error
+    }
+    
     console.log('getPhaseMap raw response:', response)
     
     // Auto-detect if ovulation phases are missing and trigger recalculation
@@ -260,3 +308,15 @@ export const getChatHistory = async (limit = 20) => {
   return apiRequest(`/ai/chat-history?limit=${limit}`)
 }
 
+// Cycle Health Check API functions
+export const getCycleHealthCheck = async () => {
+  return apiRequest('/cycles/health-check')
+}
+// New period service API functions
+export const getPeriodPredictions = async (count = 6) => {
+  return apiRequest(`/periods/predictions?count=${count}`)
+}
+
+export const getCycleStats = async () => {
+  return apiRequest('/periods/stats')
+}

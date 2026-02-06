@@ -100,7 +100,7 @@ const PhaseCalendar = ({ onDateClick, selectedDate }) => {
         </div>
         <div className="flex items-center gap-2">
           <div className="w-4 h-4 rounded-full bg-yellow-200"></div>
-          <span className="text-sm">Ovulation</span>
+          <span className="text-sm" title="Estimated Ovulation (1-3 day window)">Estimated Ovulation (1-3 day window)</span>
         </div>
         <div className="flex items-center gap-2">
           <div className="w-4 h-4 rounded-full bg-purple-200"></div>

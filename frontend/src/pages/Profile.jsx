@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
-import { updateUserProfile, changePassword, getNotificationPreferences, updateNotificationPreferences } from '../utils/api'
-import { Save, Lock, Bell } from 'lucide-react'
+import { updateUserProfile, changePassword, getNotificationPreferences, updateNotificationPreferences, resetCycleData } from '../utils/api'
+import { Save, Lock, Bell, RotateCcw, AlertTriangle, X } from 'lucide-react'
 import { updateUserData } from '../utils/userPreferences'
 import { useTranslation } from '../utils/translations'
 
@@ -23,14 +23,16 @@ const Profile = () => {
   })
   const [notificationData, setNotificationData] = useState({
     email_notifications_enabled: true,
-    phase_transitions: true,
-    period_reminders: true,
-    reminder_days_before: 2,
+    upcoming_reminders: true,
+    logging_reminders: true,
+    health_alerts: true,
   })
   const [activeTab, setActiveTab] = useState('profile')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [showResetConfirm, setShowResetConfirm] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -55,11 +57,12 @@ const Profile = () => {
   const loadNotificationPreferences = async () => {
     try {
       const prefs = await getNotificationPreferences()
+      const notificationPrefs = prefs.notification_preferences || {}
       setNotificationData({
         email_notifications_enabled: prefs.email_notifications_enabled ?? true,
-        phase_transitions: prefs.notification_preferences?.phase_transitions ?? true,
-        period_reminders: prefs.notification_preferences?.period_reminders ?? true,
-        reminder_days_before: prefs.notification_preferences?.reminder_days_before ?? 2,
+        upcoming_reminders: notificationPrefs.upcoming_reminders ?? true,
+        logging_reminders: notificationPrefs.logging_reminders ?? true,
+        health_alerts: notificationPrefs.health_alerts ?? true,
       })
     } catch (err) {
       console.error('Failed to load notification preferences:', err)
@@ -153,17 +156,48 @@ const Profile = () => {
     try {
       await updateNotificationPreferences({
         email_notifications_enabled: notificationData.email_notifications_enabled,
-        notification_preferences: {
-          phase_transitions: notificationData.phase_transitions,
-          period_reminders: notificationData.period_reminders,
-          reminder_days_before: parseInt(notificationData.reminder_days_before),
-        }
+        upcoming_reminders: notificationData.upcoming_reminders,
+        logging_reminders: notificationData.logging_reminders,
+        health_alerts: notificationData.health_alerts,
       })
       setSuccess(t('profile.notificationsSaved'))
     } catch (err) {
       setError(err.message || 'Failed to update notification preferences')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleResetCycleData = async () => {
+    setResetting(true)
+    setError('')
+    setSuccess('')
+    
+    try {
+      const response = await resetCycleData()
+      
+      // Update local user data
+      const updatedUser = { ...user, ...response.user }
+      localStorage.setItem('user', JSON.stringify(updatedUser))
+      setUser(updatedUser)
+      
+      // Clear form data related to cycles
+      setFormData(prev => ({ ...prev }))
+      
+      // Dispatch event to refresh all cycle-related data
+      window.dispatchEvent(new CustomEvent('periodLogged'))
+      
+      setSuccess('All cycle data has been reset successfully. Your calendar and statistics are now clean.')
+      setShowResetConfirm(false)
+      
+      // Refresh the page after a short delay to ensure all data is cleared
+      setTimeout(() => {
+        window.location.reload()
+      }, 2000)
+    } catch (err) {
+      setError(err.message || 'Failed to reset cycle data')
+    } finally {
+      setResetting(false)
     }
   }
 
@@ -379,7 +413,9 @@ const Profile = () => {
         {activeTab === 'notifications' && (
           <form onSubmit={handleNotificationSubmit} className="bg-white rounded-lg shadow-lg p-6 space-y-6">
             <div>
-              <p className="text-sm text-gray-600 mb-6">{t('profile.notificationsDescription')}</p>
+              <p className="text-sm text-gray-600 mb-6">
+                Choose what email notifications you'd like to receive. You can unsubscribe at any time.
+              </p>
             </div>
             
             {/* Master Toggle */}
@@ -387,9 +423,11 @@ const Profile = () => {
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('profile.emailNotificationsEnabled')}
+                    Email Notifications
                   </label>
-                  <p className="text-xs text-gray-500">{t('profile.emailNotificationsEnabledDesc')}</p>
+                  <p className="text-xs text-gray-500">
+                    Master switch for all email notifications. Turn this off to unsubscribe from all emails.
+                  </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
@@ -404,20 +442,25 @@ const Profile = () => {
               </div>
             </div>
             
-            {/* Phase Transitions */}
+            {/* Email Type Options */}
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="text-sm font-semibold text-gray-700 mb-3">What would you like to receive?</div>
+              
+              {/* Upcoming Period Reminders */}
+              <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
                 <div className="flex-1">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('profile.phaseTransitions')}
+                    Upcoming Period Reminders
                   </label>
-                  <p className="text-xs text-gray-500">{t('profile.phaseTransitionsDesc')}</p>
+                  <p className="text-xs text-gray-500">
+                    Get a heads-up when your next period is approaching (7 days before, 3 days before)
+                  </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
                     type="checkbox"
-                    name="phase_transitions"
-                    checked={notificationData.phase_transitions}
+                    name="upcoming_reminders"
+                    checked={notificationData.upcoming_reminders}
                     onChange={handleNotificationChange}
                     disabled={!notificationData.email_notifications_enabled}
                     className="sr-only peer"
@@ -426,19 +469,21 @@ const Profile = () => {
                 </label>
               </div>
               
-              {/* Period Reminders */}
-              <div className="flex items-center justify-between">
+              {/* Period Logging Reminders */}
+              <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
                 <div className="flex-1">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('profile.periodReminders')}
+                    Period Logging Reminders
                   </label>
-                  <p className="text-xs text-gray-500">{t('profile.periodRemindersDesc')}</p>
+                  <p className="text-xs text-gray-500">
+                    Daily reminders during your predicted period window to log your period (stops automatically when you log)
+                  </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
                     type="checkbox"
-                    name="period_reminders"
-                    checked={notificationData.period_reminders}
+                    name="logging_reminders"
+                    checked={notificationData.logging_reminders}
                     onChange={handleNotificationChange}
                     disabled={!notificationData.email_notifications_enabled}
                     className="sr-only peer"
@@ -447,28 +492,36 @@ const Profile = () => {
                 </label>
               </div>
               
-              {/* Reminder Days Before */}
-              {notificationData.period_reminders && (
-                <div>
+              {/* Health Insights / Anomaly Alerts */}
+              <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
+                <div className="flex-1">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('profile.reminderDaysBefore')}
+                    Health Insights / Anomaly Alerts
                   </label>
-                  <p className="text-xs text-gray-500 mb-2">{t('profile.reminderDaysBeforeDesc')}</p>
-                  <select
-                    name="reminder_days_before"
-                    value={notificationData.reminder_days_before}
-                    onChange={handleNotificationChange}
-                    disabled={!notificationData.email_notifications_enabled || !notificationData.period_reminders}
-                    className={`w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent ${!notificationData.email_notifications_enabled || !notificationData.period_reminders ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <option value={1}>1 day before</option>
-                    <option value={2}>2 days before</option>
-                    <option value={3}>3 days before</option>
-                    <option value={4}>4 days before</option>
-                    <option value={5}>5 days before</option>
-                  </select>
+                  <p className="text-xs text-gray-500">
+                    Rare, respectful alerts about patterns worth keeping an eye on (max 1 per cycle)
+                  </p>
                 </div>
-              )}
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="health_alerts"
+                    checked={notificationData.health_alerts}
+                    onChange={handleNotificationChange}
+                    disabled={!notificationData.email_notifications_enabled}
+                    className="sr-only peer"
+                  />
+                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.email_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
+                </label>
+              </div>
+            </div>
+
+            {/* Unsubscribe Notice */}
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <p className="text-xs text-gray-600">
+                <strong>Unsubscribe:</strong> To unsubscribe from all emails, turn off "Email Notifications" above. 
+                You can also unsubscribe by clicking the link in any email you receive.
+              </p>
             </div>
 
             {error && (
@@ -492,6 +545,101 @@ const Profile = () => {
               {loading ? t('common.loading') : t('profile.save')}
             </button>
           </form>
+        )}
+
+        {/* Reset Cycle Data Section */}
+        <div className="mt-8 bg-red-50 border-2 border-red-200 rounded-lg p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex-shrink-0">
+              <RotateCcw className="h-6 w-6 text-red-600" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-bold text-red-800 mb-2">Reset All Cycle Data</h3>
+              <p className="text-sm text-red-700 mb-4">
+                This will permanently delete all your cycle data including:
+              </p>
+              <ul className="text-sm text-red-700 list-disc list-inside mb-4 space-y-1">
+                <li>All period logs (past, current, and future)</li>
+                <li>All cycle history and statistics</li>
+                <li>All phase predictions and calendar data</li>
+                <li>Your cycle length and last period date</li>
+              </ul>
+              <p className="text-sm font-semibold text-red-800 mb-4">
+                ⚠️ WARNING: This action cannot be undone! You will lose all your cycle tracking data.
+              </p>
+              <button
+                onClick={() => setShowResetConfirm(true)}
+                className="bg-red-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-red-700 transition flex items-center gap-2"
+              >
+                <RotateCcw className="h-5 w-5" />
+                Reset All Cycle Data
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Reset Confirmation Modal */}
+        {showResetConfirm && (
+          <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="flex-shrink-0">
+                  <AlertTriangle className="h-8 w-8 text-red-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-2xl font-bold text-red-800 mb-2">Are You Absolutely Sure?</h3>
+                  <p className="text-gray-700 mb-4">
+                    This action will <strong className="text-red-600">permanently delete</strong> all your cycle data:
+                  </p>
+                  <ul className="text-sm text-gray-700 list-disc list-inside mb-4 space-y-1">
+                    <li>All period logs (past, current, and future)</li>
+                    <li>All cycle history and statistics</li>
+                    <li>All phase predictions and calendar data</li>
+                    <li>Your cycle length and last period date</li>
+                  </ul>
+                  <div className="bg-red-50 border-2 border-red-300 rounded-lg p-4 mb-4">
+                    <p className="text-sm font-bold text-red-800">
+                      ⚠️ THIS ACTION CANNOT BE UNDONE!
+                    </p>
+                    <p className="text-sm text-red-700 mt-2">
+                      All your cycle tracking data will be permanently erased. You will need to start tracking from scratch.
+                    </p>
+                  </div>
+                  <p className="text-sm font-semibold text-gray-800 mb-4">
+                    Are you certain you want to proceed?
+                  </p>
+                </div>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowResetConfirm(false)}
+                  disabled={resetting}
+                  className="flex-1 bg-gray-200 text-gray-800 px-4 py-3 rounded-lg font-semibold hover:bg-gray-300 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <X className="h-5 w-5" />
+                  Cancel
+                </button>
+                <button
+                  onClick={handleResetCycleData}
+                  disabled={resetting}
+                  className="flex-1 bg-red-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-red-700 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {resetting ? (
+                    <>
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                      <span>Resetting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="h-5 w-5" />
+                      <span>Yes, Reset Everything</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Safety Disclaimer - At the bottom */}

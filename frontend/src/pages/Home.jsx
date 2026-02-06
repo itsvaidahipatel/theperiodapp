@@ -1,11 +1,25 @@
 import { Link, useNavigate } from 'react-router-dom'
-import { Heart, Calendar, MessageCircle, Activity, ArrowRight, Shield, Zap, ClipboardCheck, Stethoscope } from 'lucide-react'
+import { Heart, Calendar, MessageCircle, Activity, ArrowRight, Shield, Zap, ClipboardCheck, Stethoscope, Smartphone, Monitor } from 'lucide-react'
 import { setSelectedLanguage, clearSelectedLanguage, getUserSavedLanguage } from '../utils/userPreferences'
 import { useState, useEffect } from 'react'
+import { useViewMode } from '../context/ViewModeContext'
 
 const Home = () => {
   const navigate = useNavigate()
   const [hoveredLang, setHoveredLang] = useState(null)
+  const { viewMode, toggleViewMode, isMobileView, isWebView } = useViewMode()
+
+  const getViewModeIcon = () => {
+    if (viewMode === 'mobile') return Smartphone
+    return Monitor // Web view
+  }
+
+  const getViewModeLabel = () => {
+    if (viewMode === 'mobile') return 'Mobile View'
+    return 'Web View'
+  }
+
+  const ViewModeIcon = getViewModeIcon()
 
   // Clear selectedLanguage when logged-in user visits home page
   // This ensures their saved language preference is used, not a stale selectedLanguage
@@ -96,6 +110,18 @@ const Home = () => {
       </div>
 
       <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12 lg:py-16">
+        {/* View Mode Toggle Button - Top Right */}
+        <div className="absolute top-4 right-4 sm:top-6 sm:right-6 z-10">
+          <button
+            onClick={toggleViewMode}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg transition bg-white/90 backdrop-blur-md border border-white/30 text-gray-700 hover:bg-white shadow-lg hover:shadow-xl"
+            title={getViewModeLabel()}
+          >
+            <ViewModeIcon className="h-5 w-5" />
+            <span className="hidden sm:inline text-sm font-medium">{getViewModeLabel()}</span>
+          </button>
+        </div>
+
         {/* Hero Section */}
         <div className="text-center mb-12 sm:mb-16 lg:mb-20">
           {/* Logo/Brand Icon */}
@@ -130,7 +156,7 @@ const Home = () => {
             </div>
 
             {/* Language Buttons */}
-            <div className="flex flex-col sm:flex-row gap-4 sm:gap-5 justify-center items-stretch sm:items-center max-w-4xl mx-auto px-4">
+            <div className={`flex ${isMobileView ? 'flex-col' : 'flex-row'} gap-4 sm:gap-5 justify-center items-stretch sm:items-center max-w-4xl mx-auto px-4`}>
               {languageOptions.map((lang) => {
                 const isHovered = hoveredLang === lang.code
                 
@@ -176,7 +202,7 @@ const Home = () => {
         </div>
 
         {/* Features Section */}
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6 sm:gap-8 mt-12 sm:mt-16 lg:mt-20">
+        <div className={`grid ${isMobileView ? 'grid-cols-1' : 'grid-cols-4'} gap-6 sm:gap-8 mt-12 sm:mt-16 lg:mt-20`}>
           {features.map((feature, index) => {
             const IconComponent = feature.icon
             return (
@@ -209,7 +235,7 @@ const Home = () => {
 
         {/* Trust Indicators */}
         <div className="mt-12 sm:mt-16 lg:mt-20 pt-8 sm:pt-12 border-t border-white/20">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 sm:gap-8 text-center">
+          <div className={`grid ${isMobileView ? 'grid-cols-1' : 'grid-cols-3'} gap-6 sm:gap-8 text-center`}>
             <div className="flex flex-col items-center group cursor-default">
               <div className="bg-white/10 backdrop-blur-md p-4 rounded-full mb-3 group-hover:scale-110 transition-transform duration-300">
                 <Shield className="h-6 w-6 sm:h-8 sm:w-8 text-white" />

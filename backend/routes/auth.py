@@ -121,31 +121,34 @@ async def register(request: RegisterRequest):
         # Auto-generate cycle predictions if last_period_date is provided
         if request.last_period_date:
             try:
-                from cycle_utils import generate_cycle_phase_map
+                from cycle_utils import calculate_phase_for_date_range
                 from datetime import datetime, timedelta
                 
-                # Generate synthetic past cycle data based on last_period_date and cycle_length
-                last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d")
+                # Generate cycle predictions using local adaptive algorithms
+                last_period_date = request.last_period_date
                 cycle_length = request.cycle_length or 28
-                past_cycle_data = []
                 
-                # Generate 5 cycles going backwards from last period
-                for i in range(5):
-                    cycle_date = last_period_dt - timedelta(days=cycle_length * i)
-                    past_cycle_data.append({
-                        "cycle_start_date": cycle_date.strftime("%Y-%m-%d"),
-                        "period_length": 5  # Default period length
-                    })
+                # Calculate date range: from last period to 60 days ahead
+                last_period_dt = datetime.strptime(last_period_date, "%Y-%m-%d")
+                today = datetime.now()
+                start_date = last_period_date
+                end_date = (today + timedelta(days=60)).strftime("%Y-%m-%d")
                 
-                # Generate cycle predictions
-                current_date = datetime.now().strftime("%Y-%m-%d")
+                # Generate predictions using local adaptive algorithms
                 print(f"Auto-generating cycle predictions for new user {user['id']}")
-                generate_cycle_phase_map(
+                phase_mappings = calculate_phase_for_date_range(
                     user_id=user["id"],
-                    past_cycle_data=past_cycle_data,
-                    current_date=current_date
+                    last_period_date=last_period_date,
+                    cycle_length=int(cycle_length),
+                    start_date=start_date,
+                    end_date=end_date
                 )
-                print(f"Cycle predictions generated successfully for user {user['id']}")
+                
+                # Store predictions in database
+                if phase_mappings:
+                    from cycle_utils import store_cycle_phase_map
+                    store_cycle_phase_map(user["id"], phase_mappings, update_future_only=False)
+                    print(f"Cycle predictions generated successfully for user {user['id']} ({len(phase_mappings)} days)")
             except Exception as pred_error:
                 # Don't fail registration if prediction fails, but log it
                 import traceback
@@ -154,6 +157,19 @@ async def register(request: RegisterRequest):
         
         # Create access token
         access_token = create_access_token(data={"sub": user["id"]})
+        
+        # Send welcome email to new user
+        try:
+            from email_service import email_service
+            email_service.send_welcome_email(
+                to_email=request.email,
+                user_name=request.name,
+                language=request.language or "en"
+            )
+            print(f"✅ Welcome email sent to {request.email}")
+        except Exception as email_error:
+            # Don't fail registration if email fails, but log it
+            print(f"⚠️ Failed to send welcome email: {str(email_error)}")
         
         return {
             "msg": "User registered successfully",

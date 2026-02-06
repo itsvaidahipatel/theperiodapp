@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS period_logs (
 );
 
 -- User cycle days table (phase mappings)
+-- NOTE: Consider renaming to cycle_day_predictions for clarity (future refactor)
 CREATE TABLE IF NOT EXISTS user_cycle_days (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     date DATE NOT NULL,

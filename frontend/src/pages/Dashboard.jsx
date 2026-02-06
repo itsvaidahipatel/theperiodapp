@@ -5,13 +5,16 @@ import 'react-calendar/dist/Calendar.css'
 import { format, startOfMonth, endOfMonth, addMonths, subMonths } from 'date-fns'
 import { getTimeBasedGreeting, getTimeBasedMessage } from '../utils/greetings'
 import { getPhaseColorClass, getPhaseDescription, getPhaseEmoji, getPhaseColor } from '../utils/phaseHelpers'
-import { logout, logPeriod, getPhaseMap } from '../utils/api'
+import { logout, logPeriod, getPhaseMap, getPeriodEpisodes } from '../utils/api'
 import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import PeriodLogModal from '../components/PeriodLogModal'
 import LoadingSpinner from '../components/LoadingSpinner'
+import CycleStats from '../components/CycleStats'
+import PeriodCalendar from '../components/PeriodCalendar'
 import { useTranslation } from '../utils/translations'
-import { User, LogOut, MessageCircle, Calendar as CalendarIcon, Activity, Apple, Dumbbell, Plus, Home, ClipboardCheck, Droplet } from 'lucide-react'
+import { useViewMode } from '../context/ViewModeContext'
+import { User, LogOut, MessageCircle, Calendar as CalendarIcon, Activity, Apple, Dumbbell, Plus, Home, ClipboardCheck, Droplet, Smartphone, Monitor } from 'lucide-react'
 
 // Phase Icon Component - matches the design from the image
 const PhaseIcon = ({ phase, size = 40 }) => {
@@ -112,14 +115,28 @@ const PhaseIcon = ({ phase, size = 40 }) => {
 const Dashboard = () => {
   const { t } = useTranslation()
   const { dashboardData, loading, refreshData } = useDataContext()
+  const { viewMode, isMobileView, isWebView, getResponsiveClass, toggleViewMode } = useViewMode()
   const [user, setUser] = useState(null)
+
+  const getViewModeIcon = () => {
+    if (viewMode === 'mobile') return Smartphone
+    return Monitor // Web view
+  }
+
+  const getViewModeLabel = () => {
+    if (viewMode === 'mobile') return 'Mobile View'
+    return 'Web View'
+  }
+
+  const ViewModeIcon = getViewModeIcon()
   const [selectedDate, setSelectedDate] = useState(new Date())
   const [activeStartDate, setActiveStartDate] = useState(new Date())
   const [error, setError] = useState(null)
   const [cycleStats, setCycleStats] = useState(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [calendarPhaseMap, setCalendarPhaseMap] = useState({})
-  const [loadingCalendar, setLoadingCalendar] = useState(false)
+  const [loadingCalendar, setLoadingCalendar] = useState(true) // Start with true to show loading initially
+  const [periodEpisodes, setPeriodEpisodes] = useState([])
   const [isMobile, setIsMobile] = useState(false)
   const isFetchingRef = useRef(false)
   const navigate = useNavigate()
@@ -449,12 +466,15 @@ const Dashboard = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigate])
 
-  // Fetch phase map when active month changes
+  // Fetch phase map when active month changes or on mount
   useEffect(() => {
     let abortController = new AbortController()
     
     const fetchPhaseMapForMonth = async () => {
-      if (!user) return
+      if (!user) {
+        setLoadingCalendar(false)
+        return
+      }
       
       // Prevent concurrent requests using ref
       if (isFetchingRef.current) {
@@ -462,12 +482,15 @@ const Dashboard = () => {
         return
       }
       
-      // Check if we already have data for this month
-      const startDate = format(startOfMonth(activeStartDate), 'yyyy-MM-dd')
-      const endDate = format(endOfMonth(activeStartDate), 'yyyy-MM-dd')
+      // Fetch 3 months of data: previous month, current month, next month
+      // This ensures past periods are visible when navigating months
+      const prevMonth = subMonths(activeStartDate, 1)
+      const nextMonth = addMonths(activeStartDate, 1)
+      const startDate = format(startOfMonth(prevMonth), 'yyyy-MM-dd')
+      const endDate = format(endOfMonth(nextMonth), 'yyyy-MM-dd')
       const monthKey = format(activeStartDate, 'yyyy-MM')
       
-      // Check if we have data for this month in calendarPhaseMap
+      // Check if we have data for the active month in calendarPhaseMap
       const hasDataForMonth = Object.keys(calendarPhaseMap).some(date => {
         const dateMonth = date.substring(0, 7) // Get YYYY-MM
         return dateMonth === monthKey
@@ -475,14 +498,15 @@ const Dashboard = () => {
       
       if (hasDataForMonth && Object.keys(calendarPhaseMap).length > 0) {
         console.log('Already have phase map data for', monthKey, ', skipping fetch')
+        setLoadingCalendar(false)
         return
       }
       
       isFetchingRef.current = true
       setLoadingCalendar(true)
       try {
-        // Get start and end of the active month only (not 3 months to reduce load)
-        console.log('Fetching phase map from', startDate, 'to', endDate)
+        // Fetch 3 months of data to show past periods
+        console.log('Fetching phase map from', startDate, 'to', endDate, '(3 months)')
         
         // Add timeout to prevent infinite loading
         const timeoutPromise = new Promise((_, reject) => 
@@ -567,23 +591,45 @@ const Dashboard = () => {
           })
         }
         
-        setCalendarPhaseMap(map)
-        console.log('✅ Calendar phase map loaded:', Object.keys(map).length, 'dates')
-        if (Object.keys(map).length > 0) {
-          const sampleDates = Object.keys(map).slice(0, 3)
-          sampleDates.forEach(date => {
-            console.log(`  ${date}: phase="${map[date].phase}", phase_day_id="${map[date].phase_day_id}"`)
-          })
-        } else {
-          if (!hasLastPeriodDate) {
-            console.warn('⚠️ No phase data available. User needs to set last_period_date.')
-            console.warn('💡 Solution: Log a period using the "Log Period" button to set your last period date.')
+        // Merge with existing calendarPhaseMap to preserve data from other months
+        setCalendarPhaseMap(prevMap => {
+          const merged = { ...prevMap, ...map }
+          console.log('✅ Calendar phase map loaded:', Object.keys(merged).length, 'total dates')
+          if (Object.keys(merged).length > 0) {
+            const sampleDates = Object.keys(merged).slice(0, 5)
+            sampleDates.forEach(date => {
+              console.log(`  ${date}: phase="${merged[date].phase}", phase_day_id="${merged[date].phase_day_id}"`)
+            })
+            
+            // Check if we have data for the active month
+            const activeMonthKey = format(activeStartDate, 'yyyy-MM')
+            const hasActiveMonthData = Object.keys(merged).some(date => {
+              const dateMonth = date.substring(0, 7)
+              return dateMonth === activeMonthKey
+            })
+            
+            if (hasActiveMonthData) {
+              console.log(`✅ Have data for active month ${activeMonthKey}, stopping loading`)
+            } else {
+              console.warn(`⚠️ No data for active month ${activeMonthKey} in merged map`)
+            }
           } else {
-            console.warn('⚠️ No phase data available. Backend calculation may have failed.')
-            console.warn('💡 Check backend terminal for errors. Make sure backend server is running and has been restarted.')
-            console.warn('💡 User has last_period_date:', user?.last_period_date, 'cycle_length:', user?.cycle_length)
+            if (!hasLastPeriodDate) {
+              console.warn('⚠️ No phase data available. User needs to set last_period_date.')
+              console.warn('💡 Solution: Log a period using the "Log Period" button to set your last period date.')
+            } else {
+              console.warn('⚠️ No phase data available. Backend calculation may have failed.')
+              console.warn('💡 Check backend terminal for errors. Make sure backend server is running and has been restarted.')
+              console.warn('💡 User has last_period_date:', user?.last_period_date, 'cycle_length:', user?.cycle_length)
+            }
           }
-        }
+          return merged
+        })
+        
+        // Stop loading after a brief delay to ensure state update completes
+        setTimeout(() => {
+          setLoadingCalendar(false)
+        }, 200)
       } catch (error) {
         console.error('Failed to fetch phase map for calendar:', error)
         setError(error.message || 'Failed to load calendar data')
@@ -595,8 +641,8 @@ const Dashboard = () => {
           // Set empty map to stop loading
           setCalendarPhaseMap({})
         }
-      } finally {
         setLoadingCalendar(false)
+      } finally {
         isFetchingRef.current = false
       }
     }
@@ -610,6 +656,35 @@ const Dashboard = () => {
     // Only depend on activeStartDate and user, NOT phaseMap to prevent infinite loops
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeStartDate, user])
+
+  // Fetch period episodes for bleeding range visualization
+  useEffect(() => {
+    const fetchPeriodEpisodes = async () => {
+      if (!user) return
+      
+      try {
+        const episodes = await getPeriodEpisodes()
+        setPeriodEpisodes(episodes || [])
+      } catch (error) {
+        console.error('Failed to fetch period episodes:', error)
+        setPeriodEpisodes([])
+      }
+    }
+    
+    fetchPeriodEpisodes()
+    
+    // Refresh episodes when period is logged
+    const handlePeriodLogged = () => {
+      setTimeout(() => {
+        fetchPeriodEpisodes()
+      }, 2000) // Wait 2 seconds for backend to process
+    }
+    
+    window.addEventListener('periodLogged', handlePeriodLogged)
+    return () => {
+      window.removeEventListener('periodLogged', handlePeriodLogged)
+    }
+  }, [user])
 
   const handleLogout = async () => {
     try {
@@ -668,10 +743,26 @@ const Dashboard = () => {
       
       // Dispatch event to clear cache and refresh all data
       window.dispatchEvent(new CustomEvent('periodLogged'))
+      window.dispatchEvent(new CustomEvent('calendarUpdated'))
+      
+      // Refresh period episodes
+      try {
+        const episodes = await getPeriodEpisodes()
+        setPeriodEpisodes(episodes || [])
+      } catch (error) {
+        console.error('Failed to refresh period episodes:', error)
+      }
+      
+      // Clear calendar phase map to force refresh
+      setCalendarPhaseMap({})
+      setLoadingCalendar(true)
       
       // Wait a bit for backend to generate predictions, then refresh
       setTimeout(() => {
         refreshData()
+        // Trigger calendar refresh by updating activeStartDate slightly
+        // This will cause the useEffect to re-fetch phase map
+        setActiveStartDate(new Date(activeStartDate))
       }, 3000) // Wait 3 seconds for backend to process
       
       setIsModalOpen(false)
@@ -679,6 +770,33 @@ const Dashboard = () => {
       console.error('Failed to log period:', error)
       throw error
     }
+  }
+
+  // Check if a date is in predicted bleeding range
+  const isInBleedingRange = (dateStr) => {
+    if (!periodEpisodes || periodEpisodes.length === 0) return false
+    
+    const date = new Date(dateStr)
+    date.setHours(0, 0, 0, 0)
+    
+    for (const episode of periodEpisodes) {
+      const startDate = new Date(episode.start_date)
+      startDate.setHours(0, 0, 0, 0)
+      const endDate = new Date(episode.predicted_end_date)
+      endDate.setHours(0, 0, 0, 0)
+      
+      if (date >= startDate && date <= endDate) {
+        return true
+      }
+    }
+    
+    return false
+  }
+
+  const handleLogPeriodClick = (date) => {
+    const dateStr = format(date, 'yyyy-MM-dd')
+    setSelectedDate(date)
+    setIsModalOpen(true)
   }
 
   // Get phase color for circle - using vibrant, visible colors
@@ -704,13 +822,16 @@ const Dashboard = () => {
     if (view === 'month') {
       return {
         position: 'relative',
-        height: '4rem',
-        minHeight: '4rem',
+        height: '5.5rem', // Increased from 4rem to accommodate button below
+        minHeight: '5.5rem',
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
-        justifyContent: 'center',
+        justifyContent: 'flex-start',
         overflow: 'visible',
-        padding: '0.75rem',
+        padding: '0.5rem',
+        paddingTop: '0.75rem',
+        paddingBottom: '0.25rem',
         margin: '0.25rem'
       }
     }
@@ -721,10 +842,33 @@ const Dashboard = () => {
     if (view === 'month') {
       const dateStr = format(date, 'yyyy-MM-dd')
       // Try calendarPhaseMap first (from fetchPhaseMapForMonth), then fallback to context phaseMap
+      // Check both sources to ensure we get phase data
       let phaseData = calendarPhaseMap[dateStr] || phaseMap[dateStr]
+      
+      // Debug: Log if we're missing phase data for current month
+      const currentMonth = new Date().getMonth()
+      const currentYear = new Date().getFullYear()
+      if (!phaseData && date.getMonth() === currentMonth && date.getFullYear() === currentYear && date.getDate() <= 5) {
+        console.log(`⚠️ Missing phase data for ${dateStr} in current month. calendarPhaseMap has ${Object.keys(calendarPhaseMap).length} dates, phaseMap has ${Object.keys(phaseMap).length} dates`)
+      }
       const dayNumber = date.getDate()
       const today = new Date()
       const isToday = format(date, 'yyyy-MM-dd') === format(today, 'yyyy-MM-dd')
+      
+      // Check if date is in predicted bleeding range
+      const isBleeding = isInBleedingRange(dateStr)
+      
+      // Check if this date is already logged as a period start
+      const isLoggedPeriod = periodLogs.some(log => log.date === dateStr)
+      
+      // If this is a logged period but no phase data, create phase data for it
+      if (isLoggedPeriod && !phaseData) {
+        phaseData = {
+          phase: 'Period',
+          phase_day_id: 'p1',
+          is_logged: true
+        }
+      }
       
       // If phaseData exists but no phase field, derive it from phase_day_id
       if (phaseData && !phaseData.phase && phaseData.phase_day_id) {
@@ -741,19 +885,23 @@ const Dashboard = () => {
         }
       }
       
-      // Determine circle color - ALWAYS show a color, even if no data
+      // Determine circle color - prioritize phase data, then logged periods, then bleeding range
       let circleColor = '#D1D5DB' // Default grey
       if (phaseData && phaseData.phase) {
+        // Use phase data if available (this includes predictions)
         circleColor = getPhaseCircleColor(phaseData.phase)
-        // Debug for first few dates and today
-        if (isToday || dayNumber <= 5) {
-          console.log(`📅 Date ${dateStr} (day ${dayNumber}): phase=${phaseData.phase}, phase_day_id=${phaseData.phase_day_id}, color=${circleColor}`)
-        }
-      } else {
-        // Debug when no phase data for first few dates
-        if (isToday || dayNumber <= 5) {
-          console.log(`⚠️ Date ${dateStr} (day ${dayNumber}): No phaseData. calendarPhaseMap=${Object.keys(calendarPhaseMap).length} dates, phaseMap=${Object.keys(phaseMap).length} dates`)
-        }
+      } else if (isLoggedPeriod) {
+        // Fallback: show Period color for logged periods
+        circleColor = getPhaseCircleColor('Period')
+      } else if (isBleeding) {
+        // If in bleeding range but no phase data, show Period color
+        circleColor = getPhaseCircleColor('Period')
+      }
+      
+      // Debug logging for current month dates (only log first few to avoid spam)
+      // Reuse currentMonth and currentYear declared earlier
+      if (isToday || (dayNumber <= 3 && date.getMonth() === currentMonth && date.getFullYear() === currentYear)) {
+        console.log(`📅 Date ${dateStr}: phaseData=${phaseData ? 'yes' : 'no'}, phase=${phaseData?.phase || 'none'}, phase_day_id=${phaseData?.phase_day_id || 'none'}, color=${circleColor}, isLogged=${isLoggedPeriod}, isBleeding=${isBleeding}, calendarPhaseMap has ${Object.keys(calendarPhaseMap).length} dates`)
       }
       
       // Use filled circle with white border for better visibility
@@ -762,12 +910,9 @@ const Dashboard = () => {
       const circleSize = (isMobile === true) ? '2rem' : '2.75rem'
       const borderWidth = (isMobile === true) ? '2px' : '3px'
       const circleStyle = {
-        position: 'absolute',
-        top: '50%',
-        left: '50%',
-        transform: 'translate(-50%, -50%)',
+        position: 'relative',
         width: circleSize,
-        height: 'auto',
+        height: circleSize,
         minHeight: circleSize,
         borderRadius: '50%',
         backgroundColor: circleColor,
@@ -781,13 +926,40 @@ const Dashboard = () => {
         boxShadow: isToday ? `0 0 0 ${borderWidth} ${circleColor}80` : '0 2px 4px rgba(0,0,0,0.15)',
         padding: (isMobile === true) ? '0.15rem' : '0.25rem',
         paddingTop: (isMobile === true) ? '0.25rem' : '0.35rem',
-        paddingBottom: (isMobile === true) ? '0.25rem' : '0.35rem'
+        paddingBottom: (isMobile === true) ? '0.25rem' : '0.35rem',
+        flexShrink: 0
       }
       
       const phaseDayId = phaseData?.phase_day_id || ''
       
+      // ⚠️ MEDICAL ACCURACY: Show fertile window indicator even in Follicular phase
+      // Fertile window is 5-6 days (sperm survival + ovulation + egg viability)
+      // Days with high fertility_prob should be visually marked even if phase is "Follicular"
+      const fertilityProb = phaseData?.fertility_prob
+      const isFertileDay = fertilityProb != null && fertilityProb >= 0.3  // Threshold for visual indicator
+      const showFertileIndicator = Boolean(isFertileDay && phaseData?.phase !== 'Ovulation' && phaseData?.phase !== 'Period')
+      
       return (
-        <div style={circleStyle}>
+        <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start' }}>
+          {/* Bleeding range overlay (red shading) */}
+          {isBleeding && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: 'rgba(248, 187, 217, 0.3)', // Light pink overlay
+                borderRadius: '4px',
+                zIndex: 1,
+                pointerEvents: 'none'
+              }}
+            />
+          )}
+          
+          {/* Phase circle - positioned at top */}
+          <div style={circleStyle}>
           <span 
             style={{
               fontSize: (isMobile === true) ? '0.75rem' : '0.875rem',
@@ -816,6 +988,44 @@ const Dashboard = () => {
               {phaseDayId}
             </span>
           )}
+          {/* Fertile window indicator: Show small dot for fertile days in Follicular phase */}
+          {showFertileIndicator && (
+            <span 
+              style={{
+                position: 'absolute',
+                top: '2px',
+                right: '2px',
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                backgroundColor: '#FFB74D',
+                border: '1px solid white',
+                zIndex: 1002,
+                boxShadow: '0 1px 2px rgba(0,0,0,0.2)'
+              }}
+              title={fertilityProb != null ? `Fertile window (${Math.round(fertilityProb * 100)}% probability)` : 'Fertile window'}
+            />
+          )}
+          </div>
+          
+          {/* Log Period Button - positioned below the date circle */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              handleLogPeriodClick(date)
+            }}
+            className="w-5 h-5 sm:w-6 sm:h-6 bg-period-pink hover:bg-period-purple text-white rounded-full flex items-center justify-center shadow-md hover:shadow-lg transition-all z-50 mt-0.5"
+            title="Log period"
+            style={{
+              fontSize: '0.625rem',
+              lineHeight: '1',
+              padding: '0',
+              position: 'relative',
+              flexShrink: 0
+            }}
+          >
+            <Plus className="h-3 w-3 sm:h-3.5 sm:w-3.5" />
+          </button>
         </div>
       )
     }
@@ -844,6 +1054,16 @@ const Dashboard = () => {
           <div className="flex justify-between items-center h-14 sm:h-16">
             <h1 className="text-lg sm:text-2xl font-bold text-period-pink truncate">{t('nav.periodGPT')}</h1>
             <div className="flex items-center gap-2 sm:gap-4">
+              {/* View Mode Toggle Button */}
+              <button
+                onClick={toggleViewMode}
+                className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition min-h-[44px] border border-gray-200 bg-white"
+                title={getViewModeLabel()}
+              >
+                <ViewModeIcon className="h-5 w-5 flex-shrink-0" />
+                <span className="hidden sm:inline text-sm font-medium">{getViewModeLabel()}</span>
+              </button>
+              
               <button
                 onClick={() => navigate('/profile')}
                 className="flex items-center gap-1 sm:gap-2 px-2 sm:px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition min-h-[44px]"
@@ -879,7 +1099,7 @@ const Dashboard = () => {
         )}
 
         {/* D. Current Phase Card - Mobile Optimized */}
-        {currentPhase && currentPhase.phase ? (
+        {currentPhase && currentPhase.phase && (
           <div 
             className="mb-4 sm:mb-6 rounded-lg shadow-lg p-4 sm:p-6 border-2"
             style={{
@@ -903,105 +1123,26 @@ const Dashboard = () => {
               </div>
             </div>
           </div>
-        ) : (
-          <div className="mb-4 sm:mb-6 bg-white rounded-lg shadow-lg p-4 sm:p-6 border-2 border-gray-200">
-            <div className="text-center py-6 sm:py-8">
-              <p className="text-sm sm:text-base text-gray-600 mb-2">No cycle data available yet.</p>
-              <p className="text-xs sm:text-sm text-gray-500 mb-4 px-2">
-                {periodLogs.length >= 1 
-                  ? "Cycle predictions are being generated. Please wait a moment and refresh, or check if RAPIDAPI_KEY is configured in your backend."
-                  : "Please log your period dates to generate cycle predictions."}
-              </p>
-              {periodLogs.length >= 1 && (
-                <button
-                  onClick={() => window.location.reload()}
-                  className="bg-period-pink text-white px-4 py-2 rounded-lg font-semibold hover:bg-opacity-90 transition min-h-[44px]"
-                >
-                  Refresh Page
-                </button>
-              )}
-            </div>
-          </div>
         )}
 
         {/* E. Calendar Section - Mobile First: Stack on mobile, side-by-side on desktop */}
-        <div className="flex flex-col lg:grid lg:grid-cols-2 gap-4 sm:gap-6 lg:gap-8 mb-6 sm:mb-8">
-          {/* Left Side: Calendar - Full width on mobile */}
+        <div className={`flex ${isMobileView ? 'flex-col' : 'grid grid-cols-2'} gap-4 sm:gap-6 lg:gap-8 mb-6 sm:mb-8`}>
+          {/* Left Side: Calendar - Full width on mobile - New Format */}
           <div className="bg-white rounded-xl shadow-lg p-3 sm:p-4 lg:p-6 border border-gray-100 order-1">
-            <div className="mb-4 sm:mb-6">
-              <h3 className="text-lg sm:text-xl lg:text-2xl font-bold text-gray-800 mb-1 flex items-center gap-2">
-                <CalendarIcon className="h-5 w-5 sm:h-6 sm:w-6 text-period-pink" />
-                {t('dashboard.cycleCalendar')}
-              </h3>
-              <p className="text-xs sm:text-sm text-gray-500">{t('dashboard.calendarDescription')}</p>
-            </div>
-            
-            {loadingCalendar && Object.keys(calendarPhaseMap).length === 0 ? (
-              <div className="flex items-center justify-center py-12">
-                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-period-pink"></div>
-              </div>
-            ) : (
-              <div className="calendar-wrapper">
-                <Calendar
-                  onChange={setSelectedDate}
-                  value={selectedDate}
-                  onActiveStartDateChange={onActiveStartDateChange}
-                  activeStartDate={activeStartDate}
-                  tileClassName={tileClassName}
-                  tileContent={tileContent}
-                  tileStyle={tileStyle}
-                  prev2Label={null}
-                  next2Label={null}
-                  className="w-full custom-calendar"
-                  formatShortWeekday={(locale, date) => {
-                    const weekdays = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
-                    return weekdays[date.getDay()]
-                  }}
-                />
-              </div>
-            )}
-            
-            {/* Legend - Mobile Optimized */}
-            <div className="mt-4 sm:mt-6 pt-4 sm:pt-6 border-t border-gray-200">
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 sm:mb-3">{t('dashboard.legend')}</p>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3">
-                <div className="flex items-center gap-2">
-                  <div 
-                    className="w-5 h-5 rounded-full border-2 border-white flex-shrink-0" 
-                    style={{ backgroundColor: '#F8BBD9' }}
-                  ></div>
-                  <span className="text-xs font-medium text-gray-700">{t('phase.period')}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div 
-                    className="w-5 h-5 rounded-full border-2 border-white flex-shrink-0" 
-                    style={{ backgroundColor: '#4ECDC4' }}
-                  ></div>
-                  <span className="text-xs font-medium text-gray-700">{t('phase.follicular')}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div 
-                    className="w-5 h-5 rounded-full border-2 border-white flex-shrink-0" 
-                    style={{ backgroundColor: '#FFB74D' }}
-                  ></div>
-                  <span className="text-xs font-medium text-gray-700">{t('phase.ovulation')}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div 
-                    className="w-5 h-5 rounded-full border-2 border-white flex-shrink-0" 
-                    style={{ backgroundColor: '#BA68C8' }}
-                  ></div>
-                  <span className="text-xs font-medium text-gray-700">{t('phase.luteal')}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div 
-                    className="w-5 h-5 rounded-full border-2 flex-shrink-0" 
-                    style={{ borderColor: '#D1D5DB', backgroundColor: '#D1D5DB15' }}
-                  ></div>
-                  <span className="text-xs font-medium text-gray-500">{t('dashboard.noPhaseData')}</span>
-                </div>
-              </div>
-            </div>
+            <PeriodCalendar
+              onPeriodLogged={async () => {
+                // Refresh data after period is logged
+                await refreshData()
+                // Clear calendar phase map to force refresh
+                setCalendarPhaseMap({})
+                setLoadingCalendar(true)
+                // Wait a bit for backend to generate predictions
+                setTimeout(() => {
+                  refreshData()
+                  setActiveStartDate(new Date(activeStartDate))
+                }, 2000)
+              }}
+            />
           </div>
 
           {/* Right Side: AI & Cycle Stats - Mobile: Show before calendar */}
@@ -1040,132 +1181,13 @@ const Dashboard = () => {
               </button>
             </div>
 
-            {/* Cycle Statistics Card - Mobile Optimized */}
-            {cycleStats && (
-              <div className="bg-white rounded-lg shadow-lg p-4 sm:p-6">
-                <h3 className="text-lg sm:text-xl font-bold mb-3 sm:mb-4 flex items-center gap-2">
-                  <CalendarIcon className="h-4 w-4 sm:h-5 sm:w-5 text-period-pink" />
-                  {t('dashboard.cycleStatistics')}
-                </h3>
-                
-                {/* Current Phase Badge - Mobile Compact */}
-                {cycleStats.currentPhase && (
-                  <div className="mb-3 sm:mb-4 p-2 sm:p-3 rounded-lg bg-gradient-to-r from-period-pink/10 to-period-purple/10 border border-period-pink/20">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs sm:text-sm text-gray-600">{t('dashboard.currentPhase')}:</span>
-                      <span className="font-bold text-sm sm:text-base text-period-pink capitalize">{cycleStats.currentPhase}</span>
-                    </div>
-                    {cycleStats.phaseDayId && (
-                      <div className="text-xs text-gray-500 mt-1">Day {cycleStats.phaseDayId}</div>
-                    )}
-                  </div>
-                )}
-                
-                <div className="space-y-2 sm:space-y-3 mb-3 sm:mb-4">
-                  {/* Basic Cycle Info - Mobile Optimized */}
-                  <div className="grid grid-cols-2 gap-2 sm:gap-3 pb-2 sm:pb-3 border-b border-gray-200">
-                    <div>
-                      <div className="text-xs text-gray-500 mb-1">{t('dashboard.cycleLength')}</div>
-                      <div className="font-semibold text-base sm:text-lg">{cycleStats.cycleLength} {t('dashboard.days')}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-gray-500 mb-1">{t('dashboard.avgPeriodLength') || 'Avg Period'}</div>
-                      <div className="font-semibold text-base sm:text-lg">{cycleStats.avgPeriodLength} {t('dashboard.days')}</div>
-                    </div>
-                  </div>
-                  
-                  {/* Cycle Progress */}
-                  <div className="pb-3 border-b border-gray-200">
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="text-sm text-gray-600">{t('dashboard.daysSincePeriod')}:</span>
-                      <span className="font-semibold">
-                        {cycleStats.daysSince !== null && cycleStats.daysSince !== undefined 
-                          ? `${cycleStats.daysSince} ${t('dashboard.days')}` 
-                          : '—'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-600">{t('dashboard.daysUntilNext')}:</span>
-                      <span className="font-semibold text-period-pink">
-                        {cycleStats.daysUntil !== null && cycleStats.daysUntil !== undefined 
-                          ? `${cycleStats.daysUntil} ${t('dashboard.days')}` 
-                          : '—'}
-                      </span>
-                    </div>
-                    {/* Progress bar */}
-                    {cycleStats.daysSince !== null && cycleStats.daysSince !== undefined && (
-                      <div className="mt-3 w-full bg-gray-200 rounded-full h-2">
-                        <div 
-                          className="bg-gradient-to-r from-period-pink to-period-purple h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${Math.min(100, (cycleStats.daysSince / cycleStats.cycleLength) * 100)}%` }}
-                        ></div>
-                      </div>
-                    )}
-                  </div>
-                  
-                  {/* Advanced Stats */}
-                  {cycleStats.cyclesTracked > 0 && (
-                    <div className="space-y-2 pt-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">{t('dashboard.cyclesTracked') || 'Cycles Tracked'}:</span>
-                        <span className="font-semibold">{cycleStats.cyclesTracked}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">{t('dashboard.cycleRegularity') || 'Regularity'}:</span>
-                        <span className={`font-semibold ${
-                          cycleStats.cycleRegularity === 'Very Regular' ? 'text-green-600' :
-                          cycleStats.cycleRegularity === 'Regular' ? 'text-blue-600' :
-                          cycleStats.cycleRegularity === 'Somewhat Irregular' ? 'text-yellow-600' :
-                          'text-orange-600'
-                        }`}>
-                          {cycleStats.cycleRegularity}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  
-                  {/* Predicted Ovulation */}
-                  {cycleStats.predictedOvulationDate && (
-                    <div className="pt-2 border-t border-gray-200">
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">{t('dashboard.predictedOvulation') || 'Predicted Ovulation'}:</span>
-                        <span className="font-semibold text-period-purple">
-                          {cycleStats.predictedOvulationDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                        </span>
-                      </div>
-                      {(() => {
-                        const today = new Date()
-                        today.setHours(0, 0, 0, 0)
-                        const ovDate = new Date(cycleStats.predictedOvulationDate)
-                        ovDate.setHours(0, 0, 0, 0)
-                        const daysUntilOv = Math.floor((ovDate - today) / (1000 * 60 * 60 * 24))
-                        if (daysUntilOv >= 0 && daysUntilOv <= 7) {
-                          return (
-                            <div className="text-xs text-period-purple mt-1">
-                              {daysUntilOv === 0 ? 'Today' : daysUntilOv === 1 ? 'Tomorrow' : `In ${daysUntilOv} days`}
-                            </div>
-                          )
-                        }
-                        return null
-                      })()}
-                    </div>
-                  )}
-                </div>
-                
-                <button
-                  onClick={() => setIsModalOpen(true)}
-                  className="w-full flex items-center justify-center gap-2 bg-period-pink text-white px-4 py-3 sm:py-2 rounded-lg font-semibold hover:bg-opacity-90 transition shadow-lg min-h-[44px] text-sm sm:text-base"
-                >
-                  <Plus className="h-5 w-5" />
-                  <span>{t('dashboard.logPeriod')}</span>
-                </button>
-              </div>
-            )}
+            {/* Cycle Statistics Component - New Format */}
+            <CycleStats />
           </div>
         </div>
 
         {/* F. Three Main Feature Cards - Mobile Optimized */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 lg:gap-6 mb-4 sm:mb-6">
+        <div className={`grid ${isMobileView ? 'grid-cols-1' : 'grid-cols-3'} gap-3 sm:gap-4 lg:gap-6 mb-4 sm:mb-6`}>
           <button
             onClick={() => navigate('/hormones')}
             className="bg-white rounded-lg shadow-lg p-4 sm:p-6 hover:shadow-xl transition text-left min-h-[44px] active:scale-95"
@@ -1260,7 +1282,7 @@ const Dashboard = () => {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSuccess={handleLogPeriod}
-        selectedDate={format(selectedDate, 'yyyy-MM-dd')}
+        selectedDate={selectedDate ? format(selectedDate, 'yyyy-MM-dd') : undefined}
       />
     </div>
   )

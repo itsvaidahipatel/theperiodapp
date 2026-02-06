@@ -24,6 +24,10 @@ class ProfileUpdate(BaseModel):
 class NotificationPreferencesUpdate(BaseModel):
     email_notifications_enabled: Optional[bool] = None
     notification_preferences: Optional[Dict[str, Any]] = None
+    # New fields for clean email system
+    upcoming_reminders: Optional[bool] = None
+    logging_reminders: Optional[bool] = None
+    health_alerts: Optional[bool] = None
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
@@ -182,12 +186,24 @@ async def get_notification_preferences(current_user: dict = Depends(get_current_
         # Default preferences if not set
         if not notification_prefs:
             notification_prefs = {
-                "phase_transitions": True,
-                "period_reminders": True,
-                "reminder_days_before": 2,
-                "preferred_notification_time": "09:00",
-                "timezone": "Asia/Kolkata"
+                "upcoming_reminders": True,
+                "logging_reminders": True,
+                "health_alerts": True,
+                "pause_emails_until": None,
+                "snooze_this_cycle": False
             }
+        else:
+            # Ensure new fields exist (backward compatibility)
+            if "upcoming_reminders" not in notification_prefs:
+                notification_prefs["upcoming_reminders"] = notification_prefs.get("period_reminders", True)
+            if "logging_reminders" not in notification_prefs:
+                notification_prefs["logging_reminders"] = notification_prefs.get("period_reminders", True)
+            if "health_alerts" not in notification_prefs:
+                notification_prefs["health_alerts"] = True
+            if "pause_emails_until" not in notification_prefs:
+                notification_prefs["pause_emails_until"] = None
+            if "snooze_this_cycle" not in notification_prefs:
+                notification_prefs["snooze_this_cycle"] = False
         
         return {
             "email_notifications_enabled": email_enabled,
@@ -215,18 +231,28 @@ async def update_notification_preferences(
             update_data["email_notifications_enabled"] = preferences.email_notifications_enabled
         
         # Update notification preferences
+        # Support both old format (notification_preferences dict) and new individual fields
+        current_prefs = current_user.get("notification_preferences", {})
+        if isinstance(current_prefs, str):
+            try:
+                current_prefs = json.loads(current_prefs) if current_prefs else {}
+            except json.JSONDecodeError:
+                current_prefs = {}
+        
+        # Update from individual fields if provided
+        if preferences.upcoming_reminders is not None:
+            current_prefs["upcoming_reminders"] = preferences.upcoming_reminders
+        if preferences.logging_reminders is not None:
+            current_prefs["logging_reminders"] = preferences.logging_reminders
+        if preferences.health_alerts is not None:
+            current_prefs["health_alerts"] = preferences.health_alerts
+        
+        # Also support updating via notification_preferences dict (backward compatibility)
         if preferences.notification_preferences is not None:
-            # Get current preferences to merge
-            current_prefs = current_user.get("notification_preferences", {})
-            if isinstance(current_prefs, str):
-                try:
-                    current_prefs = json.loads(current_prefs) if current_prefs else {}
-                except json.JSONDecodeError:
-                    current_prefs = {}
-            
             # Merge with new preferences
-            merged_prefs = {**current_prefs, **preferences.notification_preferences}
-            update_data["notification_preferences"] = merged_prefs
+            current_prefs = {**current_prefs, **preferences.notification_preferences}
+        
+        update_data["notification_preferences"] = current_prefs
         
         if not update_data:
             raise HTTPException(
@@ -263,4 +289,75 @@ async def update_notification_preferences(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update notification preferences: {str(e)}"
+        )
+
+@router.post("/reset-cycle-data")
+async def reset_cycle_data(current_user: dict = Depends(get_current_user)):
+    """
+    Reset all cycle data for the user.
+    
+    This will permanently delete:
+    - All period logs (past, current, and future)
+    - All period start logs
+    - All phase predictions (user_cycle_days)
+    - Reset user profile cycle fields (last_period_date, cycle_length)
+    
+    WARNING: This action cannot be undone!
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Delete all period logs
+        supabase.table("period_logs").delete().eq("user_id", user_id).execute()
+        print(f"✅ Deleted all period_logs for user {user_id}")
+        
+        # Delete all period start logs
+        try:
+            supabase.table("period_start_logs").delete().eq("user_id", user_id).execute()
+            print(f"✅ Deleted all period_start_logs for user {user_id}")
+        except Exception as e:
+            print(f"⚠️ Error deleting period_start_logs (table may not exist): {str(e)}")
+        
+        # Delete all phase predictions (user_cycle_days)
+        supabase.table("user_cycle_days").delete().eq("user_id", user_id).execute()
+        print(f"✅ Deleted all user_cycle_days for user {user_id}")
+        
+        # Delete period events if table exists
+        try:
+            supabase.table("period_events").delete().eq("user_id", user_id).execute()
+            print(f"✅ Deleted all period_events for user {user_id}")
+        except Exception as e:
+            print(f"⚠️ Error deleting period_events (table may not exist): {str(e)}")
+        
+        # Reset user profile cycle fields to defaults
+        update_data = {
+            "last_period_date": None,
+            "cycle_length": 28,  # Default cycle length
+        }
+        
+        response = supabase.table("users").update(update_data).eq("id", user_id).execute()
+        
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to reset user profile cycle fields"
+            )
+        
+        updated_user = response.data[0]
+        updated_user.pop("password", None)
+        updated_user.pop("password_hash", None)
+        
+        print(f"✅ Reset cycle data for user {user_id}")
+        
+        return {
+            "message": "All cycle data has been reset successfully",
+            "user": updated_user
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset cycle data: {str(e)}"
         )

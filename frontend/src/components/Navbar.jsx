@@ -1,11 +1,13 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Home, User, MessageCircle, Activity, LogOut } from 'lucide-react'
+import { Home, User, MessageCircle, Activity, LogOut, Smartphone, Monitor } from 'lucide-react'
 import { logout } from '../utils/api'
 import { useNavigate } from 'react-router-dom'
+import { useViewMode } from '../context/ViewModeContext'
 
 const Navbar = () => {
   const location = useLocation()
   const navigate = useNavigate()
+  const { viewMode, toggleViewMode } = useViewMode()
 
   const handleLogout = async () => {
     try {
@@ -17,6 +19,18 @@ const Navbar = () => {
       navigate('/login')
     }
   }
+
+  const getViewModeIcon = () => {
+    if (viewMode === 'mobile') return Smartphone
+    return Monitor // Web view
+  }
+
+  const getViewModeLabel = () => {
+    if (viewMode === 'mobile') return 'Mobile View'
+    return 'Web View'
+  }
+
+  const ViewModeIcon = getViewModeIcon()
 
   const navItems = [
     { path: '/dashboard', icon: Home, label: 'Dashboard' },
@@ -32,7 +46,17 @@ const Navbar = () => {
             PeriodCycle.AI
           </Link>
           
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-4">
+            {/* View Mode Toggle Button */}
+            <button
+              onClick={toggleViewMode}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg transition text-gray-700 hover:bg-gray-100 border border-gray-200"
+              title={getViewModeLabel()}
+            >
+              <ViewModeIcon className="h-5 w-5" />
+              <span className="hidden sm:inline text-sm">{getViewModeLabel()}</span>
+            </button>
+
             {navItems.map((item) => {
               const Icon = item.icon
               const isActive = location.pathname === item.path

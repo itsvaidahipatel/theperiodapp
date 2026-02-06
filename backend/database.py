@@ -5,8 +5,18 @@ import asyncio
 from typing import Callable, Any, Optional
 from functools import wraps
 
-# Create Supabase client with default configuration
+# Create Supabase client with default configuration (anon key - respects RLS)
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+
+# Create service role client for operations that need to bypass RLS
+# Only use this for server-side operations that require elevated permissions
+supabase_admin: Optional[Client] = None
+if settings.SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        supabase_admin = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+    except Exception as e:
+        print(f"⚠️ Warning: Could not create service role client: {str(e)}")
+        print("   Some operations may fail if RLS policies are too restrictive.")
 
 def is_transient_error(error: Exception) -> bool:
     """Check if an error is a transient connection error that should be retried."""

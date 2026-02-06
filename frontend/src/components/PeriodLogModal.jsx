@@ -33,12 +33,32 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
     setLoading(true)
     setError('')
 
+    // CRITICAL: Prevent logging periods in future dates
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const selectedDate = new Date(formData.date)
+    selectedDate.setHours(0, 0, 0, 0)
+    
+    if (selectedDate > today) {
+      setError('Cannot log period for future dates. Please log periods that have already occurred.')
+      setLoading(false)
+      return
+    }
+
     try {
-      await logPeriod(formData)
+      const response = await logPeriod(formData)
+      // Handle new response format with validation
+      if (response.error) {
+        setError(response.error)
+        setLoading(false)
+        return
+      }
       await onSuccess(formData)
       onClose()
     } catch (err) {
-      setError(err.message || 'Failed to log period')
+      // Handle validation errors from backend
+      const errorMessage = err.response?.data?.detail || err.message || 'Failed to log period'
+      setError(errorMessage)
       setLoading(false)
     }
   }

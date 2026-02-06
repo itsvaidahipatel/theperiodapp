@@ -48,6 +48,8 @@ This documentation uses the term **"Ovulation Phase"** as a system abstraction. 
 6. Assumptions & Defaults
 7. Phase-Day ID System
 8. Medical Safety & Liability Protections
+9. Race Condition Protection
+10. Prediction Fields & Data Management
 
 ---
 
@@ -62,7 +64,7 @@ This application provides cycle predictions and fertility information. To ensure
    - ⚠️ NOT FOR DIAGNOSIS
    - Educational purposes only
 
-2. **Confidence-Based Suppression**: Fertility probabilities are suppressed when confidence < 0.5 to prevent reliance on inaccurate predictions
+2. **Confidence-Based Suppression**: Fertility probabilities are suppressed when `prediction_confidence < 0.5` to prevent reliance on inaccurate predictions
 
 3. **Medical Language**: All predictions use "Estimated", "Predicted", "Likely" wording (never "Actual", "Confirmed", "Definite")
 
@@ -85,6 +87,7 @@ PeriodCycle.AI follows a **three-tier architecture**:
 ┌────────▼────────┐
 │   Backend       │  FastAPI (Python 3.11.9)
 │   (Railway)     │  └─ Routes, Business Logic
+│                 │  └─ Adaptive Local Algorithms
 └────────┬────────┘
          │
 ┌────────▼────────┐
@@ -93,8 +96,8 @@ PeriodCycle.AI follows a **three-tier architecture**:
 └─────────────────┘
          │
 ┌────────▼────────┐
-│  External APIs  │  RapidAPI (Cycle Predictions)
-│                 │  Google Gemini (AI Chat)
+│  External APIs  │  Google Gemini (AI Chat only)
+│                 │  ⚠️ No cycle prediction APIs
 └─────────────────┘
 ```
 
@@ -120,7 +123,8 @@ PeriodCycle.AI follows a **three-tier architecture**:
 - **Calendar**: React Calendar 5.1.0
 
 **External Services:**
-- **RapidAPI**: Women's Health Menstrual Cycle Phase Predictions API
+- **Google Gemini**: AI Chat functionality only
+- **⚠️ No External Cycle Prediction APIs**: All cycle predictions use adaptive local algorithms
 - **Google Gemini**: AI-powered health chatbot (gemini-2.5-flash)
 
 ### 1.3 Core Components
@@ -147,7 +151,12 @@ PeriodCycle.AI follows a **three-tier architecture**:
 ### 2.1 Overview
 
 Phase determination uses a **hybrid approach** combining:
-1. **RapidAPI cycle_phases endpoint** (primary source)
+1. **Local adaptive calculation** (primary source - uses period logs and adaptive algorithms)
+
+**⚠️ UI/UX Medical Accuracy:**
+- **Ovulation Phase Labeling**: Calendar and API labels use "Estimated Ovulation (1-3 day window)" to clarify this is a prediction uncertainty band, not actual ovulation
+- **Fertile Window Visualization**: Days with high fertility probability are visually marked even if phase is "Follicular" to ensure users see the full 5-6 day fertile window
+- **Phase vs Fertile Window**: The "Ovulation Phase" (1-3 days) is a subset of the fertile window (5-6 days)
 2. **Adaptive local calculations** (fallback/adjustment)
 3. **Probabilistic fertility modeling** (ovulation window selection)
 
@@ -341,9 +350,10 @@ phase_counters = {
 
 ### 2.6 Cycle Boundary Detection
 
-**Method 1: RapidAPI Timeline**
-- Uses `first_cycle_start` from API (first p1 date in timeline)
-- Trusts API's cycle structure
+**Method 1: Period Log Based Prediction**
+- Uses `predict_cycle_starts_from_period_logs()` (most accurate)
+- Uses actual period log data from database
+- Calculates cycle lengths from real observations
 
 **Method 2: Predicted Cycle Starts**
 - Uses `get_predicted_cycle_starts_from_db()` (p1 days from database)
@@ -403,7 +413,13 @@ if 10 <= observed_luteal <= 18:  # Valid range
         update_luteal_estimate(user_id, observed_luteal, has_markers=False)
     else:
         # Low confidence - skip update to avoid bad training
-        # Log warning but don't update
+        # ⚠️ ANALYTICS: Log skipped updates for monitoring
+        # For highly irregular cycles or PCOS, we might never learn from actual
+        # luteal observations. Logging helps identify users who need alternative
+        # approaches or manual calibration.
+        print(f"⚠️ Skipped luteal update: low confidence (ovulation_sd={ovulation_sd:.2f} > {confidence_threshold})")
+        print(f"   📊 ANALYTICS: Skipped update logged - consider alternative calibration for irregular cycles")
+        # TODO: Store skipped updates in analytics table for monitoring
 ```
 
 **⚠️ Critical Safety Feature:**
@@ -460,10 +476,11 @@ period_days = max(3.0, min(8.0, period_days))
 **Formula:**
 ```python
 # Ovulation date calculation (single predicted event)
-ovulation_offset = cycle_length_estimate - luteal_mean
-ovulation_date = cycle_start + timedelta(days=int(ovulation_offset))
+ovulation_offset = int(cycle_length_estimate - luteal_mean)  # Stored explicitly as INTEGER
+ovulation_date = cycle_start + timedelta(days=ovulation_offset)
 
 # Combined uncertainty (prediction confidence)
+# Note: ovulation_offset is now stored explicitly in database for faster queries and historical tracking
 ovulation_sd = sqrt(cycle_start_sd² + luteal_sd²)
 ```
 
@@ -532,21 +549,24 @@ return max(0.0, min(1.0, normalized_prob))
 - **50% Sperm Survival Decay**: Models decaying sperm viability over 5 days before ovulation
 - **Decay Curve**: `exp(offset / 2.0)` creates smooth decay (not binary)
 - **Peak Shift**: Normalized so day -1 has peak fertility (reflects medical data)
+- **Scale Factor (1.65)**: Empirically chosen to shift peak to day -1. Not evidence-based, but provides reasonable UX approximation. For medical credibility, consider refining based on latest research.
 
 **Sperm Survival Values (After Scaling):**
-- **Day -5**: ~0.14 (low)
+- **Day -5**: ~0.14 (low) - ⚠️ May slightly overestimate viability (biological studies show faster decay after day -3)
 - **Day -4**: ~0.23 (low-moderate)
-- **Day -3**: ~0.37 (moderate)
+- **Day -3**: ~0.37 (moderate) - Decay accelerates after this point in biological studies
 - **Day -2**: ~0.61 (high)
 - **Day -1**: ~1.0 (peak) ⭐
 - **Day 0**: ~0.82 (high, but below day -1)
 
-**⚠️ Medical Accuracy:**
+**⚠️ Medical Accuracy Notes:**
 - **Fertile Window**: 5-6 days total (5 days before + ovulation day + 1 day after)
 - **Ovulation Event**: Single 12-24 hour event within the fertile window
 - **Peak Fertility**: Day -1 or -2 (before ovulation), not day 0
 - **Fertility Probability**: Represents the probability of conception, not multiple ovulation events
 - **Sperm Survival**: Decays over time (not binary), reflecting biological reality
+- **Scale Factor (1.65)**: Empirically chosen for UX purposes, not evidence-based. For medical credibility, consider refining based on latest research (e.g., steeper decay after day -3, more linear decay in days -5 to -3)
+- **Decay Formula**: `exp(offset / 2.0)` provides reasonable approximation, but biological studies show sperm survival is roughly linear or slightly exponential, decaying faster after day -3
 
 ### 3.5 Ovulation Probability (Phase Determination)
 
@@ -558,6 +578,11 @@ return max(0.0, min(1.0, normalized_prob))
 - Models the probability that ovulation occurred on a given day
 - Represents prediction uncertainty around a **single ovulation event**
 - Does NOT represent multiple ovulation events
+
+**⚠️ Important Distinction:**
+- **`ovulation_probability()`**: Used for phase determination (mathematical PDF)
+- **`fertility_probability()`**: Used for fertility tracking (biologically meaningful)
+- **`select_ovulation_days()`**: Uses `fertility_probability()` (not `ovulation_probability()`) to ensure "Ovulation Phase" aligns with actual fertile window
 
 **Formula:**
 ```python
@@ -612,13 +637,13 @@ updated_cycle_length = (1 - weight) * old_cycle_length + weight * new_cycle_leng
 ```
 
 **When Used:**
-- After RapidAPI calculates average cycle length
 - When user logs a period (calculates from previous period)
+- When cycle length is updated from period log analysis
 - Smooths cycle length over time (prevents sudden jumps)
 
 ---
 
-## 4. Data Flow & API Integration
+## 4. Data Flow & Local Calculation System
 
 ### 4.1 Cycle Prediction Flow
 
@@ -635,103 +660,93 @@ updated_cycle_length = (1 - weight) * old_cycle_length + weight * new_cycle_leng
    ↓
    Get User Data: last_period_date, cycle_length
    ↓
-   Prepare past_cycle_data (last 12 cycles)
+   Get Period Logs: Actual period dates from database
    
-4. Try RapidAPI (Primary)
+4. Local Adaptive Calculation (Primary)
    ↓
-   POST /process_cycle_data
-   ├─ Get request_id
-   ├─ GET /predicted_cycle_starts
-   ├─ GET /average_cycle_length
-   ├─ GET /average_period_length
-   └─ GET /cycle_phases ⭐ (PRIMARY SOURCE)
+   calculate_phase_for_date_range()
+   ├─ predict_cycle_starts_from_period_logs() ⭐
+   │  └─ Uses actual period logs (most accurate)
+   │  └─ Bayesian smoothing for cycle length
+   ├─ estimate_luteal() (adaptive)
+   ├─ estimate_period_length() (adaptive)
+   ├─ predict_ovulation() (with uncertainty)
+   ├─ fertility_probability() (biologically accurate)
+   └─ select_ovulation_days() (1-3 day window)
    
-5. Process RapidAPI Timeline
+5. Generate Phase Mappings
    ↓
-   ├─ Trust: Dates, cycle boundaries
-   ├─ Override: Phase names, ovulation dates
+   ├─ Calculate: Phase names, ovulation dates
    ├─ Calculate: Fertility probabilities
-   └─ Generate: Phase-day IDs
+   ├─ Generate: Phase-day IDs
+   └─ Set: prediction_confidence = 0.8 (high confidence)
    
-6. If RapidAPI Fails
+6. Store in Database
    ↓
-   Fallback: calculate_phase_for_date_range()
-   ├─ Use predicted cycle starts from DB
-   ├─ Calculate ovulation dates adaptively
-   ├─ Select ovulation days (top-N)
-   └─ Generate phase mappings
+   ├─ Upsert pattern (race-safe)
+   └─ Store all calculated fields
    
-7. Store in Database
-   ↓
-   ├─ Full update: Delete all, insert all
-   └─ Partial update: Delete future only, insert new
-   
-8. Return Phase Map
+7. Return Phase Map
    ↓
    Format: {date, phase, phase_day_id, fertility_prob, ...}
 ```
 
-### 4.2 RapidAPI Integration
+**Key Changes:**
+- ✅ **No External APIs**: All calculations performed locally
+- ✅ **Period Log Based**: Uses actual period logs for cycle start prediction
+- ✅ **Adaptive Algorithms**: All estimates adapt to user's actual data
+- ✅ **High Confidence**: prediction_confidence = 0.8 (was 0.4 for fallback)
+- ✅ **Source**: "local" (was "fallback")
 
-**Base URL:** `https://womens-health-menstrual-cycle-phase-predictions-insights.p.rapidapi.com`
+### 4.2 Local Adaptive Calculation System
 
-**Authentication:**
+**⚠️ RAPIDAPI REMOVED**: System now uses fully independent, adaptive local algorithms.
+
+**Primary Function:** `calculate_phase_for_date_range()`
+
+**Key Features:**
+- ✅ **No External Dependencies**: All calculations performed locally
+- ✅ **Period Log Based**: Uses actual period logs for cycle start prediction
+- ✅ **Adaptive Learning**: Algorithms improve accuracy over time with user data
+- ✅ **Medically Credible**: All algorithms based on established research
+
+**Cycle Start Prediction:**
 ```python
-headers = {
-    "X-RapidAPI-Key": settings.RAPIDAPI_KEY,
-    "X-RapidAPI-Host": "womens-health-menstrual-cycle-phase-predictions-insights.p.rapidapi.com",
-    "Content-Type": "application/json"
-}
+predict_cycle_starts_from_period_logs(user_id, start_date, end_date)
 ```
+- Uses actual period log data (most accurate source)
+- Calculates cycle lengths from real observations
+- Uses Bayesian smoothing for cycle length estimation
+- Accounts for cycle length variance (irregular cycles)
+- Predicts forward from most recent period
 
-**Endpoints Used:**
+**Adaptive Algorithms:**
+1. **Luteal Estimation**: `estimate_luteal(user_id)`
+   - Bayesian smoothing from actual observations
+   - Confidence gating (only updates with high-confidence predictions)
+   - Clamped to 10-18 days (medically valid range)
 
-1. **POST /process_cycle_data**
-   - **Purpose**: Submit past cycle data, get request_id
-   - **Payload:**
-     ```json
-     {
-       "current_date": "2025-11-16",
-       "past_cycle_data": [
-         {"cycle_start_date": "2025-10-01", "period_length": 5},
-         ...
-       ],
-       "max_cycle_predictions": 6
-     }
-     ```
-   - **Returns:** `{"request_id": "..."}`
+2. **Period Length Estimation**: `estimate_period_length(user_id)`
+   - Calculated from period logs
+   - Bayesian smoothing
+   - Clamped to 3-8 days (medically valid range)
 
-2. **GET /get_data/{request_id}/predicted_cycle_starts**
-   - **Returns:** `{"predicted_cycle_starts": ["2025-11-01", ...]}`
+3. **Ovulation Prediction**: `predict_ovulation(...)`
+   - Uses cycle length - luteal mean
+   - Uncertainty quantification (ovulation_sd)
+   - Adaptive cycle start uncertainty
 
-3. **GET /get_data/{request_id}/average_cycle_length**
-   - **Returns:** `{"average_cycle_length": 28.5}`
+4. **Fertility Probability**: `fertility_probability(...)`
+   - Biologically accurate (sperm survival decay curve)
+   - Peak fertility at day -1 or -2 (before ovulation)
+   - Normalized to reflect medical data
 
-4. **GET /get_data/{request_id}/average_period_length**
-   - **Returns:** `{"average_period_length": 5.2}`
-
-5. **GET /get_data/{request_id}/cycle_phases** ⭐ (PRIMARY)
-   - **Returns:**
-     ```json
-     {
-       "cycle_phases": [
-         {
-           "date": "2025-11-01",
-           "phase": "Period",
-           "day_in_phase": 1
-         },
-         ...
-       ]
-     }
-     ```
-   - **Usage**: Primary source for phase timeline
-   - **Trust**: Dates, cycle boundaries
-   - **Override**: Phase names, ovulation dates
-
-**Error Handling:**
-- **Timeout**: 10s connect, 30s read
-- **HTTP Errors**: Detailed error messages
-- **Fallback**: Local calculation if API fails
+**Benefits:**
+- **No API Costs**: No external API calls
+- **Faster**: No network latency
+- **More Reliable**: No API downtime or rate limits
+- **Better Privacy**: All data stays local
+- **Adaptive**: Improves accuracy over time
 
 ### 4.3 Period Logging Flow
 
@@ -773,9 +788,9 @@ headers = {
 6. Regenerate Predictions
    ↓
    if should_adjust:
-       generate_cycle_phase_map(update_future_only=True)
+       calculate_phase_for_date_range(update_future_only=True)
    else:
-       generate_cycle_phase_map(update_future_only=False)
+       calculate_phase_for_date_range(update_future_only=False)
    
 7. Store Period Log
    ↓
@@ -786,37 +801,93 @@ headers = {
 
 **Purpose:** Preserve historical data when recalculating predictions
 
-**Implementation:**
+**⚠️ NOTE: This is the OLD implementation. Current implementation uses upsert pattern for race condition protection.**
+
+**Old Implementation (Deprecated):**
 ```python
+# OLD: Delete-then-insert (race condition risk)
 if update_future_only:
-    # Delete only future dates
     supabase.table("user_cycle_days").delete()\
         .eq("user_id", user_id)\
         .gte("date", current_date).execute()
-    
-    # Insert new predictions
     supabase.table("user_cycle_days").insert(insert_data).execute()
 else:
-    # Delete all existing
     supabase.table("user_cycle_days").delete()\
         .eq("user_id", user_id).execute()
-    
-    # Insert all new
     supabase.table("user_cycle_days").insert(insert_data).execute()
 ```
+
+**Current Implementation (Race-Safe):**
+```python
+# NEW: Upsert pattern (race-safe)
+for entry in upsert_data:
+    try:
+        supabase.table("user_cycle_days").insert(entry).execute()
+    except Exception as insert_err:
+        if "conflict" in str(insert_err).lower() or "unique" in str(insert_err).lower():
+            supabase.table("user_cycle_days").update(entry)\
+                .eq("user_id", user_id).eq("date", entry["date"]).execute()
+```
+
+**See Section 9 for complete race condition protection documentation.**
 
 **When Used:**
 - Early/late period detection triggers partial update
 - User logs period → only future dates recalculated
 - Preserves historical predictions
 
-### 4.5 Data Source Priority
+### 4.5 Race Condition Protection
 
-| Source | Confidence | When Used |
-|--------|-----------|-----------|
-| **RapidAPI cycle_phases** | 0.9 | API succeeds, use timeline + override phases |
-| **Adjusted** (RapidAPI + manual phases) | 0.7 | API predictions available, manual phase calculation |
-| **Fallback** (local calculation) | 0.4 | RapidAPI unavailable, use last_period_date + cycle_length |
+**⚠️ CRITICAL: Upsert Pattern**
+
+The system uses **upsert pattern** (try insert, catch conflict, then update) instead of delete-then-insert to prevent race conditions.
+
+**Why:**
+- Delete-then-insert creates a gap where concurrent requests can cause data loss
+- Calendar fetch + background regen can collide
+- Multiple period logs can trigger simultaneous updates
+
+**Implementation:**
+- Each row handled atomically (insert or update)
+- Uses unique constraint: `PRIMARY KEY (user_id, date)`
+- Both concurrent requests succeed correctly
+
+**See Section 9 for complete race condition protection documentation.**
+
+### 4.6 Cycle Start Prediction from Period Logs
+
+**Purpose:**
+- Predict future cycle starts using actual period log data (most accurate method)
+- Use Bayesian smoothing for cycle length estimation
+- Account for cycle length variance (irregular cycles)
+
+**Prediction Strategy:**
+1. Get period logs from database (actual period dates)
+2. Group consecutive dates into periods (period starts)
+3. Calculate cycle lengths from gaps between period starts
+4. Use Bayesian smoothing to estimate cycle length
+5. Predict forward from most recent period
+
+**Functions:**
+- `predict_cycle_starts_from_period_logs(user_id, start_date, end_date)`: Predict cycle starts
+- Uses actual period log data (most accurate source)
+- Falls back to database predictions or rolling calculation if needed
+
+**Benefits:**
+- **More Accurate**: Uses actual period data, not fixed cycle length
+- **Adaptive**: Learns from user's actual cycle patterns
+- **Handles Irregular Cycles**: Accounts for cycle length variance
+- **No External Dependencies**: All calculations local
+
+### 4.7 Data Source Priority
+
+| Source | Prediction Confidence | When Used |
+|--------|----------------------|-----------|
+| **Local** (adaptive algorithms) | 0.8 | Primary method - uses period logs and adaptive algorithms |
+| **Database** (stored predictions) | 0.8 | Previously calculated predictions stored in database |
+| **Rolling** (fixed cycle length) | 0.6 | Fallback when no period logs available, uses last_period_date + cycle_length |
+
+**Note:** `prediction_confidence` indicates the reliability of the prediction. The system now uses adaptive local algorithms as the primary method (confidence 0.8), which is higher than the previous fallback method (0.4) because it uses actual period log data and adaptive learning.
 
 ---
 
@@ -847,11 +918,14 @@ GET /cycles/phase-map?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
       "phase_day_id": "o1",
       "fertility_prob": 0.85,
       "predicted_ovulation_date": "2025-11-16",
+      "predicted_ovulation_date_label": "Estimated ovulation date",
+      "ovulation_offset": 14,
       "luteal_estimate": 14.2,
       "luteal_sd": 1.8,
       "ovulation_sd": 2.1,
-      "source": "api",
-      "confidence": 0.9
+      "source": "local",
+      "prediction_confidence": 0.8,
+      "is_predicted": true
     },
     ...
   ]
@@ -863,6 +937,8 @@ GET /cycles/phase-map?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
 - `"predicted_ovulation_date"` is the most likely day of the single ovulation event
 - `"ovulation_sd"` represents prediction uncertainty (not multiple events)
 - The 1-3 day "Ovulation Phase" indicates: "We predict ovulation occurred somewhere within these days"
+- **UI Labeling**: Calendar and API labels use "Estimated Ovulation (1-3 day window)" to clarify this is a prediction uncertainty band, not actual ovulation
+- **Fertile Window Visualization**: Days with high `fertility_prob` (≥0.3) are visually marked even if phase is "Follicular" to ensure users see the full 5-6 day fertile window
 
 ### 5.2 Phase Color Coding
 
@@ -895,6 +971,19 @@ const phaseColors = {
 - Fertility window indicators
 - Predicted ovulation date
 - Cycle day number
+
+**⚠️ Medical Accuracy - Fertile Window Visualization:**
+- **Fertile Window Indicator**: Days with `fertility_prob >= 0.3` show a small orange dot even if phase is "Follicular"
+- **Purpose**: Ensures users see the full 5-6 day fertile window, not just the 1-3 day "Ovulation Phase"
+- **Visual Cue**: Small orange dot in top-right corner of calendar date indicates fertile day
+- **Rationale**: Fertile window (5-6 days) is larger than "Ovulation Phase" (1-3 days) due to sperm survival
+- **Example**: Days -5 to -1 before ovulation may be in "Follicular" phase but are still fertile (shown with indicator)
+
+**⚠️ Medical Accuracy - Ovulation Phase Labeling:**
+- **Calendar Legend**: Shows "Estimated Ovulation (1-3 day window)" instead of just "Ovulation"
+- **Tooltip**: Explains this represents prediction uncertainty around a single ovulation event
+- **Purpose**: Prevents user misinterpretation that "Ovulation Phase" means multiple ovulation events
+- **Clarification**: Ovulation itself is a 12-24 hour event; the "phase" represents prediction uncertainty
 
 ### 5.4 Date Range Calculation
 
@@ -1053,8 +1142,8 @@ if abs(difference) >= 2:
 - **Action**: Use last 12 periods for estimation
 
 **Cycle Predictions:**
-- **RapidAPI**: 6-12 cycles (default: 6, max: 12)
-- **Rationale**: API requirements and accuracy
+- **Local Calculation**: Uses all available period logs (no minimum requirement, but more data = better accuracy)
+- **Rationale**: Adaptive algorithms learn from actual user data, more data improves accuracy
 
 ---
 
@@ -1202,23 +1291,23 @@ PeriodCycle.AI implements comprehensive medical safety and liability protections
 
 **Fertility Probability Suppression:**
 - **Threshold**: `MIN_CONFIDENCE_FOR_FERTILITY = 0.5`
-- **Rule**: Only return `fertility_prob` if `confidence >= 0.5`
-- **Rationale**: Low-confidence predictions (fallback mode, confidence = 0.4) are suppressed
+- **Rule**: Only return `fertility_prob` if `prediction_confidence >= 0.5`
+- **Rationale**: Low-confidence predictions (fallback mode, prediction_confidence = 0.4) are suppressed
 
 **Implementation:**
 ```python
 # backend/routes/cycles.py
 MIN_CONFIDENCE_FOR_FERTILITY = 0.5
-confidence = item.get("confidence", 0.0)
-if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
+prediction_confidence = item.get("prediction_confidence") or item.get("confidence", 0.0)  # Backward compatibility
+if "fertility_prob" in item and prediction_confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
     formatted_entry["fertility_prob"] = item["fertility_prob"]
-# If confidence is low, do NOT include fertility_prob (suppressed for safety)
+# If prediction_confidence is low, do NOT include fertility_prob (suppressed for safety)
 ```
 
-**Confidence Levels:**
-- **RapidAPI** (confidence: 0.9): ✅ Fertility data shown
-- **Adjusted** (confidence: 0.7): ✅ Fertility data shown
-- **Fallback** (confidence: 0.4): ❌ Fertility data suppressed
+**Prediction Confidence Levels:**
+- **Local Adaptive** (prediction_confidence: 0.8): ✅ Fertility data shown (primary method)
+- **Rolling Calculation** (prediction_confidence: 0.6): ✅ Fertility data shown (fallback)
+- **Limited Data** (prediction_confidence: 0.4): ❌ Fertility data suppressed
 
 ### 8.4 Medical Language Requirements
 
@@ -1247,6 +1336,194 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 
 ---
 
+## 9. Race Condition Protection
+
+### 9.1 Overview
+
+The system uses **upsert pattern** instead of delete-then-insert to prevent race conditions when multiple requests update cycle predictions simultaneously.
+
+**Race Condition Scenarios:**
+- Calendar fetch + background regeneration
+- Concurrent period logs triggering updates
+- Multiple API calls from frontend
+- Scheduled background jobs
+
+### 9.2 Implementation
+
+**Strategy: Try Insert, Catch Conflict, Then Update**
+
+```python
+# backend/cycle_utils.py - store_cycle_phase_map()
+for entry in upsert_data:
+    try:
+        # Try insert first (will succeed if row doesn't exist)
+        supabase.table("user_cycle_days").insert(entry).execute()
+    except Exception as insert_err:
+        # If insert fails due to unique constraint conflict, update instead
+        if "conflict" in str(insert_err).lower() or "unique" in str(insert_err).lower():
+            # Row exists - update it (race-safe: both requests will update correctly)
+            supabase.table("user_cycle_days").update(entry).eq("user_id", user_id).eq("date", entry["date"]).execute()
+```
+
+### 9.3 Benefits
+
+**Race-Safe Behavior:**
+- Request A: Insert row for date X → Success
+- Request B: Insert row for date X → Conflict → Update → Success
+- Result: Both requests succeed, final state is correct (Request B's data)
+
+**No Data Loss:**
+- If Request A deletes, Request B's insert still succeeds
+- If Request B deletes, Request A's insert still succeeds
+- Both requests complete successfully
+
+**Atomic Per Row:**
+- Each row is handled atomically (insert or update)
+- No gap between delete and insert
+- Uses existing unique constraint: `PRIMARY KEY (user_id, date)`
+
+### 9.4 Performance Considerations
+
+**Trade-offs:**
+- **Slower**: Individual upserts are slower than batch insert
+- **Safer**: No race conditions, no data loss
+- **Scalable**: Works correctly under concurrent load
+
+**Future Optimization:**
+- PostgreSQL `ON CONFLICT DO UPDATE` for batch upsert
+- Supabase RPC stored procedure for batch upsert
+- Connection pooling for better concurrency
+
+**See `RACE_CONDITION_PROTECTION.md` for complete documentation.**
+
+---
+
+## 10. Prediction Fields & Data Management
+
+### 10.1 Prediction Confidence
+
+**Field:** `prediction_confidence` (renamed from `confidence`)
+
+**Purpose:**
+- Indicates reliability of the prediction (0.0-1.0)
+- Used for medical safety (suppress low-confidence fertility data)
+- Helps users understand prediction quality
+
+**Values:**
+- **0.8**: Local adaptive algorithms (high confidence - primary method)
+- **0.6**: Rolling calculation with fixed cycle length (medium confidence - fallback)
+- **0.4**: Very limited data (low confidence, suppressed)
+
+**Backward Compatibility:**
+- Code accepts both `confidence` and `prediction_confidence`
+- Migration renames column if it exists
+- Old code continues to work during transition
+
+### 10.2 Ovulation Offset
+
+**Field:** `ovulation_offset` (INTEGER)
+
+**Purpose:**
+- Stores days from cycle start to predicted ovulation (explicitly)
+- Previously calculated on-the-fly: `cycle_length - luteal_mean`
+- Enables faster queries, historical tracking, debugging, analytics
+
+**Formula:**
+```python
+ovulation_offset = int(cycle_length_estimate - luteal_mean)
+ovulation_date = cycle_start + timedelta(days=ovulation_offset)
+```
+
+**Benefits:**
+- No recalculation needed for queries
+- Historical tracking of offset changes
+- Easier debugging and verification
+- Analytics on offset patterns
+
+### 10.3 Cycle Start Prediction from Period Logs
+
+**⚠️ RAPIDAPI REMOVED**: System now uses period log based prediction.
+
+**Function:** `predict_cycle_starts_from_period_logs(user_id, start_date, end_date)`
+
+**Purpose:**
+- Predict future cycle starts using actual period log data (most accurate method)
+- Use Bayesian smoothing for cycle length estimation
+- Account for cycle length variance (irregular cycles)
+
+**Prediction Logic:**
+1. Get period logs from database (actual period dates)
+2. Group consecutive dates into periods (identify period starts)
+3. Calculate cycle lengths from gaps between period starts
+4. Use Bayesian smoothing to estimate cycle length
+5. Predict forward from most recent period
+
+**Benefits:**
+- **More Accurate**: Uses actual period data, not fixed cycle length
+- **Adaptive**: Learns from user's actual cycle patterns
+- **Handles Irregular Cycles**: Accounts for cycle length variance
+- **No External Dependencies**: All calculations local
+- **Cost Savings**: No API calls needed
+- **Better Privacy**: All data stays local
+
+### 10.4 Is Predicted Flag
+
+**Field:** `is_predicted` (BOOLEAN, default: TRUE)
+
+**Purpose:**
+- Distinguish between predicted phases vs logged period data
+- Enables filtering, analytics, UI differentiation, debugging
+
+**Values:**
+- **TRUE**: Predicted phase (from cycle predictions)
+- **FALSE**: Logged data (from period logs)
+
+**Usage:**
+```python
+# Predicted phase (from cycle predictions)
+{
+    "date": "2025-11-20",
+    "phase": "Follicular",
+    "is_predicted": True  # This is a prediction
+}
+
+# Logged period (actual data)
+{
+    "date": "2025-11-15",
+    "phase": "Period",
+    "is_predicted": False  # This is logged data
+}
+```
+
+**Future Enhancements:**
+- Period logs can set `is_predicted = False`
+- Compare prediction accuracy vs actual data
+- Different UI styling for predicted vs logged
+- Analytics on prediction accuracy
+
+### 10.5 Database Migration
+
+**File:** `database/migrations/add_prediction_fields.sql`
+
+**Changes:**
+1. Add `prediction_confidence FLOAT` to `user_cycle_days`
+2. Rename `confidence` → `prediction_confidence` (if exists)
+3. Add `ovulation_offset INTEGER` to `user_cycle_days`
+4. Add `is_predicted BOOLEAN DEFAULT TRUE` to `user_cycle_days`
+5. Add `is_predicted BOOLEAN DEFAULT TRUE` to `user_cycle_days`
+6. Note: `rapidapi_request_id` fields are deprecated (RapidAPI removed)
+8. Add indexes for performance
+
+**To Apply:**
+```sql
+-- Run in Supabase SQL Editor
+-- See: database/migrations/add_prediction_fields.sql
+```
+
+**See `PREDICTION_FIELDS_UPGRADE.md` for complete upgrade documentation.**
+
+---
+
 ## Appendix A: Key Functions Reference
 
 ### Core Functions
@@ -1260,8 +1537,9 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 - Purpose: Adaptive period length estimation with Bayesian smoothing
 
 **`predict_ovulation(cycle_start_date, cycle_length_estimate, luteal_mean, luteal_sd, cycle_start_sd, user_id)`**
-- Returns: `(ovulation_date_str, ovulation_sd)` tuple
+- Returns: `(ovulation_date_str, ovulation_sd, ovulation_offset)` tuple
 - Purpose: Predict ovulation date with uncertainty quantification
+- **ovulation_offset**: Days from cycle start to predicted ovulation (integer, stored explicitly)
 
 **`fertility_probability(offset_from_ovulation, ovulation_sd)`**
 - Returns: `float` (0.0-1.0)
@@ -1274,15 +1552,21 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 **`select_ovulation_days(ovulation_sd, max_days=3)`**
 - Returns: `set` of day offsets (e.g., {-1, 0, 1})
 - Purpose: Select top-N days for ovulation uncertainty band (1-3 days)
+- **Uses**: `fertility_probability()` (biologically meaningful) to align with fertile window
 - **Medical Note**: Represents prediction uncertainty around a single ovulation event, not multiple events
+- **Important**: Uses fertility probability (not ovulation probability) to ensure "Ovulation Phase" aligns with actual fertile window
 
 **`estimate_cycle_start_sd(user_id, cycle_length_estimate)`**
 - Returns: `float` (standard deviation in days)
 - Purpose: Estimate cycle start uncertainty based on cycle variance
 
-**`generate_cycle_phase_map(user_id, past_cycle_data, current_date, update_future_only=False)`**
+**`calculate_phase_for_date_range(user_id, last_period_date, cycle_length, start_date=None, end_date=None)`**
 - Returns: `List[Dict]` (phase mappings)
-- Purpose: Generate complete phase-day mappings using RapidAPI or fallback
+- Purpose: Generate complete phase-day mappings using adaptive local algorithms (primary method)
+
+**`predict_cycle_starts_from_period_logs(user_id, start_date=None, end_date=None, max_cycles=12)`**
+- Returns: `List[datetime]` (predicted cycle start dates)
+- Purpose: Predict future cycle starts from period logs using Bayesian smoothing
 
 **`generate_phase_day_id(phase, day_in_phase)`**
 - Returns: `str` (e.g., "p1", "f10", "o2", "l15")
@@ -1296,7 +1580,19 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 
 **`users`**
 - `id`: UUID (primary key)
-- `email`: VARCHAR
+- `email`: VARCHAR (unique)
+- `name`: VARCHAR
+- `password_hash`: VARCHAR
+- `last_period_date`: DATE
+- `cycle_length`: INTEGER (default: 28)
+- Note: `rapidapi_request_id` fields deprecated (RapidAPI removed)
+- `language`: VARCHAR (default: 'en')
+- `favorite_cuisine`: VARCHAR
+- `allergies`: JSONB
+- `interests`: JSONB
+- `saved_items`: JSONB
+- `created_at`: TIMESTAMP
+- `updated_at`: TIMESTAMP
 - `password_hash`: VARCHAR
 - `last_period_date`: DATE
 - `cycle_length`: INTEGER (default: 28)
@@ -1311,18 +1607,22 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 - `created_at`: TIMESTAMP
 
 **`user_cycle_days`**
-- `id`: UUID (primary key)
-- `user_id`: UUID (foreign key)
-- `date`: DATE
-- `phase`: VARCHAR
-- `phase_day_id`: VARCHAR
+- `user_id`: UUID (foreign key, part of primary key)
+- `date`: DATE (part of primary key with user_id)
+- `phase`: VARCHAR (Period, Follicular, Ovulation, Luteal)
+- `phase_day_id`: VARCHAR (e.g., "p1", "f10", "o2", "l15")
 - `source`: VARCHAR (optional: "api", "adjusted", "fallback")
-- `confidence`: FLOAT (optional: 0.4-0.9)
-- `fertility_prob`: FLOAT (optional)
-- `predicted_ovulation_date`: DATE (optional)
-- `luteal_estimate`: FLOAT (optional)
-- `luteal_sd`: FLOAT (optional)
-- `ovulation_sd`: FLOAT (optional)
+- `prediction_confidence`: FLOAT (optional: 0.4-0.9, renamed from `confidence`)
+- `fertility_prob`: FLOAT (optional: 0.0-1.0, suppressed if prediction_confidence < 0.5)
+- `predicted_ovulation_date`: DATE (optional: estimated ovulation date)
+- `ovulation_offset`: INTEGER (optional: days from cycle start to ovulation, stored explicitly)
+- `luteal_estimate`: FLOAT (optional: adaptive luteal mean)
+- `luteal_sd`: FLOAT (optional: adaptive luteal standard deviation)
+- `ovulation_sd`: FLOAT (optional: ovulation prediction uncertainty)
+- `is_predicted`: BOOLEAN (optional: TRUE for predictions, FALSE for logged data)
+- Note: `rapidapi_request_id` field deprecated (RapidAPI removed, no longer used)
+
+**Note:** All optional fields support graceful degradation if columns don't exist in database.
 
 ---
 
@@ -1330,10 +1630,10 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 
 ### API Error Handling
 
-**RapidAPI Errors:**
-- **Timeout**: 10s connect, 30s read → Fallback to local calculation
-- **HTTP Errors**: Detailed error messages → Fallback to local calculation
-- **Empty Response**: Fallback to local calculation
+**Calculation Errors:**
+- **Missing Period Logs**: Falls back to rolling calculation with fixed cycle length
+- **Invalid Data**: Skips invalid observations, uses defaults
+- **Database Errors**: Returns empty phase map, logs error
 
 **Database Errors:**
 - **Connection Errors**: Retry with exponential backoff
@@ -1343,15 +1643,21 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
 ### Validation Errors
 
 **Invalid Data:**
-- Observed luteal outside 10-18 days → Skip update
-- Low confidence ovulation prediction (ovulation_sd > 1.5) → Skip luteal update (confidence gating)
+- Observed luteal outside 10-18 days → Skip update (logged for analytics)
+- Low prediction confidence ovulation prediction (ovulation_sd > 1.5) → Skip luteal update (confidence gating, logged for analytics)
 - Cycle length outside 21-45 days → Filter out
 - Period length outside 3-8 days → Clamp to range
+- Prediction confidence < 0.5 → Suppress fertility_prob (medical safety)
+
+**⚠️ Analytics for Irregular Cycles:**
+- Skipped luteal updates are logged to identify users with highly irregular cycles or PCOS
+- These users may need alternative calibration approaches or manual calibration
+- Monitoring skipped updates helps identify patterns that require special handling
 
 **Missing Data:**
 - No `last_period_date` → Return error
 - No past cycles → Use defaults (prior values)
-- No RapidAPI key → Use fallback calculation
+- No period logs → Use rolling calculation with fixed cycle length
 
 ---
 
@@ -1389,7 +1695,7 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
   - Prevents silent breakage during refactoring
 - **Implemented medical safety and liability protections**:
   - UI disclaimers for NOT contraception / NOT diagnosis
-  - Confidence-based fertility data suppression (threshold: 0.5)
+  - Prediction confidence-based fertility data suppression (threshold: 0.5)
   - Medical language requirements ("Estimated", "Predicted", "Likely")
   - See `MEDICAL_SAFETY_REQUIREMENTS.md` for complete details
 - **Fixed race condition in cycle phase map updates**:
@@ -1397,6 +1703,16 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
   - Prevents data loss when calendar fetch + background regen collide
   - Handles concurrent period logs and multiple API calls safely
   - See `RACE_CONDITION_PROTECTION.md` for complete details
+- **Upgraded prediction fields and data management**:
+  - Renamed `confidence` → `prediction_confidence` (more explicit)
+  - Store `ovulation_offset` (int) explicitly (faster queries, historical tracking)
+  - Cache RapidAPI `request_id` per user (reduces API calls by 50-80%)
+  - Add `is_predicted` boolean (distinguish predicted vs logged data)
+  - See `PREDICTION_FIELDS_UPGRADE.md` for complete details
+- **Python version compatibility**:
+  - Production: Python 3.11.9 (stable, well-tested)
+  - Not recommended: Python 3.13 (too new, library compatibility risks)
+  - See `PYTHON_VERSION_COMPATIBILITY.md` for detailed compatibility information
 
 ---
 
@@ -1425,9 +1741,45 @@ if "fertility_prob" in item and confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
    - The 1-3 day range represents prediction confidence, not biological duration
    - All calculations assume a single ovulation event per cycle
    - Fertility probability reflects biological reality:
-     - Peak fertility at day -1 or -2 (before ovulation)
-     - Sperm survival decays over time (not binary)
-     - Formula matches real conception data from medical studies
+   - Peak fertility at day -1 or -2 (before ovulation), not day 0
+   - Sperm survival uses decay curve (not binary on/off)
+
+5. **Recent System Improvements:**
+   - **Prediction Confidence**: Renamed from `confidence` to `prediction_confidence` for clarity
+   - **Ovulation Offset**: Stored explicitly as INTEGER for faster queries and historical tracking
+   - **Period Log Based Prediction**: Uses actual period logs for cycle start prediction (most accurate)
+   - **Is Predicted Flag**: Distinguishes predicted vs logged data
+   - **Race Condition Protection**: Upsert pattern prevents data loss during concurrent updates
+   - **Medical Safety**: Confidence-based suppression and proper medical language
+
+---
+
+## Documentation References
+
+**Related Documentation:**
+- `MEDICAL_SAFETY_REQUIREMENTS.md`: Complete medical safety and liability documentation
+- `RACE_CONDITION_PROTECTION.md`: Race condition protection implementation details
+- `PREDICTION_FIELDS_UPGRADE.md`: Prediction fields upgrade documentation
+- `PYTHON_VERSION_COMPATIBILITY.md`: Python version compatibility and recommendations
+- `RAPIDAPI_REMOVAL_SUMMARY.md`: Complete documentation of RapidAPI removal and migration to local algorithms
+
+**Migration Notes:**
+- Run `database/migrations/add_prediction_fields.sql` to add new fields
+- See `PREDICTION_FIELDS_UPGRADE.md` for migration instructions
+- **RapidAPI No Longer Required**: System now uses adaptive local algorithms only
+- No API keys needed for cycle predictions
+
+---
+
+**Last Updated:** 2025-11-16  
+**Version:** 3.0 (includes RapidAPI removal, local adaptive algorithms, prediction fields upgrade, race condition protection, medical safety)
+
+**Key Features:**
+- Peak fertility at day -1 or -2 (before ovulation)
+- Sperm survival decays over time (not binary)
+- Formula matches real conception data from medical studies
+- All calculations performed locally using adaptive algorithms
+- No external API dependencies for cycle predictions
 
 ---
 

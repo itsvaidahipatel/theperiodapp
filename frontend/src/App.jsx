@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom'
 import ProtectedRoute from './components/ProtectedRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { DataProvider } from './context/DataContext'
+import { ViewModeProvider } from './context/ViewModeContext'
 import Home from './pages/Home'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -13,11 +14,14 @@ import Nutrition from './pages/Nutrition'
 import Exercise from './pages/Exercise'
 import SelfTests from './pages/SelfTests'
 import About from './pages/About'
+import CycleHealthCheck from './pages/CycleHealthCheck'
+import CycleHistoryPage from './pages/CycleHistory'
 import NotFound from './pages/NotFound'
 
 function App() {
   return (
     <ErrorBoundary>
+      <ViewModeProvider>
       <DataProvider>
         <Routes>
         <Route path="/" element={<Home />} />
@@ -87,9 +91,26 @@ function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/cycle-health-check"
+          element={
+            <ProtectedRoute>
+              <CycleHealthCheck />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cycle-history"
+          element={
+            <ProtectedRoute>
+              <CycleHistoryPage />
+            </ProtectedRoute>
+          }
+        />
         <Route path="*" element={<NotFound />} />
         </Routes>
       </DataProvider>
+      </ViewModeProvider>
     </ErrorBoundary>
   )
 }
