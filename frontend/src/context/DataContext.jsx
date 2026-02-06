@@ -134,6 +134,14 @@ export const DataProvider = ({ children }) => {
     const loadInitialData = async () => {
       if (!isMounted) return
       
+      // Only load data if user is authenticated
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        console.log('No auth token, skipping data load')
+        setLoading(false)
+        return
+      }
+      
       const today = new Date().toISOString().split('T')[0]
       
       // Check if date changed

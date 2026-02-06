@@ -36,8 +36,16 @@ const apiRequest = async (endpoint, options = {}) => {
       localStorage.removeItem('access_token')
       localStorage.removeItem('user')
       
-      // Only redirect if not already on login/register page
-      if (!window.location.pathname.includes('/login') && !window.location.pathname.includes('/register')) {
+      // Only redirect if not already on login/register/home page
+      // Don't redirect from home page - it's a public route
+      const currentPath = window.location.pathname
+      const isPublicRoute = currentPath === '/' || 
+                           currentPath === '/login' || 
+                           currentPath === '/register' ||
+                           currentPath.startsWith('/login') ||
+                           currentPath.startsWith('/register')
+      
+      if (!isPublicRoute) {
         // Redirect to login after a short delay to allow error to be logged
         setTimeout(() => {
           window.location.href = '/login'
