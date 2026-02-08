@@ -69,7 +69,7 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-lg max-w-md w-full max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center p-6 border-b">
-          <h2 className="text-2xl font-bold text-period-pink">Log Period</h2>
+          <h2 className="text-2xl font-bold text-period-pink">Log Period Start</h2>
           <button
             onClick={onClose}
             className="text-gray-500 hover:text-gray-700"
@@ -79,9 +79,15 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+            <p className="text-sm text-blue-800">
+              <strong>Note:</strong> Log only the date your period started. The system will automatically track the full period duration based on your cycle history.
+            </p>
+          </div>
+          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Date
+              Period Start Date
             </label>
             <input
               type="date"
@@ -91,6 +97,9 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
               required
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
+            <p className="text-xs text-gray-500 mt-1">
+              Select the first day of your period
+            </p>
           </div>
 
           {error && (

@@ -72,16 +72,28 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
   }, [phaseMap])
 
   // Pre-calculate logged dates set for O(1) lookups
+  // Note: periodLogs now contains period START dates only
+  // The backend automatically creates period days in user_cycle_days, 
+  // so we check phaseMap for Period phase with is_predicted=false to identify logged periods
   const loggedDatesSet = useMemo(() => {
     const set = new Set()
+    // Add period start dates
     periodLogs.forEach(log => {
       const dateStr = log.startDate || log.date
       if (dateStr) {
         set.add(dateStr)
       }
     })
+    // Also add dates from phaseMap that are Period phase and not predicted (logged)
+    Object.entries(phaseMap).forEach(([dateStr, phaseData]) => {
+      const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
+      const isPredicted = typeof phaseData === 'object' ? (phaseData.is_predicted !== false) : true
+      if (phase === 'Period' && !isPredicted) {
+        set.add(dateStr)
+      }
+    })
     return set
-  }, [periodLogs])
+  }, [periodLogs, phaseMap])
 
   // Date range: 1 year past to 2 years future
   const minDate = subYears(new Date(), 1)
@@ -575,6 +587,19 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     
     if (selectedDateOnly > today) {
       setError('Cannot log period for future dates. Please log periods that have already occurred.')
+      return
+    }
+
+    // Check if selected date falls within an existing logged period range
+    const selectedDateStr = format(selectedDate, 'yyyy-MM-dd')
+    const phaseInfo = getPhaseInfo(selectedDateStr)
+    const phaseData = phaseMap[selectedDateStr]
+    const phase = phaseInfo?.phase || (typeof phaseData === 'string' ? phaseData : phaseData?.phase)
+    const isPredicted = phaseInfo?.isPredicted !== false || (typeof phaseData === 'object' ? (phaseData?.is_predicted !== false) : true)
+    
+    // If this date is already part of a logged period (Period phase, not predicted), prevent logging
+    if (phase === 'Period' && !isPredicted) {
+      setError('This date is already part of a logged period. Please log only the period start date.')
       return
     }
 

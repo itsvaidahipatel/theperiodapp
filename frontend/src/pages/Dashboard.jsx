@@ -165,6 +165,41 @@ const Dashboard = () => {
   const phaseMap = dashboardData?.phaseMap || {}
   const periodLogs = dashboardData?.periodLogs || []
   
+  // Get today's phase from phaseMap (same as PeriodCalendar) - ensures consistency
+  const [todayPhase, setTodayPhase] = useState(null)
+  
+  useEffect(() => {
+    const updateTodayPhase = () => {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const phaseData = phaseMap[today]
+      
+      if (phaseData) {
+        const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
+        const phaseDayId = typeof phaseData === 'object' ? (phaseData.phase_day_id || null) : null
+        
+        if (phase) {
+          setTodayPhase({
+            phase: phase,
+            phaseDayId: phaseDayId
+          })
+          return
+        }
+      }
+      
+      // Fallback to currentPhase from context if phaseMap doesn't have today
+      if (currentPhase?.phase) {
+        setTodayPhase({
+          phase: currentPhase.phase,
+          phaseDayId: currentPhase.phase_day_id || currentPhase.id || null
+        })
+      } else {
+        setTodayPhase(null)
+      }
+    }
+    
+    updateTodayPhase()
+  }, [phaseMap, currentPhase])
+  
   // Check if user has last_period_date
   const hasLastPeriodDate = user?.last_period_date
 
@@ -1098,26 +1133,23 @@ const Dashboard = () => {
           </div>
         )}
 
-        {/* D. Current Phase Card - Mobile Optimized */}
-        {currentPhase && currentPhase.phase && (
+        {/* D. Current Phase Card - Mobile Optimized - Matches PeriodCalendar format */}
+        {todayPhase && todayPhase.phase && (
           <div 
             className="mb-4 sm:mb-6 rounded-lg shadow-lg p-4 sm:p-6 border-2"
             style={{
-              backgroundColor: `${getPhaseColor(currentPhase.phase)}20`,
-              borderColor: getPhaseColor(currentPhase.phase)
+              backgroundColor: `${getPhaseColor(todayPhase.phase)}20`,
+              borderColor: getPhaseColor(todayPhase.phase)
             }}
           >
             <div className="flex items-start justify-between">
               <div className="flex-1">
                 <div className="flex items-center gap-2 sm:gap-3">
-                  <PhaseIcon phase={currentPhase.phase} size={isMobile ? 36 : 48} />
+                  <PhaseIcon phase={todayPhase.phase} size={isMobile ? 36 : 48} />
                   <div>
                     <h3 className="text-lg sm:text-xl lg:text-2xl font-bold text-gray-800 capitalize">
-                      {t('dashboard.currentPhase')}: {t(`phase.${currentPhase.phase.toLowerCase()}`)}
+                      Today's Phase: {todayPhase.phase}{todayPhase.phaseDayId ? ` (${todayPhase.phaseDayId})` : ''}
                     </h3>
-                    {(currentPhase.phase_day_id || currentPhase.id) && (
-                      <p className="text-sm sm:text-base text-gray-600">{t('dashboard.day')} {currentPhase.phase_day_id || currentPhase.id}</p>
-                    )}
                   </div>
                 </div>
               </div>

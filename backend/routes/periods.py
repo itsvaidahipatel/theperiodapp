@@ -83,7 +83,35 @@ async def log_period(
         # Check for anomaly
         is_anomaly = check_anomaly(user_id, date_obj)
         
-        # Step 1: Save daily bleeding log
+        # NEW: Check if this date is within an existing period range
+        # If user tries to log a date that's already part of a logged period, reject it
+        from period_start_logs import get_period_start_logs
+        from cycle_utils import estimate_period_length
+        from datetime import timedelta
+        
+        existing_starts = get_period_start_logs(user_id, confirmed_only=False)
+        period_length = estimate_period_length(user_id)
+        period_length_days = int(round(max(3.0, min(8.0, period_length))))  # Normalized period length
+        
+        # Check if date falls within any existing period range
+        for start_log in existing_starts:
+            start_date_str = start_log["start_date"]
+            if isinstance(start_date_str, str):
+                start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            else:
+                start_date = start_date_str
+            
+            period_end = start_date + timedelta(days=period_length_days - 1)
+            
+            # If logging a date within an existing period range, reject it
+            if start_date <= date_obj <= period_end:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"This date falls within an existing period (started {start_date_str}). Please log only the period start date."
+                )
+        
+        # Step 1: Save period START log (one log = one cycle start)
+        # This is now treated as a period start, not a daily bleeding log
         log_entry = {
             "user_id": user_id,
             "date": log_data.date,
@@ -91,11 +119,14 @@ async def log_period(
             "notes": log_data.notes
         }
         
+        # Check if this date already exists as a period start
         existing = supabase.table("period_logs").select("*").eq("user_id", user_id).eq("date", log_data.date).execute()
         
         if existing.data:
+            # Update existing log
             response = supabase.table("period_logs").update(log_entry).eq("user_id", user_id).eq("date", log_data.date).execute()
         else:
+            # Insert new period start log
             response = supabase.table("period_logs").insert(log_entry).execute()
         
         if not response.data:
@@ -104,9 +135,33 @@ async def log_period(
                 detail="Failed to create/update period log"
             )
         
-        # Step 2: Rebuild PeriodStartLogs (one log = one cycle start)
+        # Step 2: Automatically create period days in user_cycle_days based on estimated period length
+        # This ensures the calendar shows the full period range even though user only logged start
+        period_length_days = int(round(max(3.0, min(8.0, period_length))))
+        from cycle_utils import store_cycle_phase_map
+        
+        period_days = []
+        for day_offset in range(period_length_days):
+            period_date = date_obj + timedelta(days=day_offset)
+            period_date_str = period_date.strftime("%Y-%m-%d")
+            
+            # Create phase mapping for this period day
+            period_days.append({
+                "date": period_date_str,
+                "phase": "Period",
+                "phase_day_id": f"p{day_offset + 1}",
+                "fertility_prob": 0,
+                "is_predicted": False  # This is logged data, not predicted
+            })
+        
+        # Store period days in user_cycle_days
+        if period_days:
+            store_cycle_phase_map(user_id, period_days, update_future_only=False)
+            print(f"✅ Created {len(period_days)} period days automatically from period start {log_data.date}")
+        
+        # Step 3: Rebuild PeriodStartLogs (one log = one cycle start)
         from period_start_logs import sync_period_start_logs_from_period_logs
-        print(f"🔄 Syncing period_start_logs for user {user_id} after logging period on {log_data.date}")
+        print(f"🔄 Syncing period_start_logs for user {user_id} after logging period start on {log_data.date}")
         sync_period_start_logs_from_period_logs(user_id)
         
         # Verify sync worked
