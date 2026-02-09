@@ -158,6 +158,14 @@ export const DataProvider = ({ children }) => {
     // Set up interval to check for date change every minute
     interval = setInterval(() => {
       if (!isMounted) return
+      
+      // CRITICAL: Check for auth token before making any API calls
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        console.log('No auth token, skipping interval data check')
+        return
+      }
+      
       const currentDate = new Date().toISOString().split('T')[0]
       const storedLastLoadDate = localStorage.getItem('period_gpt_last_load_date')
       if (storedLastLoadDate && storedLastLoadDate !== currentDate) {
@@ -176,6 +184,13 @@ export const DataProvider = ({ children }) => {
   // Listen for period log events (clear cache and reload)
   useEffect(() => {
     const handlePeriodLogged = () => {
+      // CRITICAL: Check for auth token before making any API calls
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        console.log('No auth token, skipping period logged event handler')
+        return
+      }
+      
       console.log('Period logged, clearing cache and refreshing all data...')
       clearCache()
       checkAndLoadData(true)
@@ -190,6 +205,13 @@ export const DataProvider = ({ children }) => {
   // Listen for language changes (clear cache and reload)
   useEffect(() => {
     const handleLanguageChange = () => {
+      // CRITICAL: Check for auth token before making any API calls
+      const token = localStorage.getItem('access_token')
+      if (!token) {
+        console.log('No auth token, skipping language changed event handler')
+        return
+      }
+      
       console.log('Language changed, clearing cache and refreshing all data...')
       clearCache()
       checkAndLoadData(true)

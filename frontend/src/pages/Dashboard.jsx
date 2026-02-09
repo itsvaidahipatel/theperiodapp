@@ -10,7 +10,6 @@ import { useDataContext } from '../context/DataContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import PeriodLogModal from '../components/PeriodLogModal'
 import LoadingSpinner from '../components/LoadingSpinner'
-import CycleStats from '../components/CycleStats'
 import PeriodCalendar from '../components/PeriodCalendar'
 import { useTranslation } from '../utils/translations'
 import { useViewMode } from '../context/ViewModeContext'
@@ -134,6 +133,7 @@ const Dashboard = () => {
   const [error, setError] = useState(null)
   const [cycleStats, setCycleStats] = useState(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isLoggingEnd, setIsLoggingEnd] = useState(false) // Track if logging end date
   const [calendarPhaseMap, setCalendarPhaseMap] = useState({})
   const [loadingCalendar, setLoadingCalendar] = useState(true) // Start with true to show loading initially
   const [periodEpisodes, setPeriodEpisodes] = useState([])
@@ -141,6 +141,22 @@ const Dashboard = () => {
   const isFetchingRef = useRef(false)
   const navigate = useNavigate()
   const location = useLocation()
+  
+  // Check if there's an active period (end_date is NULL and not older than 10 days)
+  const hasActivePeriod = () => {
+    if (!periodLogs || periodLogs.length === 0) return false
+    const lastLog = periodLogs[0] // Most recent log
+    if (!lastLog || lastLog.endDate) return false // Has end date, not active
+    
+    // Check if start date is not older than 10 days
+    const startDate = new Date(lastLog.date)
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    startDate.setHours(0, 0, 0, 0)
+    const daysSinceStart = Math.floor((today - startDate) / (1000 * 60 * 60 * 24))
+    
+    return daysSinceStart <= 10 // Active if within 10 days
+  }
   
   // Detect mobile screen size
   useEffect(() => {
@@ -831,7 +847,25 @@ const Dashboard = () => {
   const handleLogPeriodClick = (date) => {
     const dateStr = format(date, 'yyyy-MM-dd')
     setSelectedDate(date)
+    setIsLoggingEnd(hasActivePeriod()) // If active period exists, log end; otherwise log start
     setIsModalOpen(true)
+  }
+  
+  const handleLogPeriodEnd = async (endData) => {
+    try {
+      const { logPeriodEnd } = await import('../utils/api')
+      const result = await logPeriodEnd(endData)
+      
+      // Refresh data after logging end
+      await refreshData()
+      setIsModalOpen(false)
+      setIsLoggingEnd(false)
+      
+      return result
+    } catch (error) {
+      console.error('Failed to log period end:', error)
+      throw error
+    }
   }
 
   // Get phase color for circle - using vibrant, visible colors
@@ -1050,7 +1084,7 @@ const Dashboard = () => {
               handleLogPeriodClick(date)
             }}
             className="w-5 h-5 sm:w-6 sm:h-6 bg-period-pink hover:bg-period-purple text-white rounded-full flex items-center justify-center shadow-md hover:shadow-lg transition-all z-50 mt-0.5"
-            title="Log period"
+            title={hasActivePeriod() ? "Log period end" : "Log period start"}
             style={{
               fontSize: '0.625rem',
               lineHeight: '1',
@@ -1213,8 +1247,23 @@ const Dashboard = () => {
               </button>
             </div>
 
-            {/* Cycle Statistics Component - New Format */}
-            <CycleStats />
+            {/* Cycle Statistics Button - Navigate to full statistics page */}
+            <div className="bg-white rounded-lg shadow-lg p-4 sm:p-6">
+              <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-3">
+                <Activity className="h-5 w-5 sm:h-6 sm:w-6 text-period-pink" />
+                <h3 className="text-lg sm:text-xl font-bold text-gray-800">{t('dashboard.cycleStatistics') || 'Cycle Statistics'}</h3>
+              </div>
+              <p className="text-sm sm:text-base text-gray-600 mb-3 sm:mb-4">
+                {t('dashboard.cycleStatisticsDesc') || 'View detailed cycle statistics and complete history'}
+              </p>
+              <button
+                onClick={() => navigate('/cycle-statistics')}
+                className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-period-pink to-period-purple text-white px-4 py-3 rounded-lg font-semibold hover:opacity-90 transition-all shadow-md hover:shadow-lg min-h-[44px] text-sm sm:text-base"
+              >
+                <Activity className="h-5 w-5" />
+                <span>View Statistics & History</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1312,9 +1361,13 @@ const Dashboard = () => {
       {/* Period Log Modal */}
       <PeriodLogModal
         isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onSuccess={handleLogPeriod}
+        onClose={() => {
+          setIsModalOpen(false)
+          setIsLoggingEnd(false)
+        }}
+        onSuccess={isLoggingEnd ? handleLogPeriodEnd : handleLogPeriod}
         selectedDate={selectedDate ? format(selectedDate, 'yyyy-MM-dd') : undefined}
+        isLoggingEnd={isLoggingEnd}
       />
     </div>
   )

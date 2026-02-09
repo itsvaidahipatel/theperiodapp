@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { format } from 'date-fns'
 import { useDataContext } from '../context/DataContext'
+import { useCalendarCache } from '../context/CalendarCacheContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { ArrowLeft } from 'lucide-react'
@@ -13,27 +15,44 @@ import { getNutritionData } from '../utils/api'
 
 const Nutrition = () => {
   const { t } = useTranslation()
-  const { dashboardData, wellnessData, loading, loadingWellness } = useDataContext()
+  const { wellnessData, loadingWellness } = useDataContext()
+  const { cachedPhaseMap, cachedWellnessData } = useCalendarCache()
   const [user, setUser] = useState(null)
   const [selectedCuisine, setSelectedCuisine] = useState('')
   const [loadingCuisine, setLoadingCuisine] = useState(false)
   const [recipesByCuisine, setRecipesByCuisine] = useState({})
   const navigate = useNavigate()
 
-  // Extract data from context
-  const currentPhase = dashboardData?.currentPhase || null
+  // Get today's phase from calendar cache (FAST - no API call needed!)
+  // Use same date format as dashboard: format(new Date(), 'yyyy-MM-dd')
+  const today = format(new Date(), 'yyyy-MM-dd') // System date in YYYY-MM-DD format (e.g., "2026-02-08")
+  const todayPhaseData = cachedPhaseMap[today]
+  const currentPhase = todayPhaseData ? {
+    phase: todayPhaseData.phase,
+    phase_day_id: todayPhaseData.phase_day_id,
+    id: todayPhaseData.phase_day_id
+  } : null
   const phaseDayId = currentPhase?.phase_day_id || currentPhase?.id
   
-  // Get recipes from wellnessData
-  // wellnessData.nutrition can be:
-  // - null (no data available or empty array was normalized to null)
-  // - {recipes: [...], wholefoods: []} (has data)
-  // - undefined (not loaded yet)
-  const defaultRecipes = wellnessData?.nutrition !== undefined
-    ? (wellnessData.nutrition && wellnessData.nutrition.recipes && Array.isArray(wellnessData.nutrition.recipes) && wellnessData.nutrition.recipes.length > 0
-        ? wellnessData.nutrition.recipes
-        : null)  // null means tried to load but no data
-    : undefined  // undefined means not loaded yet
+  // Log for debugging
+  useEffect(() => {
+    console.log(`📅 Nutrition page: Using TODAY's date: ${today}, phase_day_id: ${phaseDayId || 'NOT FOUND'}`)
+  }, [today, phaseDayId])
+  
+  // Check if we have preloaded wellness data for today's phase_day_id
+  const preloadedNutrition = cachedWellnessData?.phaseDayId === phaseDayId 
+    ? cachedWellnessData?.nutrition 
+    : null
+  
+  // Get recipes from preloaded data, then wellnessData context, then local state
+  // Priority: preloaded > context > local
+  const defaultRecipes = preloadedNutrition?.recipes 
+    ? preloadedNutrition.recipes
+    : (wellnessData?.nutrition !== undefined
+        ? (wellnessData.nutrition && wellnessData.nutrition.recipes && Array.isArray(wellnessData.nutrition.recipes) && wellnessData.nutrition.recipes.length > 0
+            ? wellnessData.nutrition.recipes
+            : null)  // null means tried to load but no data
+        : undefined)  // undefined means not loaded yet
   
   // Initialize recipesByCuisine with default recipes (favorite cuisine)
   useEffect(() => {
@@ -99,7 +118,35 @@ const Nutrition = () => {
     
     console.log(`🔄 Nutrition: Loading data for cuisine: ${selectedCuisine}, phaseDayId: ${phaseDayId}`)
     
-    // Check preloaded data first
+    // Check preloaded data from calendar cache first
+    if (preloadedNutrition && preloadedNutrition.recipes && Array.isArray(preloadedNutrition.recipes)) {
+      // Filter by cuisine if needed, or use all recipes
+      let recipesToUse = preloadedNutrition.recipes
+      if (selectedCuisine) {
+        recipesToUse = preloadedNutrition.recipes.filter(r => 
+          r.cuisine && r.cuisine.toLowerCase() === selectedCuisine.toLowerCase()
+        )
+      }
+      
+      if (recipesToUse.length > 0) {
+        console.log(`✅ Using preloaded nutrition data from calendar cache for ${selectedCuisine}:`, recipesToUse.length, 'recipes')
+        setRecipesByCuisine(prev => ({
+          ...prev,
+          [selectedCuisine]: recipesToUse
+        }))
+        return
+      } else if (preloadedNutrition.recipes.length === 0) {
+        // Preloaded but empty - mark as no data
+        console.log(`⚠️ Preloaded nutrition data for ${selectedCuisine} is empty`)
+        setRecipesByCuisine(prev => ({
+          ...prev,
+          [selectedCuisine]: null
+        }))
+        return
+      }
+    }
+    
+    // Fallback: Check other preloaded data sources
     const preloaded = getPreloadedNutritionData(phaseDayId, selectedCuisine)
     if (preloaded && preloaded.recipes && Array.isArray(preloaded.recipes) && preloaded.recipes.length > 0) {
       console.log(`✅ Using preloaded nutrition data for ${selectedCuisine}:`, preloaded.recipes.length, 'recipes')
@@ -265,7 +312,7 @@ const Nutrition = () => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
           <h2 className="text-3xl font-bold text-gray-800 mb-4">{t('nutrition.todaysNourishment')}</h2>
-          {currentPhase && (
+          {currentPhase && currentPhase.phase && (
             <p className="text-2xl text-gray-700 font-semibold mb-4">
               {t('nutrition.currentPhase')}: <span className="text-period-pink capitalize">{t(`phase.${currentPhase.phase.toLowerCase()}`)}</span> - {t('dashboard.day')} <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
             </p>
@@ -315,7 +362,7 @@ const Nutrition = () => {
           </select>
         </div>
 
-        {(loading || loadingWellness || loadingCuisine) ? (
+        {(loadingWellness || loadingCuisine) ? (
           <LoadingSpinner message="Loading nutrition data..." />
         ) : filteredRecipes && Array.isArray(filteredRecipes) && filteredRecipes.length > 0 ? (
           <div className="space-y-6">

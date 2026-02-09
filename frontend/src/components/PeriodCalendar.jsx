@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
 import { format, startOfMonth, endOfMonth, addMonths, subMonths, addYears, subYears, startOfDay, isSameDay, addDays, differenceInDays } from 'date-fns'
-import { getPhaseMap, logPeriod, getPeriodLogs, getCurrentPhase } from '../utils/api'
-import { AlertCircle, Info } from 'lucide-react'
+import { getPhaseMap, logPeriod, logPeriodEnd, getPeriodLogs, getCurrentPhase, getHormonesData, getNutritionData, getExerciseData } from '../utils/api'
+import { AlertCircle, Info, RefreshCw } from 'lucide-react'
+import { useCalendarCache } from '../context/CalendarCacheContext'
 
 // Get user from localStorage (since we don't have context here)
 const getUser = () => {
@@ -36,18 +37,75 @@ const PREDICTED_PHASE_COLORS = {
 }
 
 const PeriodCalendar = ({ onPeriodLogged }) => {
+  // Use calendar cache context
+  const { 
+    cachedPhaseMap, 
+    cachedPeriodLogs,
+    cachedWellnessData,
+    isLoading: cacheLoading,
+    setIsLoading: setCacheLoading,
+    shouldLoadCalendar,
+    updateCache,
+    updateWellnessCache,
+    clearCache
+  } = useCalendarCache()
+  
   const [selectedDate, setSelectedDate] = useState(null)
-  const [phaseMap, setPhaseMap] = useState({})
-  const [periodLogs, setPeriodLogs] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [phaseMap, setPhaseMap] = useState(cachedPhaseMap) // Initialize from cache
+  const [periodLogs, setPeriodLogs] = useState(cachedPeriodLogs) // Initialize from cache
+  const [loading, setLoading] = useState(shouldLoadCalendar()) // Only show loading if cache is empty
+  
+  // Sync phaseMap and periodLogs when cache updates (only if cache has more data)
+  // This ensures we don't overwrite newer data with older cache
+  useEffect(() => {
+    if (Object.keys(cachedPhaseMap).length > Object.keys(phaseMap).length) {
+      setPhaseMap(cachedPhaseMap)
+    }
+  }, [cachedPhaseMap]) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  useEffect(() => {
+    if (cachedPeriodLogs.length > periodLogs.length) {
+      setPeriodLogs(cachedPeriodLogs)
+    }
+  }, [cachedPeriodLogs]) // eslint-disable-line react-hooks/exhaustive-deps
+  
+  // Update cache when phaseMap or periodLogs change (but not during initial sync from cache)
+  // Use a ref to track if we're syncing from cache to avoid unnecessary updates
+  const isSyncingFromCacheRef = useRef(false)
+  
+  useEffect(() => {
+    // Skip if we're currently syncing from cache
+    if (isSyncingFromCacheRef.current) {
+      isSyncingFromCacheRef.current = false
+      return
+    }
+    
+    // Only update cache if we have meaningful data
+    if (Object.keys(phaseMap).length > 0 || periodLogs.length > 0) {
+      // Use a small delay to avoid updating during render
+      const timeoutId = setTimeout(() => {
+        updateCache(phaseMap, periodLogs)
+      }, 0)
+      return () => clearTimeout(timeoutId)
+    }
+  }, [phaseMap, periodLogs, updateCache])
+  
+  // Mark when syncing from cache
+  useEffect(() => {
+    if (Object.keys(cachedPhaseMap).length > Object.keys(phaseMap).length) {
+      isSyncingFromCacheRef.current = true
+    }
+  }, [cachedPhaseMap, phaseMap])
+  
   const [activeStartDate, setActiveStartDate] = useState(new Date())
   const [showLogButton, setShowLogButton] = useState(false)
   const [logging, setLogging] = useState(false)
   const [error, setError] = useState(null)
   const [todayPhase, setTodayPhase] = useState(null) // Today's phase information
-  const isInitialLoadRef = useRef(true) // Ref to track initial load
+  const isInitialLoadRef = useRef(shouldLoadCalendar()) // Track if this is initial load
   const isPrefetchingRef = useRef(false) // Track if prefetching is in progress
-  const prefetchedMonthsRef = useRef(new Set()) // Track which months have been prefetched
+  const prefetchedMonthsRef = useRef(new Set()) // Track which months have been prefetched (month keys: 'YYYY-MM')
+  const loadedMonthsRef = useRef(new Set()) // Track which months have been loaded (prevents duplicate API calls)
 
   // FAST MAP-BASED LOOKUPS (inspired by reference code)
   // Pre-calculate phase info map for O(1) lookups
@@ -95,6 +153,49 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     return set
   }, [periodLogs, phaseMap])
 
+  // Check if there's an active period (end_date is NULL and not older than 10 days)
+  const getActivePeriod = useMemo(() => {
+    if (!periodLogs || periodLogs.length === 0) return null
+    
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    
+    // Find most recent period log without end_date
+    // Sort by date descending to check most recent first
+    const sortedLogs = [...periodLogs].sort((a, b) => {
+      const dateA = new Date(a.startDate || a.date || 0)
+      const dateB = new Date(b.startDate || b.date || 0)
+      return dateB - dateA
+    })
+    
+    for (const log of sortedLogs) {
+      const startDateStr = log.startDate || log.date
+      if (!startDateStr) continue
+      
+      // Check if this log has no end_date (check both camelCase and snake_case)
+      // Handle both undefined and null values - endDate is null/undefined if period is still open
+      const endDateValue = log.endDate !== undefined ? log.endDate : log.end_date
+      const hasEndDate = endDateValue !== null && endDateValue !== undefined && endDateValue !== ''
+      
+      if (!hasEndDate) {
+        const startDate = new Date(startDateStr)
+        startDate.setHours(0, 0, 0, 0)
+        const daysSinceStart = Math.floor((today - startDate) / (1000 * 60 * 60 * 24))
+        
+        // Active if within 10 days (reasonable period duration)
+        if (daysSinceStart <= 10 && daysSinceStart >= 0) {
+          return {
+            logId: log.id,
+            startDate: startDateStr,
+            daysSinceStart
+          }
+        }
+      }
+    }
+    
+    return null
+  }, [periodLogs])
+
   // Date range: 1 year past to 2 years future
   const minDate = subYears(new Date(), 1)
   const maxDate = addYears(new Date(), 2)
@@ -103,22 +204,43 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
   useEffect(() => {
     const fetchPhaseMap = async (forceRefresh = false, isInitial = false) => {
       try {
-        // Only show loading on initial load
-        if (isInitial && isInitialLoadRef.current) {
+        // Check if we should load (only if cache is empty or force refresh)
+        const needsLoad = forceRefresh || shouldLoadCalendar()
+        
+        if (!needsLoad && !forceRefresh) {
+          // Use cached data - no need to fetch
+          console.log('📦 Using cached calendar data - no API call needed')
+          setLoading(false)
+          return
+        }
+        
+        // Only show loading on initial load or force refresh
+        if ((isInitial && isInitialLoadRef.current) || forceRefresh) {
           setLoading(true)
-          isInitialLoadRef.current = false
+          setCacheLoading(true)
+          if (isInitial) {
+            isInitialLoadRef.current = false
+          }
         }
         
         let startDate, endDate
         
         if (isInitial) {
-          // INITIAL LOAD: Fetch 3 months past + current + 3 months future (7 months) INSTANTLY
+          // INITIAL LOAD: Fetch 3 months past + current + 5 months future (9 months total)
           const today = new Date()
           const threeMonthsPast = subMonths(today, 3)
-          const threeMonthsFuture = addMonths(today, 3)
+          const fiveMonthsFuture = addMonths(today, 5)
           startDate = format(startOfMonth(threeMonthsPast), 'yyyy-MM-dd')
-          endDate = format(endOfMonth(threeMonthsFuture), 'yyyy-MM-dd')
-          console.log('🚀 INITIAL LOAD: Fetching 7 months instantly (3 past + current + 3 future)')
+          endDate = format(endOfMonth(fiveMonthsFuture), 'yyyy-MM-dd')
+          console.log('🚀 INITIAL LOAD: Fetching 9 months (3 past + current + 5 future)')
+          
+          // Mark all initial months as loaded
+          for (let i = -3; i <= 5; i++) {
+            const monthDate = addMonths(today, i)
+            const monthKey = format(monthDate, 'yyyy-MM')
+            loadedMonthsRef.current.add(monthKey)
+            prefetchedMonthsRef.current.add(monthKey)
+          }
         } else {
           // MONTH NAVIGATION: Only fetch current visible month + adjacent months
           const prevMonth = subMonths(activeStartDate, 1)
@@ -150,26 +272,33 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
         let response
         try {
           response = await getPhaseMap(startDate, endDate, forceRefresh)
+          
+          // Handle processing status - don't retry immediately, just show loading
+          if (response?.status === 'processing') {
+            console.log(`⏳ Phase map for ${format(activeStartDate, 'MMMM yyyy')} is being generated in background`)
+            if (!isInitial) {
+              setError('Predictions for this month are being generated. Please wait a moment and try again.')
+            }
+            // Don't process response - keep loading state
+            response = null
+          }
         } catch (err) {
           // Handle timeout gracefully - show message but don't break calendar
-          if (err.message?.includes('timeout') || err.message?.includes('Timeout')) {
-            console.warn(`⚠️ Timeout fetching month ${format(activeStartDate, 'MMMM yyyy')}:`, err.message)
-            // Only show error for non-initial loads (initial load should have longer timeout)
+          if (err.message?.includes('timeout') || err.message?.includes('Timeout') || err.message?.includes('processing')) {
+            console.warn(`⚠️ Timeout/processing for month ${format(activeStartDate, 'MMMM yyyy')}:`, err.message)
+            // Only show error for non-initial loads
             if (!isInitial) {
               setError('Predictions for this month are being generated. Please wait a moment and try again.')
             } else {
-              // For initial load, just log - don't show error (it's still loading)
               console.log('⏳ Initial load taking longer than expected, continuing...')
             }
-            // Don't return - continue to finally block to set loading to false
-            // But skip processing response
             response = null
           } else {
             throw err // Re-throw other errors
           }
         }
         
-        // Only process response if we have one (not timed out)
+        // Only process response if we have one (not timed out or processing)
         if (!response) {
           // For initial load timeout, keep loading state (will be set in finally)
           // For navigation timeout, clear loading
@@ -180,6 +309,16 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
         }
         
         if (response?.phase_map && Array.isArray(response.phase_map)) {
+          // Handle empty phase_map (blank calendar - all cycles reset)
+          if (response.phase_map.length === 0) {
+            console.log('📭 Empty phase_map received - showing blank calendar (all cycles reset)')
+            setPhaseMap({})
+            setPeriodLogs([])
+            // Update cache with empty data
+            updateCache({}, [])
+            return
+          }
+          
           const map = {}
           response.phase_map.forEach((item) => {
             if (item.date && item.phase) {
@@ -190,33 +329,49 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
               }
             }
           })
-          // Merge with existing map instead of replacing
-          setPhaseMap(prevMap => {
-            const merged = { ...prevMap, ...map }
-            console.log(`✅ Phase map updated: ${Object.keys(merged).length} total dates, ${Object.keys(map).length} new dates for ${format(activeStartDate, 'MMMM yyyy')}`)
-            // Log phase distribution for debugging
-            const phaseCounts = {}
-            Object.values(merged).forEach(item => {
-              const p = (typeof item === 'object' && item.phase) ? item.phase : 'Unknown'
-              phaseCounts[p] = (phaseCounts[p] || 0) + 1
+          
+          // If forceRefresh, replace instead of merge (for reset scenarios)
+          if (forceRefresh) {
+            setPhaseMap(map)
+            console.log(`✅ Phase map replaced: ${Object.keys(map).length} dates (force refresh)`)
+          } else {
+            // Merge with existing map instead of replacing
+            setPhaseMap(prevMap => {
+              const merged = { ...prevMap, ...map }
+              console.log(`✅ Phase map updated: ${Object.keys(merged).length} total dates, ${Object.keys(map).length} new dates for ${format(activeStartDate, 'MMMM yyyy')}`)
+              
+              // Log phase distribution for debugging
+              const phaseCounts = {}
+              Object.values(merged).forEach(item => {
+                const p = (typeof item === 'object' && item.phase) ? item.phase : 'Unknown'
+                phaseCounts[p] = (phaseCounts[p] || 0) + 1
+              })
+              console.log(`   Phase distribution:`, phaseCounts)
+              
+              // Verify phase data structure
+              const sampleDates = Object.keys(map).slice(0, 3)
+              sampleDates.forEach(dateStr => {
+                const data = map[dateStr]
+                console.log(`   Sample date ${dateStr}:`, data)
+              })
+              
+              return merged
             })
-            console.log(`   Phase distribution:`, phaseCounts)
-            
-            // Verify phase data structure
-            const sampleDates = Object.keys(map).slice(0, 3)
-            sampleDates.forEach(dateStr => {
-              const data = map[dateStr]
-              console.log(`   Sample date ${dateStr}:`, data)
-            })
-            
-            // Dispatch calendar update event for cycle history
-            window.dispatchEvent(new CustomEvent('calendarUpdated'))
-            
-            return merged
-          })
+          }
+          
+          // Dispatch calendar update event for cycle history
+          window.dispatchEvent(new CustomEvent('calendarUpdated'))
         } else {
+          // No phase map data - could be blank calendar (all cycles reset)
           console.warn('⚠️ No phase map data received from API')
           console.warn('Response:', response)
+          // If this is a force refresh (reset scenario), clear the calendar
+          if (forceRefresh) {
+            console.log('📭 Force refresh with no data - showing blank calendar')
+            setPhaseMap({})
+            setPeriodLogs([])
+            updateCache({}, [])
+          }
         }
       } catch (err) {
         console.error('Failed to fetch phase map:', err)
@@ -224,25 +379,74 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
         setError(err.message || 'Failed to load calendar predictions')
       } finally {
         setLoading(false)
+        setCacheLoading(false)
       }
     }
 
-    // Initial load: Fetch 7 months instantly
-    fetchPhaseMap(false, true)
+    // Only load if cache is empty or this is a forced refresh
+    if (shouldLoadCalendar()) {
+      console.log('🚀 Initial calendar load - fetching data')
+      fetchPhaseMap(false, true)
+    } else {
+      console.log('📦 Using cached calendar data - skipping initial load')
+      setLoading(false)
+    }
     
     // Listen for periodLogged event to force refresh
     const handlePeriodLogged = () => {
-      // Force refresh immediately - backend generates 7 months synchronously
-      // This ensures calendar shows accurate predictions right away
-      console.log('🔄 Period logged - refreshing 7 months with accurate calculations')
+      // Clear cache and force refresh immediately
+      console.log('🔄 Period logged - clearing cache and refreshing calendar')
+      clearCache()
       fetchPhaseMap(true, true) // Refresh 7 months with force recalculation
     }
+    
+    // Listen for reset all cycles event
+    const handleResetAllCycles = () => {
+      console.log('🔄 Reset all cycles - clearing cache and showing blank calendar')
+      clearCache()
+      // Clear phase map to show blank calendar
+      setPhaseMap({})
+      setPeriodLogs([])
+      setLoading(false)
+    }
+    
+    // Listen for reset last period event
+    const handleResetLastPeriod = async () => {
+      console.log('🔄 Reset last period - clearing cache and refreshing calendar')
+      clearCache()
+      
+      // Refresh period logs first
+      try {
+        const logs = await getPeriodLogs()
+        setPeriodLogs(logs || [])
+        console.log('✅ Refreshed period logs after reset')
+      } catch (err) {
+        console.error('Failed to refresh period logs after reset:', err)
+      }
+      
+      // Then refresh phase map with updated data
+      fetchPhaseMap(true, true) // Refresh with updated data
+    }
+    
+    // Listen for calendar refresh event (from refresh button)
+    const handleCalendarRefresh = () => {
+      console.log('🔄 Manual refresh - clearing cache and refreshing calendar')
+      clearCache()
+      fetchPhaseMap(true, true)
+    }
+    
     window.addEventListener('periodLogged', handlePeriodLogged)
+    window.addEventListener('resetAllCycles', handleResetAllCycles)
+    window.addEventListener('resetLastPeriod', handleResetLastPeriod)
+    window.addEventListener('calendarRefresh', handleCalendarRefresh)
     
     return () => {
       window.removeEventListener('periodLogged', handlePeriodLogged)
+      window.removeEventListener('resetAllCycles', handleResetAllCycles)
+      window.removeEventListener('resetLastPeriod', handleResetLastPeriod)
+      window.removeEventListener('calendarRefresh', handleCalendarRefresh)
     }
-  }, []) // Only run on mount - don't refetch on activeStartDate change
+  }, [shouldLoadCalendar, updateCache, clearCache, setCacheLoading]) // Depend on cache functions
   
   // Separate effect for month navigation - only fetch missing months
   useEffect(() => {
@@ -292,108 +496,136 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     fetchMissingMonth()
   }, [activeStartDate])
 
-  // Background prefetching: Load remaining months, cycle stats, and cycle history in PARALLEL
+  // Helper function to fetch a single month with caching
+  const fetchMonth = async (monthDate, monthKey) => {
+    // Skip if already loaded
+    if (loadedMonthsRef.current.has(monthKey)) {
+      console.log(`📦 Month ${monthKey} already loaded, skipping`)
+      return null
+    }
+
+    // Check if we already have data for this month in phaseMap
+    const monthKeyCheck = monthKey.substring(0, 7)
+    const hasData = Object.keys(phaseMap).some(d => {
+      try {
+        return d.startsWith(monthKeyCheck)
+      } catch {
+        return false
+      }
+    })
+    
+    if (hasData) {
+      loadedMonthsRef.current.add(monthKey)
+      prefetchedMonthsRef.current.add(monthKey)
+      return null
+    }
+
+    try {
+      const startDate = format(startOfMonth(monthDate), 'yyyy-MM-dd')
+      const endDate = format(endOfMonth(monthDate), 'yyyy-MM-dd')
+      
+      const response = await getPhaseMap(startDate, endDate)
+      
+      // Handle processing status
+      if (response?.status === 'processing') {
+        console.log(`⏳ Month ${monthKey} is being generated in background`)
+        return null
+      }
+      
+      if (response?.phase_map && Array.isArray(response.phase_map)) {
+        const map = {}
+        response.phase_map.forEach((item) => {
+          if (item.date && item.phase) {
+            map[item.date] = {
+              phase: item.phase,
+              phase_day_id: item.phase_day_id || null,
+              fertility_prob: item.fertility_prob || 0
+            }
+          }
+        })
+        
+        // Merge with existing map
+        setPhaseMap(prevMap => ({ ...prevMap, ...map }))
+        loadedMonthsRef.current.add(monthKey)
+        prefetchedMonthsRef.current.add(monthKey)
+        
+        console.log(`✅ Loaded month: ${monthKey} (${Object.keys(map).length} dates)`)
+        
+        // Dispatch calendar update event
+        window.dispatchEvent(new CustomEvent('calendarUpdated'))
+        
+        return map
+      }
+    } catch (err) {
+      console.error(`Failed to load month ${monthKey}:`, err)
+    }
+    
+    return null
+  }
+
+  // Lazy load months when user navigates
+  const lazyLoadMonths = useCallback(async (targetMonth) => {
+    if (isPrefetchingRef.current) return
+    isPrefetchingRef.current = true
+
+    try {
+      const monthsToLoad = []
+      const targetMonthKey = format(targetMonth, 'yyyy-MM')
+      
+      // Check if target month is already loaded
+      if (loadedMonthsRef.current.has(targetMonthKey)) {
+        isPrefetchingRef.current = false
+        return
+      }
+
+      // Load target month + adjacent months (previous and next)
+      for (let offset = -1; offset <= 1; offset++) {
+        const monthDate = addMonths(targetMonth, offset)
+        const monthKey = format(monthDate, 'yyyy-MM')
+        
+        // Skip if already loaded
+        if (loadedMonthsRef.current.has(monthKey)) continue
+        
+        monthsToLoad.push({
+          date: monthDate,
+          key: monthKey
+        })
+      }
+
+      if (monthsToLoad.length === 0) {
+        isPrefetchingRef.current = false
+        return
+      }
+
+      console.log(`🔄 Lazy loading ${monthsToLoad.length} month(s) for navigation:`, monthsToLoad.map(m => m.key))
+
+      // Fetch all months in parallel using Promise.all
+      await Promise.all(
+        monthsToLoad.map(({ date, key }) => fetchMonth(date, key))
+      )
+
+      console.log(`✅ Lazy loading complete for ${monthsToLoad.length} month(s)`)
+    } catch (err) {
+      console.error('Error in lazy loading:', err)
+    } finally {
+      isPrefetchingRef.current = false
+    }
+  }, [phaseMap])
+
+  // Background prefetching: Load cycle stats and cycle history (NO aggressive month prefetching)
   useEffect(() => {
     // Only start prefetching after initial load is complete
     if (isInitialLoadRef.current || loading) return
     
-    console.log('🔄 Starting PARALLEL background prefetch: months + cycle stats + cycle history...')
+    console.log('🔄 Starting background prefetch: cycle stats + cycle history (no aggressive month prefetch)')
 
-    const prefetchAllInParallel = async () => {
+    const prefetchStatsAndHistory = async () => {
       if (isPrefetchingRef.current) return
       isPrefetchingRef.current = true
 
       try {
-        // PARALLEL TASK 1: Prefetch remaining calendar months
-        const prefetchMonths = async () => {
-          try {
-            const today = new Date()
-            const monthsToPrefetch = []
-            
-            // Generate list of months to prefetch: 1 year past to 2 years future
-            // SKIP the 7 months already loaded (3 past + current + 3 future)
-            for (let i = -12; i <= 24; i++) {
-              const monthDate = addMonths(today, i)
-              const monthKey = format(monthDate, 'yyyy-MM')
-              
-              // Skip the 7 months already loaded in initial fetch (3 past + current + 3 future)
-              if (i >= -3 && i <= 3) continue
-              
-              // Skip if already prefetched or currently visible
-              if (prefetchedMonthsRef.current.has(monthKey)) continue
-              if (format(activeStartDate, 'yyyy-MM') === monthKey) continue
-              
-              monthsToPrefetch.push({
-                date: monthDate,
-                key: monthKey,
-                startDate: format(startOfMonth(monthDate), 'yyyy-MM-dd'),
-                endDate: format(endOfMonth(monthDate), 'yyyy-MM-dd')
-              })
-            }
 
-            // Prefetch months in batches
-            const batchSize = 5
-            for (let i = 0; i < monthsToPrefetch.length; i += batchSize) {
-              const batch = monthsToPrefetch.slice(i, i + batchSize)
-              
-              await Promise.all(
-                batch.map(async ({ date, key, startDate, endDate }) => {
-                  try {
-                    // Check again if we have data
-                    const monthKeyCheck = key.substring(0, 7)
-                    const hasData = Object.keys(phaseMap).some(d => {
-                      try {
-                        return d.startsWith(monthKeyCheck)
-                      } catch {
-                        return false
-                      }
-                    })
-                    if (hasData) {
-                      prefetchedMonthsRef.current.add(key)
-                      return
-                    }
-
-                    const response = await getPhaseMap(startDate, endDate)
-                    if (response?.phase_map && Array.isArray(response.phase_map)) {
-                      const map = {}
-                      response.phase_map.forEach((item) => {
-                        if (item.date && item.phase) {
-                          map[item.date] = {
-                            phase: item.phase,
-                            phase_day_id: item.phase_day_id || null,
-                            fertility_prob: item.fertility_prob || 0
-                          }
-                        }
-                      })
-                      
-                      // Merge with existing map
-                      setPhaseMap(prevMap => ({ ...prevMap, ...map }))
-                      prefetchedMonthsRef.current.add(key)
-                      
-                      console.log(`✅ Prefetched month: ${key} (${Object.keys(map).length} dates)`)
-                      
-                      // Dispatch calendar update event for cycle history
-                      window.dispatchEvent(new CustomEvent('calendarUpdated'))
-                    }
-                  } catch (err) {
-                    console.error(`Failed to prefetch month ${key}:`, err)
-                  }
-                })
-              )
-              
-              // Small delay between batches
-              if (i + batchSize < monthsToPrefetch.length) {
-                await new Promise(resolve => setTimeout(resolve, 200))
-              }
-            }
-            
-            console.log('✅ Background month prefetching complete')
-          } catch (err) {
-            console.error('Error in month prefetching:', err)
-          }
-        }
-
-        // PARALLEL TASK 2: Prefetch cycle stats
+        // PARALLEL TASK 1: Prefetch cycle stats
         const prefetchCycleStats = async () => {
           try {
             const { getCycleStats } = await import('../utils/api')
@@ -409,7 +641,7 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
           }
         }
 
-        // PARALLEL TASK 3: Prefetch cycle history
+        // PARALLEL TASK 2: Prefetch cycle history
         const prefetchCycleHistory = async () => {
           try {
             const { getCycleStats } = await import('../utils/api')
@@ -424,14 +656,13 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
           }
         }
 
-        // Run all three tasks in PARALLEL
+        // Run stats and history tasks in PARALLEL (no aggressive month prefetching)
         await Promise.all([
-          prefetchMonths(),
           prefetchCycleStats(),
           prefetchCycleHistory()
         ])
         
-        console.log('✅ All parallel background tasks complete (months + stats + history)')
+        console.log('✅ All parallel background tasks complete (stats + history)')
       } catch (err) {
         console.error('Error in parallel prefetching:', err)
       } finally {
@@ -441,7 +672,7 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
 
     // Start parallel prefetching after initial load completes
     const timeoutId = setTimeout(() => {
-      prefetchAllInParallel()
+      prefetchStatsAndHistory()
     }, 500) // Start quickly after initial load
 
     return () => clearTimeout(timeoutId)
@@ -449,6 +680,73 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
 
   // Note: Cycle history prefetching is now handled in the parallel prefetch effect above
   // This ensures it runs in parallel with month prefetching for better performance
+
+  // Preload wellness data (hormones, nutrition, exercise) when calendar loads
+  useEffect(() => {
+    const preloadWellnessData = async () => {
+      // Only preload if we have phaseMap data and today's phase_day_id
+      if (Object.keys(phaseMap).length === 0) return
+      
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const todayPhaseData = phaseMap[today]
+      
+      if (!todayPhaseData) return
+      
+      const todayPhaseDayId = typeof todayPhaseData === 'object' 
+        ? todayPhaseData.phase_day_id 
+        : null
+      
+      if (!todayPhaseDayId) return
+      
+      // Check if we already have cached wellness data for this phase_day_id
+      if (cachedWellnessData?.phaseDayId === todayPhaseDayId && 
+          cachedWellnessData?.hormones && 
+          cachedWellnessData?.nutrition && 
+          cachedWellnessData?.exercises) {
+        console.log('📦 Wellness data already cached for phase_day_id:', todayPhaseDayId)
+        return
+      }
+      
+      // Get user language for nutrition/exercise
+      const user = getUser()
+      const language = user?.language || 'en'
+      
+      console.log(`🚀 Preloading wellness data for phase_day_id: ${todayPhaseDayId} (language: ${language})`)
+      
+      // Fetch all wellness data in parallel (background, non-blocking)
+      Promise.all([
+        getHormonesData(todayPhaseDayId, 5).catch(err => {
+          console.warn('⚠️ Failed to preload hormones data:', err)
+          return null
+        }),
+        getNutritionData(todayPhaseDayId, language).catch(err => {
+          console.warn('⚠️ Failed to preload nutrition data:', err)
+          return null
+        }),
+        getExerciseData(todayPhaseDayId, language).catch(err => {
+          console.warn('⚠️ Failed to preload exercise data:', err)
+          return null
+        })
+      ]).then(([hormones, nutrition, exercises]) => {
+        if (hormones || nutrition || exercises) {
+          updateWellnessCache({
+            hormones,
+            nutrition,
+            exercises,
+            phaseDayId: todayPhaseDayId,
+            timestamp: new Date().toISOString()
+          })
+          console.log('✅ Wellness data preloaded and cached')
+        }
+      }).catch(err => {
+        console.error('❌ Error preloading wellness data:', err)
+      })
+    }
+    
+    // Preload after a short delay to not block calendar rendering
+    const timeoutId = setTimeout(preloadWellnessData, 500)
+    return () => clearTimeout(timeoutId)
+  }, [phaseMap, cachedWellnessData?.phaseDayId, updateWellnessCache])
 
   // Get today's phase from phaseMap (already loaded) - much faster than API call
   useEffect(() => {
@@ -507,18 +805,42 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     }
   }, [phaseMap, phaseInfoMap]) // Depend on phaseMap so it updates when calendar loads
 
-  // Fetch period logs
+  // Fetch period logs - only if not in cache
   useEffect(() => {
     const fetchLogs = async () => {
+      // Use cached logs if available and calendar was already loaded
+      if (cachedPeriodLogs.length > 0 && !shouldLoadCalendar()) {
+        console.log('📦 Using cached period logs')
+        setPeriodLogs(cachedPeriodLogs)
+        return
+      }
+      
       try {
         const logs = await getPeriodLogs()
-        setPeriodLogs(logs || [])
+        const logsArray = logs || []
+        setPeriodLogs(logsArray)
+        // Cache will be updated by useEffect watching periodLogs
       } catch (err) {
         console.error('Failed to fetch period logs:', err)
       }
     }
 
     fetchLogs()
+    
+    // Listen for calendar refresh event
+    const handleCalendarRefresh = async () => {
+      // Refresh logs when calendar is manually refreshed
+      try {
+        const logs = await getPeriodLogs()
+        const logsArray = logs || []
+        setPeriodLogs(logsArray)
+        // Cache will be updated by useEffect watching periodLogs
+      } catch (err) {
+        console.error('Failed to refresh period logs:', err)
+      }
+    }
+    
+    window.addEventListener('calendarRefresh', handleCalendarRefresh)
     
     // Refresh logs and phase map when period is logged (listen for custom event)
     const handlePeriodLogged = async () => {
@@ -552,8 +874,9 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     
     return () => {
       window.removeEventListener('periodLogged', handlePeriodLogged)
+      window.removeEventListener('calendarRefresh', handleCalendarRefresh)
     }
-  }, [activeStartDate])
+  }, [activeStartDate, phaseMap, updateCache, shouldLoadCalendar, cachedPeriodLogs])
 
   const handleDateClick = (date) => {
     // Prevent triggering activeStartDate change when just selecting a date
@@ -672,6 +995,201 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
       }
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Failed to log period')
+    } finally {
+      setLogging(false)
+    }
+  }
+
+  const handleLogPeriodStart = async () => {
+    if (!selectedDate) return
+
+    // CRITICAL: Prevent logging periods in future dates
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const selectedDateOnly = new Date(selectedDate)
+    selectedDateOnly.setHours(0, 0, 0, 0)
+    
+    if (selectedDateOnly > today) {
+      setError('Cannot log period for future dates. Please log periods that have already occurred.')
+      return
+    }
+
+    const selectedDateStr = format(selectedDate, 'yyyy-MM-dd')
+    
+    setLogging(true)
+    setError(null)
+
+    try {
+      await logPeriod({ date: selectedDateStr })
+      
+      // Refresh logs immediately
+      const logs = await getPeriodLogs()
+      setPeriodLogs(logs || [])
+      
+      // Dispatch event to notify other components
+      window.dispatchEvent(new CustomEvent('periodLogged'))
+      window.dispatchEvent(new CustomEvent('calendarUpdated'))
+      
+      // Clear selection
+      setSelectedDate(null)
+      setShowLogButton(false)
+      
+      // Clear phase map cache to force refresh
+      setPhaseMap({})
+      prefetchedMonthsRef.current.clear()
+      
+      // Refresh IMMEDIATELY - backend generates predictions synchronously now
+      const refreshPhaseMap = async () => {
+        const startDate = format(startOfMonth(activeStartDate), 'yyyy-MM-dd')
+        const endDate = format(endOfMonth(addMonths(activeStartDate, 1)), 'yyyy-MM-dd')
+        try {
+          // Force recalculation to get fresh predictions
+          const response = await getPhaseMap(startDate, endDate, true)
+          if (response?.phase_map && Array.isArray(response.phase_map)) {
+            const map = {}
+            response.phase_map.forEach((item) => {
+              if (item.date && item.phase) {
+                map[item.date] = {
+                  phase: item.phase,
+                  phase_day_id: item.phase_day_id || null,
+                  fertility_prob: item.fertility_prob || 0
+                }
+              }
+            })
+            // Merge with existing map
+            setPhaseMap(prevMap => {
+              const merged = { ...prevMap, ...map }
+              console.log(`✅ Calendar refreshed: ${Object.keys(map).length} new dates, ${Object.keys(merged).length} total`)
+              
+              // Dispatch calendar update event for cycle history
+              window.dispatchEvent(new CustomEvent('calendarUpdated'))
+              
+              return merged
+            })
+          } else {
+            console.warn('⚠️ No phase map data in response:', response)
+          }
+        } catch (err) {
+          console.error('Failed to refresh phase map:', err)
+        }
+      }
+      
+      // Refresh immediately (backend generates predictions synchronously)
+      refreshPhaseMap()
+      
+      if (onPeriodLogged) {
+        onPeriodLogged()
+      }
+    } catch (err) {
+      console.error('Failed to log period start:', err)
+      setError(err.response?.data?.detail || err.message || 'Failed to log period start')
+    } finally {
+      setLogging(false)
+    }
+  }
+
+  const handleLogPeriodEnd = async () => {
+    if (!selectedDate || !getActivePeriod) return
+
+    // CRITICAL: Prevent logging period end for future dates
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const selectedDateOnly = new Date(selectedDate)
+    selectedDateOnly.setHours(0, 0, 0, 0)
+    
+    if (selectedDateOnly > today) {
+      setError('Cannot log period end for future dates.')
+      return
+    }
+
+    // CRITICAL: Validate selected date is >= active period start date
+    const activeStartDate = new Date(getActivePeriod.startDate)
+    activeStartDate.setHours(0, 0, 0, 0)
+    
+    if (selectedDateOnly < activeStartDate) {
+      setError(`Period end date cannot be before period start date (${getActivePeriod.startDate}).`)
+      return
+    }
+
+    // Validate period duration (3-15 days)
+    const duration = Math.floor((selectedDateOnly - activeStartDate) / (1000 * 60 * 60 * 24)) + 1
+    if (duration < 3) {
+      setError('Period duration must be at least 3 days.')
+      return
+    }
+    if (duration > 15) {
+      setError('Period duration cannot exceed 15 days.')
+      return
+    }
+
+    const selectedDateStr = format(selectedDate, 'yyyy-MM-dd')
+    
+    setLogging(true)
+    setError(null)
+
+    try {
+      await logPeriodEnd({ date: selectedDateStr })
+      
+      // Refresh logs immediately
+      const logs = await getPeriodLogs()
+      setPeriodLogs(logs || [])
+      
+      // Dispatch event to notify other components
+      window.dispatchEvent(new CustomEvent('periodLogged'))
+      window.dispatchEvent(new CustomEvent('calendarUpdated'))
+      
+      // Clear selection
+      setSelectedDate(null)
+      setShowLogButton(false)
+      
+      // Clear phase map cache to force refresh
+      setPhaseMap({})
+      prefetchedMonthsRef.current.clear()
+      
+      // Refresh phase map
+      const refreshPhaseMap = async () => {
+        const startDate = format(startOfMonth(activeStartDate), 'yyyy-MM-dd')
+        const endDate = format(endOfMonth(addMonths(activeStartDate, 1)), 'yyyy-MM-dd')
+        try {
+          // Force recalculation to get fresh predictions
+          const response = await getPhaseMap(startDate, endDate, true)
+          if (response?.phase_map && Array.isArray(response.phase_map)) {
+            const map = {}
+            response.phase_map.forEach((item) => {
+              if (item.date && item.phase) {
+                map[item.date] = {
+                  phase: item.phase,
+                  phase_day_id: item.phase_day_id || null,
+                  fertility_prob: item.fertility_prob || 0
+                }
+              }
+            })
+            // Merge with existing map
+            setPhaseMap(prevMap => {
+              const merged = { ...prevMap, ...map }
+              console.log(`✅ Calendar refreshed: ${Object.keys(map).length} new dates, ${Object.keys(merged).length} total`)
+              
+              // Dispatch calendar update event for cycle history
+              window.dispatchEvent(new CustomEvent('calendarUpdated'))
+              
+              return merged
+            })
+          } else {
+            console.warn('⚠️ No phase map data in response:', response)
+          }
+        } catch (err) {
+          console.error('Failed to refresh phase map:', err)
+        }
+      }
+      
+      refreshPhaseMap()
+      
+      if (onPeriodLogged) {
+        onPeriodLogged()
+      }
+    } catch (err) {
+      console.error('Failed to log period end:', err)
+      setError(err.response?.data?.detail || err.message || 'Failed to log period end')
     } finally {
       setLogging(false)
     }
@@ -926,42 +1444,9 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     if (currentMonth !== newMonth || currentYear !== newYear) {
       setActiveStartDate(newActiveStartDate)
       
-      // Proactively prefetch adjacent months when user navigates
-      const prefetchAdjacentMonths = async () => {
-        const monthsToPrefetch = [
-          subMonths(newActiveStartDate, 1), // Previous month
-          addMonths(newActiveStartDate, 2), // Next month (current + 1 is already visible)
-        ]
-        
-        monthsToPrefetch.forEach(async (monthDate) => {
-          const monthKey = format(monthDate, 'yyyy-MM')
-          
-          // Skip if already prefetched
-          if (prefetchedMonthsRef.current.has(monthKey)) return
-          
-          try {
-            const startDate = format(startOfMonth(monthDate), 'yyyy-MM-dd')
-            const endDate = format(endOfMonth(monthDate), 'yyyy-MM-dd')
-            
-            const response = await getPhaseMap(startDate, endDate)
-            if (response?.phase_map) {
-              const map = {}
-              response.phase_map.forEach((item) => {
-                map[item.date] = item
-              })
-              
-              setPhaseMap(prevMap => ({ ...prevMap, ...map }))
-              prefetchedMonthsRef.current.add(monthKey)
-              console.log(`✅ Proactively prefetched adjacent month: ${monthKey}`)
-            }
-          } catch (err) {
-            console.error(`Failed to prefetch adjacent month ${monthKey}:`, err)
-          }
-        })
-      }
-      
-      // Prefetch adjacent months after a short delay
-      setTimeout(prefetchAdjacentMonths, 300)
+      // Lazy load months when user navigates (target month + adjacent months)
+      // This ensures smooth navigation without aggressive prefetching
+      lazyLoadMonths(newActiveStartDate)
     }
   }
 
@@ -975,10 +1460,27 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     return `${phaseName}${phaseDayId ? ` (${phaseDayId})` : ''}`
   }
 
+  // Handle refresh button click
+  const handleRefresh = () => {
+    console.log('🔄 Manual calendar refresh triggered')
+    window.dispatchEvent(new CustomEvent('calendarRefresh'))
+  }
+
   return (
     <div className="period-calendar-container">
       <div className="mb-6">
-        <h3 className="text-2xl font-bold text-gray-800 mb-2">Cycle Calendar</h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-2xl font-bold text-gray-800">Cycle Calendar</h3>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Refresh calendar data"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
         <div className="flex items-center gap-3">
           <p className="text-sm text-gray-600">
             Today's Phase:
@@ -1035,22 +1537,53 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
                 </div>
               )}
 
-              <button
-                onClick={handleLogPeriod}
-                disabled={logging || isDateLogged(format(selectedDate, 'yyyy-MM-dd'))}
-                className="w-full bg-gradient-to-r from-period-pink to-period-purple text-white px-4 py-3 rounded-lg font-semibold hover:opacity-90 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {logging ? (
-                  <>
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                    <span>Logging...</span>
-                  </>
-                ) : isDateLogged(format(selectedDate, 'yyyy-MM-dd')) ? (
-                  'Already Logged'
-                ) : (
-                  'Log Period Start'
-                )}
-              </button>
+              {/* Two Separate Buttons: Log Period Start and Log Period End */}
+              <div className="space-y-3">
+                {/* Log Period Start Button */}
+                <button
+                  onClick={handleLogPeriodStart}
+                  disabled={logging || isDateLogged(format(selectedDate, 'yyyy-MM-dd'))}
+                  className="w-full bg-gradient-to-r from-period-pink to-period-purple text-white px-4 py-3 rounded-lg font-semibold hover:opacity-90 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {logging ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                      <span>Logging...</span>
+                    </>
+                  ) : isDateLogged(format(selectedDate, 'yyyy-MM-dd')) ? (
+                    'Period Already Logged'
+                  ) : (
+                    'Log Period Start'
+                  )}
+                </button>
+
+                {/* Log Period End Button - Only show if there's an active period */}
+                {getActivePeriod && (() => {
+                  const selectedDateOnly = selectedDate ? new Date(selectedDate) : null
+                  if (selectedDateOnly) selectedDateOnly.setHours(0, 0, 0, 0)
+                  const activeStartDateOnly = new Date(getActivePeriod.startDate)
+                  activeStartDateOnly.setHours(0, 0, 0, 0)
+                  const isBeforeStart = selectedDateOnly && selectedDateOnly < activeStartDateOnly
+                  
+                  return (
+                    <button
+                      onClick={handleLogPeriodEnd}
+                      disabled={logging || isBeforeStart}
+                      className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white px-4 py-3 rounded-lg font-semibold hover:opacity-90 transition-all shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                      title={isBeforeStart ? 'End date must be after start date' : `Log end date for period that started ${getActivePeriod.daysSinceStart} day${getActivePeriod.daysSinceStart !== 1 ? 's' : ''} ago`}
+                    >
+                      {logging ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                          <span>Logging...</span>
+                        </>
+                      ) : (
+                        `Log Period End (Started ${getActivePeriod.daysSinceStart} day${getActivePeriod.daysSinceStart !== 1 ? 's' : ''} ago)`
+                      )}
+                    </button>
+                  )
+                })()}
+              </div>
             </div>
           )}
 

@@ -1057,7 +1057,7 @@ def generate_cycle_phase_map(
                         "luteal_estimate": round(luteal_mean, 2),  # CALCULATED: Our adaptive estimate
                         "luteal_sd": round(luteal_sd, 2),  # CALCULATED: Our adaptive estimate
                         "ovulation_sd": round(ovulation_sd, 2),  # CALCULATED: Our adaptive estimate
-                        "is_predicted": True,  # This is a prediction, not logged data
+                        # Note: is_predicted column doesn't exist in database, removed to avoid errors
                         "rapidapi_request_id": request_id  # Cache request_id for future use
                     })
                 
@@ -1225,7 +1225,7 @@ def generate_cycle_phase_map(
                     "luteal_estimate": round(luteal_mean, 2),
                     "luteal_sd": round(luteal_sd, 2),
                     "ovulation_sd": round(ovulation_sd, 2),
-                    "is_predicted": True,
+                    # Note: is_predicted column doesn't exist in database, removed to avoid errors
                     "rapidapi_request_id": fallback_request_id
                 }
                 
@@ -1297,11 +1297,7 @@ def store_cycle_phase_map(
             # Note: If columns don't exist in DB, Supabase will ignore them or we'll catch the error
             if "source" in mapping and mapping["source"]:
                 entry["source"] = mapping["source"]
-            # Renamed: confidence → prediction_confidence
-            if "prediction_confidence" in mapping and mapping["prediction_confidence"] is not None:
-                entry["prediction_confidence"] = float(mapping["prediction_confidence"])
-            elif "confidence" in mapping and mapping["confidence"] is not None:  # Backward compatibility
-                entry["prediction_confidence"] = float(mapping["confidence"])
+            # prediction_confidence intentionally not persisted
             # Optional fertility fields (stored if columns exist)
             if "fertility_prob" in mapping and mapping["fertility_prob"] is not None:
                 entry["fertility_prob"] = float(mapping["fertility_prob"])
@@ -1311,8 +1307,9 @@ def store_cycle_phase_map(
                 entry["ovulation_offset"] = int(mapping["ovulation_offset"])
             if "luteal_estimate" in mapping and mapping["luteal_estimate"] is not None:
                 entry["luteal_estimate"] = float(mapping["luteal_estimate"])
-            if "luteal_sd" in mapping and mapping["luteal_sd"] is not None:
-                entry["luteal_sd"] = float(mapping["luteal_sd"])
+            # DB compatibility: some deployments do NOT have a `luteal_sd` column on `user_cycle_days`.
+            # Including it will hard-fail inserts/updates (e.g., "column luteal_sd does not exist").
+            # Keep API contracts unchanged by still computing it in memory, but do NOT persist it here.
             if "ovulation_sd" in mapping and mapping["ovulation_sd"] is not None:
                 entry["ovulation_sd"] = float(mapping["ovulation_sd"])
             if "is_predicted" in mapping and mapping["is_predicted"] is not None:
@@ -1370,7 +1367,6 @@ def store_cycle_phase_map(
                         # Different error - re-raise
                         raise
             
-            response = {"data": upsert_data}  # Mock response for compatibility
             print(f"✅ Upserted {upserted_count}/{len(upsert_data)} phase mappings for user {user_id} (partial update, race-safe)")
         else:
             # Full update: Delete all existing first, then upsert new ones
@@ -1405,18 +1401,148 @@ def store_cycle_phase_map(
                         # Different error - re-raise
                         raise
             
-            response = {"data": upsert_data}  # Mock response for compatibility
             print(f"✅ Upserted {upserted_count}/{len(upsert_data)} phase mappings for user {user_id} (full update, race-safe)")
         
-        if not response.data:
-            raise Exception("Failed to upsert phase mappings - no data returned")
+        # Verify upsert succeeded (we already check upsert_data is not empty earlier)
+        if upserted_count == 0 and len(upsert_data) > 0:
+            raise Exception("Failed to upsert phase mappings - no entries were successfully upserted")
     
     except Exception as e:
         raise Exception(f"Failed to store cycle phase map: {str(e)}")
 
-def get_user_phase_day(user_id: str, date: Optional[str] = None) -> Optional[Dict]:
+def get_effective_period_end(user_id: str, start_date: str):
+    """
+    Get effective period end date for a cycle start date.
+    
+    This is the core logic that determines the boundary of the "Period" phase.
+    Prioritizes manual end date if user clicked "Period Ended".
+    Otherwise uses rolling period average (AI estimate).
+    
+    Args:
+        user_id: User ID
+        start_date: Period start date (YYYY-MM-DD)
+    
+    Returns:
+        Effective end date as date object
+    """
+    try:
+        from datetime import timedelta
+        from period_service import calculate_rolling_period_length
+        
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        
+        # Get period log for this start date
+        log_response = supabase.table("period_logs").select("*").eq("user_id", user_id).eq("date", start_date).limit(1).execute()
+        
+        if log_response.data and log_response.data[0].get("end_date"):
+            # User manually told us when it ended (is_manual_end = True)
+            end_date_str = log_response.data[0]["end_date"]
+            end_date_obj = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            print(f"✅ Using manual end date for {start_date}: {end_date_str}")
+            return end_date_obj
+        else:
+            # User hasn't logged end yet, or it was auto-closed
+            # Use rolling period average (AI estimate)
+            rolling_period_avg = calculate_rolling_period_length(user_id)
+            estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
+            end_date_obj = start_date_obj + timedelta(days=estimated_days - 1)
+            print(f"📊 Using rolling period average ({estimated_days} days) for {start_date}")
+            return end_date_obj
+    
+    except Exception as e:
+        print(f"Error getting effective period end: {str(e)}")
+        # Fallback to estimate
+        from datetime import timedelta
+        from period_service import calculate_rolling_period_length
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        rolling_period_avg = calculate_rolling_period_length(user_id)
+        estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
+        return start_date_obj + timedelta(days=estimated_days - 1)
+
+
+def get_period_range(user_id: str, cycle_start: str) -> tuple:
+    """
+    Get period range (start and end dates) for a cycle start date.
+    
+    Uses get_effective_period_end() internally.
+    
+    Args:
+        user_id: User ID
+        cycle_start: Cycle start date (YYYY-MM-DD)
+    
+    Returns:
+        Tuple of (start_date, end_date) as date objects
+    """
+    try:
+        cycle_start_obj = datetime.strptime(cycle_start, "%Y-%m-%d").date()
+        end_date_obj = get_effective_period_end(user_id, cycle_start)
+        return cycle_start_obj, end_date_obj
+    
+    except Exception as e:
+        print(f"Error getting period range: {str(e)}")
+        # Fallback
+        from datetime import timedelta
+        from period_service import calculate_rolling_period_length
+        cycle_start_obj = datetime.strptime(cycle_start, "%Y-%m-%d").date()
+        rolling_period_avg = calculate_rolling_period_length(user_id)
+        estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
+        return cycle_start_obj, cycle_start_obj + timedelta(days=estimated_days - 1)
+
+
+def is_date_in_logged_period(user_id: str, date: str) -> bool:
+    """
+    Check if a date falls within any logged period range.
+    
+    Uses actual end dates if available, otherwise uses estimated period length.
+    
+    Args:
+        user_id: User ID
+        date: Date to check (YYYY-MM-DD)
+    
+    Returns:
+        True if date is within a logged period, False otherwise
+    """
+    try:
+        from datetime import timedelta
+        
+        check_date = datetime.strptime(date, "%Y-%m-%d").date()
+        
+        # Get all period logs with their end dates
+        period_logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date", desc=True).execute()
+        
+        if not period_logs_response.data:
+            return False
+        
+        # Check if date falls within any logged period range
+        for period_log in period_logs_response.data:
+            period_start = datetime.strptime(period_log["date"], "%Y-%m-%d").date()
+            
+            if period_log.get("end_date"):
+                # Use actual end date
+                period_end = datetime.strptime(period_log["end_date"], "%Y-%m-%d").date()
+            else:
+                # Use estimated period length
+                period_length = estimate_period_length(user_id, normalized=True)
+                period_length_days = int(round(max(3.0, min(8.0, period_length))))
+                period_end = period_start + timedelta(days=period_length_days - 1)
+            
+            if period_start <= check_date <= period_end:
+                return True
+        
+        return False
+    
+    except Exception as e:
+        print(f"Error checking if date is in logged period: {str(e)}")
+        return False
+
+def get_user_phase_day(user_id: str, date: Optional[str] = None, prefer_actual: bool = True) -> Optional[Dict]:
     """
     Get phase-day information for a specific date (defaults to today).
+    
+    Args:
+        user_id: User ID
+        date: Date to check (YYYY-MM-DD), defaults to today
+        prefer_actual: If True, prefer actual logged data over predicted. If False, return any available data.
     
     Returns:
         Dict with phase, phase_day_id, or None if not found
@@ -1425,10 +1551,28 @@ def get_user_phase_day(user_id: str, date: Optional[str] = None) -> Optional[Dic
         date = datetime.now().strftime("%Y-%m-%d")
     
     try:
+        # First, check if date is within a logged period (actual data)
+        is_actual = is_date_in_logged_period(user_id, date)
+        
+        # Get data from database
         response = supabase.table("user_cycle_days").select("*").eq("user_id", user_id).eq("date", date).execute()
         
         if response.data:
-            return response.data[0]
+            phase_data = response.data[0]
+            
+            # If prefer_actual is True and date is not in logged period, 
+            # still return the data (it's predicted, but we'll use it as fallback)
+            # The key is: if date IS in logged period, we know it's actual
+            # If date is NOT in logged period, it's predicted, but we still return it if prefer_actual=False
+            # or if no actual data exists
+            if prefer_actual and not is_actual:
+                # Date is not in logged period, but we have predicted data
+                # Return it anyway (this is the fallback behavior)
+                return phase_data
+            else:
+                # Either actual data or we don't care about actual vs predicted
+                return phase_data
+        
         return None
     
     except Exception as e:
@@ -1565,28 +1709,132 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
         if len(dates) < 1:
             return []
         
-        # Find period starts (first day of each period = dates with gap > 1 day from previous)
+        # MEDICAL FIX: Find period starts with proper validation
+        # A new period start must be at least MIN_CYCLE_DAYS (21 days) from the previous period start
+        # This prevents multiple periods in one cycle (medically impossible)
+        MIN_CYCLE_DAYS = 21  # Minimum cycle length (medically accurate)
+        MAX_CYCLE_DAYS = 45  # Maximum cycle length (medically accurate)
+        
         period_starts = [dates[0]]  # First date is always a period start
+        
+        # Get estimated period length to check if dates are within the same period
+        period_length = estimate_period_length(user_id)
+        period_length_days = int(round(max(3.0, min(8.0, period_length))))
+        
         for i in range(1, len(dates)):
-            gap = (dates[i] - dates[i-1]).days
-            if gap > 1:  # Gap > 1 day indicates new period start
-                period_starts.append(dates[i])
+            current_date = dates[i]
+            last_period_start = period_starts[-1]
+            
+            # Calculate gap from last period start
+            gap_from_last_period = (current_date - last_period_start).days
+            
+            # Check if this date is within the previous period range (same period)
+            period_end = last_period_start + timedelta(days=period_length_days - 1)
+            is_within_previous_period = last_period_start <= current_date <= period_end
+            
+            if is_within_previous_period:
+                # This date is within the previous period - skip it (not a new period start)
+                # User might have logged multiple days of the same period
+                print(f"⚠️ Date {current_date.strftime('%Y-%m-%d')} is within previous period ({last_period_start.strftime('%Y-%m-%d')} to {period_end.strftime('%Y-%m-%d')}), skipping as duplicate")
+                continue
+            
+            # Check if gap is at least minimum cycle length (new period start)
+            if gap_from_last_period >= MIN_CYCLE_DAYS:
+                # Valid new period start (at least 21 days from previous)
+                period_starts.append(current_date)
+                print(f"✅ New period start: {current_date.strftime('%Y-%m-%d')} (gap: {gap_from_last_period} days from {last_period_start.strftime('%Y-%m-%d')})")
+            elif gap_from_last_period < MIN_CYCLE_DAYS:
+                # Gap is too short - this might be:
+                # 1. A duplicate log (same period, different day)
+                # 2. An error in logging
+                # Skip it to prevent multiple periods in one cycle
+                print(f"⚠️ Date {current_date.strftime('%Y-%m-%d')} is only {gap_from_last_period} days from last period start {last_period_start.strftime('%Y-%m-%d')} (minimum {MIN_CYCLE_DAYS} days required). Skipping to prevent duplicate periods.")
+                continue
         
         if len(period_starts) < 1:
             return []
         
         # Calculate cycle lengths (gaps between period starts)
+        # MEDICAL FIX: Validate all cycle lengths are in valid range (21-45 days)
         cycle_lengths = []
+        validated_period_starts = [period_starts[0]]  # First period is always valid
+        
         for i in range(1, len(period_starts)):
             cycle_length = (period_starts[i] - period_starts[i-1]).days
-            if 21 <= cycle_length <= 45:  # Valid cycle length range
+            
+            if MIN_CYCLE_DAYS <= cycle_length <= MAX_CYCLE_DAYS:
+                # Valid cycle length
                 cycle_lengths.append(float(cycle_length))
+                validated_period_starts.append(period_starts[i])
+                print(f"✅ Valid cycle: {cycle_length} days from {period_starts[i-1].strftime('%Y-%m-%d')} to {period_starts[i].strftime('%Y-%m-%d')}")
+            elif cycle_length < MIN_CYCLE_DAYS:
+                # Too short - likely duplicate or error, skip this period start
+                print(f"⚠️ Invalid cycle length: {cycle_length} days (minimum {MIN_CYCLE_DAYS} days). Skipping period start {period_starts[i].strftime('%Y-%m-%d')}")
+                continue
+            elif cycle_length > MAX_CYCLE_DAYS:
+                # Too long - likely missed period(s)
+                # Mark as missed period but still use it for calculations
+                missed_periods = int((cycle_length - MAX_CYCLE_DAYS) / MAX_CYCLE_DAYS) + 1
+                print(f"⚠️ Long cycle: {cycle_length} days (likely {missed_periods} missed period(s)). Including but marking for review.")
+                cycle_lengths.append(float(cycle_length))
+                validated_period_starts.append(period_starts[i])
+        
+        # Use validated period starts (removed duplicates/invalid cycles)
+        period_starts = validated_period_starts
         
         # Get user's current cycle_length estimate
         user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
         current_cycle_length = float(user_response.data[0].get("cycle_length", 28)) if user_response.data else 28.0
         
-        # Bayesian smoothing for cycle length estimate
+        # OUTLIER DETECTION: Standard Deviation Filter
+        # If a cycle length is outside (Mean ± 2×SD), mark it as is_outlier
+        # This prevents one weird month (flu, stress) from ruining predictions
+        non_outlier_cycles = []
+        if len(cycle_lengths) > 0:
+            # Calculate statistics
+            cycle_mean = sum(cycle_lengths) / len(cycle_lengths)
+            if len(cycle_lengths) > 1:
+                variance = sum((x - cycle_mean) ** 2 for x in cycle_lengths) / (len(cycle_lengths) - 1)
+                cycle_sd = math.sqrt(variance)
+            else:
+                cycle_sd = 2.0  # Default SD if only one cycle
+            
+            # Outlier threshold: Mean ± 2×SD
+            outlier_threshold_low = cycle_mean - (2 * cycle_sd)
+            outlier_threshold_high = cycle_mean + (2 * cycle_sd)
+            
+            print(f"📊 Cycle statistics: mean={cycle_mean:.1f}, sd={cycle_sd:.1f}, outlier_range=[{outlier_threshold_low:.1f}, {outlier_threshold_high:.1f}]")
+            
+            # Filter out outliers
+            for i in range(1, len(period_starts)):
+                cycle_length = (period_starts[i] - period_starts[i-1]).days
+                is_outlier = cycle_length < outlier_threshold_low or cycle_length > outlier_threshold_high
+                
+                if is_outlier:
+                    print(f"⚠️ Cycle {period_starts[i-1].strftime('%Y-%m-%d')} to {period_starts[i].strftime('%Y-%m-%d')} ({cycle_length} days) is OUTLIER (outside Mean ± 2×SD)")
+                    # Mark as outlier in period_start_logs
+                    try:
+                        start_date_str = period_starts[i].strftime("%Y-%m-%d")
+                        supabase.table("period_start_logs").update({"is_outlier": True}).eq("user_id", user_id).eq("start_date", start_date_str).execute()
+                    except Exception as e:
+                        print(f"⚠️ Could not mark cycle as outlier: {str(e)}")
+                else:
+                    # Not an outlier - include in calculations
+                    if cycle_length in cycle_lengths:
+                        non_outlier_cycles.append(cycle_length)
+                    # Ensure not marked as outlier
+                    try:
+                        start_date_str = period_starts[i].strftime("%Y-%m-%d")
+                        supabase.table("period_start_logs").update({"is_outlier": False}).eq("user_id", user_id).eq("start_date", start_date_str).execute()
+                    except Exception as e:
+                        pass  # Non-critical
+            
+            # Use only non-outlier cycles for Bayesian smoothing
+            if len(non_outlier_cycles) > 0:
+                cycle_lengths = non_outlier_cycles
+                print(f"✅ Using {len(cycle_lengths)} non-outlier cycles for estimation (excluded outliers)")
+        
+        # Bayesian smoothing for cycle length estimate (using only non-outlier cycles)
         if len(cycle_lengths) > 0:
             # Use recent cycle lengths (last 12) for better accuracy
             recent_cycles = cycle_lengths[-12:]
@@ -1606,10 +1854,6 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
         # Most recent period start
         most_recent_period = period_starts[-1]
         
-        # Generate future cycle starts
-        predicted_starts = []
-        current_start = most_recent_period
-        
         # Determine date range
         today = datetime.now()
         if not start_date:
@@ -1621,17 +1865,62 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
         else:
             end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
         
-        # Predict forward from most recent period
+        # Start with ALL actual logged period starts (regardless of date range)
+        # This ensures past logged periods are always included for accurate calculations
+        predicted_starts = list(period_starts)  # Copy all logged period starts
+        
+        # Predict BACKWARD from earliest logged period (if start_date is before it)
+        earliest_logged = period_starts[0]
+        if start_date_obj < earliest_logged:
+            current_start = earliest_logged
+            cycles_predicted = 0
+            # Predict backward
+            while current_start >= start_date_obj and cycles_predicted < max_cycles:
+                if current_start not in predicted_starts:
+                    predicted_starts.append(current_start)
+                    cycles_predicted += 1
+                # Subtract estimated cycle length to go backward
+                current_start -= timedelta(days=int(round(estimated_cycle_length)))
+        
+        # Predict FORWARD from most recent period
+        # MEDICAL FIX: Ensure predicted cycles maintain minimum 21-day spacing
+        current_start = most_recent_period
         cycles_predicted = 0
         while current_start <= end_date_obj and cycles_predicted < max_cycles:
-            if current_start >= start_date_obj:
+            # Validate this predicted start is at least MIN_CYCLE_DAYS from previous
+            if predicted_starts:
+                last_start = predicted_starts[-1]
+                gap = (current_start - last_start).days
+                if gap < MIN_CYCLE_DAYS:
+                    # Adjust to maintain minimum cycle length
+                    current_start = last_start + timedelta(days=MIN_CYCLE_DAYS)
+                    print(f"⚠️ Adjusted predicted cycle start to maintain minimum {MIN_CYCLE_DAYS}-day cycle: {current_start.strftime('%Y-%m-%d')}")
+            
+            if current_start not in predicted_starts:
                 predicted_starts.append(current_start)
                 cycles_predicted += 1
             
-            # Add estimated cycle length (use integer days)
-            current_start += timedelta(days=int(round(estimated_cycle_length)))
+            # Add estimated cycle length (use integer days, but ensure minimum)
+            next_start = current_start + timedelta(days=int(round(estimated_cycle_length)))
+            # Ensure next cycle is at least MIN_CYCLE_DAYS away
+            if (next_start - current_start).days < MIN_CYCLE_DAYS:
+                next_start = current_start + timedelta(days=MIN_CYCLE_DAYS)
+            current_start = next_start
         
-        return sorted(predicted_starts)
+        # Filter to only include cycle starts within the date range
+        # BUT: Keep all logged periods even if outside range (they're needed for calculations)
+        filtered_starts = []
+        for s in predicted_starts:
+            if s in period_starts:
+                # Always include logged periods (even if outside range) - needed for accurate calculations
+                filtered_starts.append(s)
+            elif start_date_obj <= s <= end_date_obj:
+                # Include predicted periods only if in range
+                filtered_starts.append(s)
+        
+        print(f"📊 Cycle starts: {len(period_starts)} logged, {len(predicted_starts)} total (including predictions), {len(filtered_starts)} returned (all logged + predictions in range)")
+        
+        return sorted(filtered_starts)
     
     except Exception as e:
         print(f"Error predicting cycle starts from period logs: {str(e)}")
@@ -1702,124 +1991,280 @@ def calculate_phase_for_date_range(
         # CRITICAL: Use actual period logs for ACCURATE cycle start prediction
         # This ensures phases are calculated correctly based on real data
         last_confirmed = get_last_confirmed_period_start(user_id)
-        
-        # Always use period log prediction for accuracy (most reliable method)
-        # This uses actual logged periods, not just averages
-        predicted_cycle_starts = predict_cycle_starts_from_period_logs(user_id, start_date, end_date)
-        
-        # If period log prediction fails, fallback to PeriodStartLogs
-        if not predicted_cycle_starts and last_confirmed:
-            print("⚠️ Period log prediction returned no results, using PeriodStartLogs fallback")
-            cycles = get_cycles_from_period_starts(user_id)
-            if cycles:
-                # Use actual cycle lengths from PeriodStartLogs (more accurate than simple average)
-                cycle_lengths = [c["length"] for c in cycles if 21 <= c["length"] <= 45]
-                if cycle_lengths:
-                    # Use median for better accuracy (less affected by outliers)
-                    cycle_lengths_sorted = sorted(cycle_lengths)
-                    median_idx = len(cycle_lengths_sorted) // 2
-                    avg_cycle_length = cycle_lengths_sorted[median_idx] if len(cycle_lengths_sorted) % 2 == 1 else (cycle_lengths_sorted[median_idx - 1] + cycle_lengths_sorted[median_idx]) / 2
+
+        # Helper: normalize cycle_starts after ANY insertion/extension.
+        # - Deduplicates by DATE-ONLY equality (ignores time component)
+        # - Sorts ascending
+        # - Enforces minimum 21-day spacing (medical safety)
+        #
+        # NOTE: This is intentionally local to this function to keep changes minimal
+        # and avoid redesigning the pipeline.
+        def _normalize_cycle_starts_in_place(
+            starts: List[datetime],
+            meta_by_start: Dict[datetime, Dict],
+            min_cycle_days: int = 21
+        ) -> List[datetime]:
+            # Deduplicate by date-only equality, preserving earliest datetime instance
+            seen = set()
+            unique: List[datetime] = []
+            for cs in sorted(starts):
+                d = cs.date()
+                if d in seen:
+                    continue
+                seen.add(d)
+                unique.append(cs)
+
+            # Enforce min spacing
+            validated: List[datetime] = []
+            for cs in unique:
+                if not validated:
+                    validated.append(cs)
+                    continue
+                gap = (cs - validated[-1]).days
+                if gap >= min_cycle_days:
+                    validated.append(cs)
                 else:
-                    avg_cycle_length = cycle_length
-                
-                # Predict forward from last confirmed period using actual cycle lengths
-                last_period = datetime.strptime(last_confirmed, "%Y-%m-%d")
-                predicted_cycle_starts = []
-                current_start = last_period
-                
-                while current_start <= end_date_obj:
-                    if current_start >= start_date_obj:
-                        predicted_cycle_starts.append(current_start)
-                    # Use actual cycle length variation for more accurate prediction
-                    current_start += timedelta(days=int(avg_cycle_length))
-        elif not predicted_cycle_starts:
-            print("⚠️ No period data available, using last_period_date with cycle_length")
-            # Final fallback: use last_period_date with cycle_length
-            last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
-            predicted_cycle_starts = []
-            current_start = last_period
-            while current_start <= end_date_obj:
-                if current_start >= start_date_obj:
-                    predicted_cycle_starts.append(current_start)
-                current_start += timedelta(days=int(cycle_length))
+                    # Expected to happen with noisy predictions; keep log low-noise.
+                    src = meta_by_start.get(cs, {}).get("source", "unknown")
+                    print(f"DEBUG: Dropping cycle_start {cs.strftime('%Y-%m-%d')} (gap={gap}d < {min_cycle_days}, source={src})")
+
+            # Clean meta dict keys that were deduped out (best-effort)
+            keep_dates = {cs.date() for cs in validated}
+            for k in list(meta_by_start.keys()):
+                if k.date() not in keep_dates:
+                    meta_by_start.pop(k, None)
+
+            return validated
         
-        # Fallback: Try database predictions if period log prediction fails
+        # ====================================================================
+        # A) CYCLE START NORMALIZATION (BEFORE any phase calculation)
+        # ====================================================================
+        # Collect cycle_start dates from all sources, deduplicate, and sort
+        # This prevents duplicate cycles and ensures clean cycle boundaries
+        
+        cycle_starts_raw = []
+        cycle_sources = {}  # Track source of each cycle: "real", "predicted", "fallback"
+        
+        # Source 1: Period logs (real logged cycles)
+        predicted_cycle_starts = predict_cycle_starts_from_period_logs(user_id, start_date, end_date)
+        for cs in predicted_cycle_starts:
+            cycle_starts_raw.append(cs)
+            cycle_sources[cs] = "real"
+        
+        # Source 2: Database predictions (if period logs don't exist)
         if not predicted_cycle_starts:
-            print("No cycle starts from period logs, trying database predictions...")
             db_cycle_starts = get_predicted_cycle_starts_from_db(user_id, start_date, end_date)
             if db_cycle_starts:
-                print(f"Using {len(db_cycle_starts)} predicted cycle starts from database")
-                cycle_starts = [datetime.strptime(d, "%Y-%m-%d") for d in db_cycle_starts]
+                for cs_str in db_cycle_starts:
+                    cs = datetime.strptime(cs_str, "%Y-%m-%d")
+                    cycle_starts_raw.append(cs)
+                    cycle_sources[cs] = "predicted"
+        
+        # Source 3: Fallback anchor (ONLY if no real logs exist)
+        # Mark fallback cycles clearly - they should NOT be persisted or duplicated
+        use_fallback = False
+        if not cycle_starts_raw:
+            # No real cycles - use fallback anchor (today or last_period_date)
+            use_fallback = True
+            fallback_anchor = datetime.strptime(last_period_date, "%Y-%m-%d") if last_period_date else today
+            cycle_starts_raw.append(fallback_anchor)
+            cycle_sources[fallback_anchor] = "fallback"
+            # Expected post-reset / new-user behavior -> DEBUG, not WARNING
+            print(f"DEBUG: No real period logs found - using fallback anchor: {fallback_anchor.strftime('%Y-%m-%d')} (source=fallback, will not be persisted)")
+        
+        # DEDUPLICATE: Remove duplicates using date-only equality
+        # Convert to date objects for comparison, then back to datetime
+        seen_dates = set()
+        cycle_starts_deduped = []
+        for cs in cycle_starts_raw:
+            cs_date = cs.date()  # Date-only comparison
+            if cs_date not in seen_dates:
+                seen_dates.add(cs_date)
+                cycle_starts_deduped.append(cs)
             else:
-                print("No predicted cycle starts found, generating rolling cycle starts")
-                cycle_starts = calculate_rolling_cycle_starts(
-                    last_period_date, 
-                    float(cycle_length), 
-                    start_date_obj, 
-                    end_date_obj
-                )
-                print(f"Generated {len(cycle_starts)} rolling cycle starts")
-        else:
-            print(f"Using {len(predicted_cycle_starts)} predicted cycle starts from period logs")
-            cycle_starts = predicted_cycle_starts
+                # Duplicate found - log but don't add
+                source = cycle_sources.get(cs, "unknown")
+                print(f"⚠️ Skipping duplicate cycle start: {cs.strftime('%Y-%m-%d')} (source={source})")
         
-        # Process ALL dates in range - no gaps allowed
-        # This ensures every date gets a phase assignment
-        total_days = (end_date_obj - start_date_obj).days + 1
-        print(f"Calculating phases for ALL {total_days} days (no gaps allowed)")
+        # SORT: Ascending order
+        cycle_starts_deduped.sort()
         
-        # Performance optimization: For very large ranges (> 1 year), process in chunks
-        # This prevents timeout on far future dates
-        MAX_DAYS_PER_REQUEST = 400  # ~13 months
-        if total_days > MAX_DAYS_PER_REQUEST:
-            print(f"⚠️ Large date range ({total_days} days) - processing in chunks to prevent timeout")
-            # For now, just log warning - will process all but may be slow
-            # Future: Could implement chunking if needed
+        # FINAL VALIDATION: Ensure minimum 21-day spacing
+        MIN_CYCLE_DAYS = 21
+        cycle_starts = []
+        cycle_metadata = {}  # Store metadata per cycle (source, etc.)
         
-        # Ensure we have cycle starts covering the entire range
-        # If dates are before first cycle start, extend backwards
-        if cycle_starts and start_date_obj < cycle_starts[0]:
-            # Extend cycle starts backwards to cover the range
+        if cycle_starts_deduped:
+            cycle_starts.append(cycle_starts_deduped[0])
+            cycle_metadata[cycle_starts_deduped[0]] = {
+                "source": cycle_sources.get(cycle_starts_deduped[0], "unknown"),
+                "is_fallback": cycle_sources.get(cycle_starts_deduped[0], "unknown") == "fallback"
+            }
+            
+            for i in range(1, len(cycle_starts_deduped)):
+                current_start = cycle_starts_deduped[i]
+                last_valid_start = cycle_starts[-1]
+                gap = (current_start - last_valid_start).days
+                
+                if gap >= MIN_CYCLE_DAYS:
+                    cycle_starts.append(current_start)
+                    cycle_metadata[current_start] = {
+                        "source": cycle_sources.get(current_start, "unknown"),
+                        "is_fallback": cycle_sources.get(current_start, "unknown") == "fallback"
+                    }
+                else:
+                    source = cycle_sources.get(current_start, "unknown")
+                    print(f"⚠️ Skipping cycle start {current_start.strftime('%Y-%m-%d')} - only {gap} days from previous (minimum {MIN_CYCLE_DAYS} days, source={source})")
+        
+        # Log cycle normalization result
+        real_count = sum(1 for cs in cycle_starts if cycle_metadata.get(cs, {}).get("source") == "real")
+        predicted_count = sum(1 for cs in cycle_starts if cycle_metadata.get(cs, {}).get("source") == "predicted")
+        fallback_count = sum(1 for cs in cycle_starts if cycle_metadata.get(cs, {}).get("is_fallback"))
+        print(f"✅ Cycle normalization complete: {len(cycle_starts)} cycles (real={real_count}, predicted={predicted_count}, fallback={fallback_count})")
+        
+        # B) Fallback handling (CRITICAL):
+        # If we're in fallback mode (no real period logs), fallback is ONLY a phase anchor.
+        # Do NOT generate predicted cycles from fallback; do NOT extend backward/forward.
+        if use_fallback:
+            # Ensure a single, non-extended anchor
+            if cycle_starts:
+                cycle_starts = [cycle_starts[0]]
+            print("DEBUG: Fallback mode active - using single anchor only (no extensions, no predicted cycles).")
+        # Extend backwards if needed (for dates before first cycle) - ONLY when not in fallback mode
+        elif cycle_starts and start_date_obj < cycle_starts[0]:
             first_cycle = cycle_starts[0]
-            extended_cycle = first_cycle
-            while extended_cycle >= start_date_obj:
-                cycle_starts.insert(0, extended_cycle)
-                extended_cycle -= timedelta(days=int(cycle_length))
-            cycle_starts.sort()
-            print(f"Extended cycle starts backwards to cover range: {len(cycle_starts)} total cycles")
+            # Start one cycle BEFORE the first cycle to avoid duplicating the existing first_cycle
+            extended_cycle = first_cycle - timedelta(days=max(int(cycle_length), MIN_CYCLE_DAYS))
+            cycles_added = 0
+            while extended_cycle >= start_date_obj and cycles_added < 12:
+                cycle_starts.append(extended_cycle)
+                cycle_metadata[extended_cycle] = {"source": "predicted", "is_fallback": False}
+                cycles_added += 1
+                extended_cycle -= timedelta(days=max(int(cycle_length), MIN_CYCLE_DAYS))
+
+            # Re-normalize after extension to guarantee no duplicates exist
+            cycle_starts = _normalize_cycle_starts_in_place(cycle_starts, cycle_metadata, min_cycle_days=MIN_CYCLE_DAYS)
+            print(f"DEBUG: Extended {cycles_added} cycles backwards to cover date range (post-normalization cycles={len(cycle_starts)})")
         
-        # Process every single date - NO GAPS
-        print(f"📊 Processing dates from {start_date_obj.strftime('%Y-%m-%d')} to {end_date_obj.strftime('%Y-%m-%d')}")
+        # ====================================================================
+        # B) LUTEAL ANCHORING (PER-CYCLE, NOT PER-DAY)
+        # ====================================================================
+        # Pre-calculate cycle metadata (luteal_mean, ovulation, fertile window) ONCE per cycle
+        # This prevents redundant calculations inside the date loop
+        
+        cycle_metadata_cache = {}  # Cache cycle-level calculations
+        
+        for cycle_start in cycle_starts:
+            cycle_start_str = cycle_start.strftime("%Y-%m-%d")
+            
+            # Calculate actual cycle length for this cycle
+            cycle_index = cycle_starts.index(cycle_start)
+            if cycle_index < len(cycle_starts) - 1:
+                next_cycle_start = cycle_starts[cycle_index + 1]
+                actual_cycle_length = (next_cycle_start - cycle_start).days
+                if actual_cycle_length < 21 or actual_cycle_length > 45:
+                    actual_cycle_length = float(cycle_length)
+            else:
+                # Last cycle (future) - use estimated length
+                from period_start_logs import get_cycles_from_period_starts
+                cycles = get_cycles_from_period_starts(user_id)
+                if cycles:
+                    cycle_lengths = [c["length"] for c in cycles if 21 <= c["length"] <= 45]
+                    if cycle_lengths:
+                        cycle_lengths_sorted = sorted(cycle_lengths)
+                        median_idx = len(cycle_lengths_sorted) // 2
+                        actual_cycle_length = cycle_lengths_sorted[median_idx] if len(cycle_lengths_sorted) % 2 == 1 else (cycle_lengths_sorted[median_idx - 1] + cycle_lengths_sorted[median_idx]) / 2
+                    else:
+                        actual_cycle_length = float(cycle_length)
+                else:
+                    actual_cycle_length = float(cycle_length)
+                
+                if actual_cycle_length < 21:
+                    actual_cycle_length = 21
+                if actual_cycle_length > 45:
+                    actual_cycle_length = 45
+            
+            # LUTEAL ANCHORING: Calculate ONCE per cycle (not per day)
+            # Formula: Predicted Ovulation = Next Period Start - avg(Last 3 Luteal Phases)
+            calculated_ovulation_day = max(period_days + 1, actual_cycle_length - luteal_mean)
+            
+            # Fertile window calculation
+            fertile_window_start = max(period_days + 1, calculated_ovulation_day - 3)
+            fertile_window_end = min(int(actual_cycle_length), calculated_ovulation_day)
+            
+            if fertile_window_end < fertile_window_start:
+                fertile_window_end = fertile_window_start + 1
+                if fertile_window_end > int(actual_cycle_length):
+                    fertile_window_end = int(actual_cycle_length)
+            
+            if fertile_window_end >= int(actual_cycle_length):
+                fertile_window_end = max(fertile_window_start, int(actual_cycle_length) - 1)
+            
+            # Predict ovulation
+            ovulation_date_str, ovulation_sd, ovulation_offset = predict_ovulation(
+                cycle_start_str,
+                actual_cycle_length,
+                luteal_mean,
+                luteal_sd,
+                cycle_start_sd=None,
+                user_id=user_id
+            )
+            
+            ovulation_days = select_ovulation_days(ovulation_sd, max_days=3)
+            
+            # Cache all cycle-level metadata
+            cycle_metadata_cache[cycle_start_str] = {
+                "actual_cycle_length": actual_cycle_length,
+                "calculated_ovulation_day": calculated_ovulation_day,
+                "fertile_window_start": fertile_window_start,
+                "fertile_window_end": fertile_window_end,
+                "ovulation_date_str": ovulation_date_str,
+                "ovulation_sd": ovulation_sd,
+                "ovulation_days": ovulation_days,
+                "luteal_mean": luteal_mean  # Cache for reuse
+            }
+            
+            # Log luteal anchoring ONCE per cycle (not per day)
+            source = cycle_metadata.get(cycle_start, {}).get("source", "unknown")
+            is_fallback = cycle_metadata.get(cycle_start, {}).get("is_fallback", False)
+            fallback_note = " (FALLBACK - not persisted)" if is_fallback else ""
+            print(f"🔬 Cycle {cycle_start_str}: luteal_mean={luteal_mean:.1f}, ovulation_day={calculated_ovulation_day}, fertile_window=[{fertile_window_start}-{fertile_window_end}], source={source}{fallback_note}")
+        
+        # ====================================================================
+        # C) DAILY PHASE CALCULATION (per-date loop)
+        # ====================================================================
+        total_days = (end_date_obj - start_date_obj).days + 1
+        print(f"📊 Processing {total_days} dates from {start_date_obj.strftime('%Y-%m-%d')} to {end_date_obj.strftime('%Y-%m-%d')}")
+        
+        dates_processed = 0
+        dates_with_phases = 0
         
         while current_date <= end_date_obj:
-            # Find which cycle this date belongs to using predicted cycle starts
+            # MEDICAL FIX: Find which cycle this date belongs to
             # Find the most recent cycle start that is <= current_date
+            # CRITICAL: A date belongs to the cycle that started most recently before or on that date
             current_cycle_start = None
             
-            for cycle_start in cycle_starts:
+            # Find the most recent cycle start <= current_date
+            # Iterate backwards to find the correct cycle
+            for i in range(len(cycle_starts) - 1, -1, -1):
+                cycle_start = cycle_starts[i]
                 if cycle_start <= current_date:
                     current_cycle_start = cycle_start
-                else:
-                    break  # cycle_starts are sorted, so we can break
+                    break  # Found it
             
-            # CRITICAL FIX: If no cycle start found, create one based on cycle length
-            # This ensures NO dates are skipped
+            # SAFETY: If no cycle start found, this should not happen after normalization
+            # But handle gracefully
             if current_cycle_start is None:
-                # Calculate how many cycles back we need to go
-                days_before_first = (cycle_starts[0] - current_date).days if cycle_starts else 0
-                cycles_back = max(1, int(days_before_first / cycle_length) + 1)
-                current_cycle_start = cycle_starts[0] - timedelta(days=int(cycle_length * cycles_back))
-                # Add to cycle_starts for future dates
-                if current_cycle_start not in cycle_starts:
-                    cycle_starts.append(current_cycle_start)
-                    cycle_starts.sort()
-                    print(f"Created cycle start {current_cycle_start.strftime('%Y-%m-%d')} to cover date {current_date.strftime('%Y-%m-%d')}")
-            # ⚠️ CRITICAL: days_in_current_cycle is 1-INDEXED (cycle start = day 1, not day 0)
-            # Formula: (current_date - current_cycle_start).days + 1
-            # Example: If period_days = 5, then days 1, 2, 3, 4, 5 are Period phase (5 days inclusive)
+                # This should only happen if cycle_starts is empty (shouldn't happen after normalization)
+                # Use fallback but mark it clearly
+                current_cycle_start = datetime.strptime(last_period_date, "%Y-%m-%d") if last_period_date else today
+                # Expected edge condition (post-reset / empty state) -> DEBUG
+                print(f"DEBUG: No cycle start found for {current_date.strftime('%Y-%m-%d')}, using fallback anchor {current_cycle_start.strftime('%Y-%m-%d')}")
+            # Calculate day_in_cycle (1-indexed)
             days_in_current_cycle = (current_date - current_cycle_start).days + 1
             
-            # Predict ovulation for this cycle
+            # Get cycle metadata from cache (pre-calculated per-cycle, not per-day)
             cycle_start_str = current_cycle_start.strftime("%Y-%m-%d")
             
             # Initialize phase counters for this cycle if not exists
@@ -1827,54 +2272,31 @@ def calculate_phase_for_date_range(
                 phase_counters_by_cycle[cycle_start_str] = {
                     "Period": 0, "Follicular": 0, "Ovulation": 0, "Luteal": 0
                 }
-                
-                # Calculate actual cycle length for this cycle (from predicted starts)
-                # This prevents drift by using actual cycle variations instead of fixed length
-                cycle_index = cycle_starts.index(current_cycle_start)
-                if cycle_index < len(cycle_starts) - 1:
-                    next_cycle_start = cycle_starts[cycle_index + 1]
-                    actual_cycle_length = (next_cycle_start - current_cycle_start).days
-                    # Validate cycle length is in medical range
-                    if actual_cycle_length < 21 or actual_cycle_length > 45:
-                        # Invalid cycle length, use estimated length instead
-                        actual_cycle_length = float(cycle_length)
-                else:
-                    # Last cycle, use estimated length from user data or adaptive estimate
-                    # Try to get better estimate from period logs
-                    from period_start_logs import get_cycles_from_period_starts
-                    cycles = get_cycles_from_period_starts(user_id)
-                    if cycles:
-                        cycle_lengths = [c["length"] for c in cycles if 21 <= c["length"] <= 45]
-                        if cycle_lengths:
-                            # Use median for better accuracy
-                            cycle_lengths_sorted = sorted(cycle_lengths)
-                            median_idx = len(cycle_lengths_sorted) // 2
-                            actual_cycle_length = cycle_lengths_sorted[median_idx] if len(cycle_lengths_sorted) % 2 == 1 else (cycle_lengths_sorted[median_idx - 1] + cycle_lengths_sorted[median_idx]) / 2
-                        else:
-                            actual_cycle_length = float(cycle_length)
-                    else:
-                        actual_cycle_length = float(cycle_length)
-                
-                # Predict ovulation once per cycle using actual cycle length
-                # cycle_start_sd will be estimated adaptively based on cycle variance and logging consistency
-                ovulation_date_str, ovulation_sd, ovulation_offset = predict_ovulation(
-                    cycle_start_str,
-                    actual_cycle_length,  # Use actual cycle length, not average
-                    luteal_mean,
-                    luteal_sd,
-                    cycle_start_sd=None,  # Will be estimated adaptively
-                    user_id=user_id
-                )
-                phase_counters_by_cycle[cycle_start_str]["_ovulation_date"] = ovulation_date_str
-                phase_counters_by_cycle[cycle_start_str]["_ovulation_sd"] = ovulation_sd
-                
-                # Pre-calculate ovulation days using top-N by probability approach
-                ovulation_days = select_ovulation_days(ovulation_sd, max_days=3)
-                phase_counters_by_cycle[cycle_start_str]["_ovulation_days"] = ovulation_days
             
-            ovulation_date_str = phase_counters_by_cycle[cycle_start_str]["_ovulation_date"]
-            ovulation_sd = phase_counters_by_cycle[cycle_start_str]["_ovulation_sd"]
-            ovulation_days = phase_counters_by_cycle[cycle_start_str]["_ovulation_days"]
+            # Get cached cycle metadata (luteal anchoring already calculated per-cycle)
+            cycle_meta = cycle_metadata_cache.get(cycle_start_str)
+            if not cycle_meta:
+                # Should not happen - all cycles should have metadata
+                print(f"⚠️ WARNING: No metadata for cycle {cycle_start_str}, using fallback")
+                cycle_meta = {
+                    "actual_cycle_length": float(cycle_length),
+                    "calculated_ovulation_day": cycle_length - 14,
+                    "fertile_window_start": max(period_days + 1, (cycle_length - 14) - 3),
+                    "fertile_window_end": min(int(cycle_length), cycle_length - 14),
+                    "ovulation_date_str": (current_cycle_start + timedelta(days=int(cycle_length - 14))).strftime("%Y-%m-%d"),
+                    "ovulation_sd": 2.0,
+                    "ovulation_days": [-1, 0, 1],
+                    "luteal_mean": 14.0
+                }
+            
+            # Use cached values (no per-day calculation)
+            actual_cycle_length = cycle_meta["actual_cycle_length"]
+            calculated_ovulation_day = cycle_meta["calculated_ovulation_day"]
+            fertile_window_start = cycle_meta["fertile_window_start"]
+            fertile_window_end = cycle_meta["fertile_window_end"]
+            ovulation_date_str = cycle_meta["ovulation_date_str"]
+            ovulation_sd = cycle_meta["ovulation_sd"]
+            ovulation_days = cycle_meta["ovulation_days"]
             ovulation_date = datetime.strptime(ovulation_date_str, "%Y-%m-%d")
             
             # Calculate offset from ovulation
@@ -1903,29 +2325,34 @@ def calculate_phase_for_date_range(
             day_in_cycle = days_in_current_cycle
             phase = None
             
-            # Calculate ovulation day (medically: typically 14 days before next period)
-            # Use actual cycle length for this cycle, not average
-            cycle_index = cycle_starts.index(current_cycle_start)
-            if cycle_index < len(cycle_starts) - 1:
-                next_cycle_start = cycle_starts[cycle_index + 1]
-                actual_cycle_length = (next_cycle_start - current_cycle_start).days
-                if actual_cycle_length < 21 or actual_cycle_length > 45:
-                    actual_cycle_length = float(cycle_length)
-            else:
-                actual_cycle_length = float(cycle_length)
+            # VALIDATION: Ensure day_in_cycle is reasonable
+            if day_in_cycle < 1:
+                day_in_cycle = 1
+            if day_in_cycle > 60:
+                # Try to find a better cycle start
+                for cs in cycle_starts:
+                    if cs <= current_date:
+                        gap = (current_date - cs).days
+                        if gap < day_in_cycle:
+                            current_cycle_start = cs
+                            day_in_cycle = gap + 1
+                            cycle_start_str = current_cycle_start.strftime("%Y-%m-%d")
+                            cycle_meta = cycle_metadata_cache.get(cycle_start_str)
+                            if not cycle_meta:
+                                cycle_meta = cycle_metadata_cache.get(list(cycle_metadata_cache.keys())[0]) if cycle_metadata_cache else None
+                            break
             
-            # Standard luteal phase is 14 days (medically accurate)
-            standard_luteal_phase = 14
-            calculated_ovulation_day = max(period_days + 1, actual_cycle_length - standard_luteal_phase)
+            # MEDICAL FIX: Phase assignment with clear priority (medically accurate)
+            # CRITICAL: Ensure only ONE period phase per cycle (days 1 to period_days)
+            # Validate day_in_cycle is within valid cycle range
+            if day_in_cycle < 1:
+                # Invalid - day_in_cycle should never be < 1
+                print(f"⚠️ WARNING: day_in_cycle < 1 for date {current_date.strftime('%Y-%m-%d')}, cycle start {current_cycle_start.strftime('%Y-%m-%d')}. Setting to 1.")
+                day_in_cycle = 1
             
-            # Fertile window: 3-4 days (2-3 days before + ovulation day)
-            # This matches medical accuracy: sperm survives 3-5 days, egg 12-24 hours
-            fertile_window_start = max(period_days + 1, calculated_ovulation_day - 3)
-            fertile_window_end = min(int(actual_cycle_length), calculated_ovulation_day)
-            
-            # Phase assignment with clear priority (medically accurate):
             # 1. Period Phase: Days 1 to period_days (IDs: p1-p12)
-            if day_in_cycle <= period_days:
+            # MEDICAL RULE: Only days 1-period_days can be Period phase in a cycle
+            if 1 <= day_in_cycle <= period_days:
                 phase = "Period"
             # 2. Ovulation Phase: Fertile window (3-4 days, IDs: o1-o4)
             elif day_in_cycle >= fertile_window_start and day_in_cycle <= fertile_window_end:
@@ -1938,12 +2365,67 @@ def calculate_phase_for_date_range(
                 phase = "Luteal"
             else:
                 # Fallback (shouldn't happen, but ensures no gaps)
+                # This could happen if fertile_window_end < period_days (invalid calculation)
+                print(f"⚠️ WARNING: Phase assignment fallback for date {current_date.strftime('%Y-%m-%d')}, day_in_cycle={day_in_cycle}, period_days={period_days}, fertile_window_start={fertile_window_start}, fertile_window_end={fertile_window_end}")
                 phase = "Follicular"
             
-            # Increment counter for current phase and get day_in_phase
-            phase_counters[phase] += 1
-            day_in_phase = phase_counters[phase]
-            phase_day_id = generate_phase_day_id(phase, day_in_phase)
+            # MEDICAL VALIDATION: Double-check we're not assigning Period phase outside days 1-period_days
+            # This prevents duplicate period phases in one cycle
+            if phase == "Period" and (day_in_cycle < 1 or day_in_cycle > period_days):
+                print(f"❌ ERROR: Attempted to assign Period phase to day {day_in_cycle} (valid range: 1-{period_days}). Fixing to correct phase.")
+                # Recalculate phase correctly
+                if day_in_cycle > period_days and day_in_cycle < fertile_window_start:
+                    phase = "Follicular"
+                elif day_in_cycle >= fertile_window_start and day_in_cycle <= fertile_window_end:
+                    phase = "Ovulation"
+                elif day_in_cycle > fertile_window_end:
+                    phase = "Luteal"
+                else:
+                    phase = "Follicular"  # Final fallback
+            
+            # CRITICAL: Override phase if date is in a logged period
+            # This ensures logged periods ALWAYS show as Period phase, regardless of predictions
+            # This check happens BEFORE incrementing counters to ensure correct phase_day_id
+            current_date_str = current_date.strftime("%Y-%m-%d")
+            is_in_logged_period = is_date_in_logged_period(user_id, current_date_str)
+            
+            if is_in_logged_period:
+                # Date is in a logged period - override phase to Period
+                # Calculate which day of the period it is
+                period_logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date", desc=True).execute()
+                
+                for period_log in period_logs_response.data:
+                    period_start = datetime.strptime(period_log["date"], "%Y-%m-%d").date()
+                    current_date_date = current_date.date()
+                    
+                    # Determine period end
+                    if period_log.get("end_date"):
+                        period_end = datetime.strptime(period_log["end_date"], "%Y-%m-%d").date()
+                    else:
+                        # Use estimated period length
+                        period_length = estimate_period_length(user_id, normalized=True)
+                        period_length_days = int(round(max(3.0, min(8.0, period_length))))
+                        period_end = period_start + timedelta(days=period_length_days - 1)
+                    
+                    if period_start <= current_date_date <= period_end:
+                        # This date is in this logged period - override phase
+                        day_in_period = (current_date_date - period_start).days + 1
+                        phase = "Period"
+                        phase_day_id = f"p{day_in_period}"
+                        # Reset Period counter for this cycle to match logged period day
+                        phase_counters["Period"] = day_in_period
+                        day_in_phase = day_in_period
+                        print(f"✅ OVERRIDE: Date {current_date_str} is in logged period ({period_log['date']}), forcing Period phase (p{day_in_period})")
+                        break
+                # If we found a logged period, skip the normal counter increment
+                # Otherwise, continue with normal phase assignment
+            else:
+                # Normal phase assignment - increment counter for current phase and get day_in_phase
+                phase_counters[phase] += 1
+                day_in_phase = phase_counters[phase]
+                phase_day_id = generate_phase_day_id(phase, day_in_phase)
+            
+            dates_processed += 1
             
             if phase and phase_day_id:
                 phase_mappings.append({
@@ -1952,17 +2434,24 @@ def calculate_phase_for_date_range(
                     "phase_day_id": phase_day_id,
                     "source": "local",
                     "prediction_confidence": 0.8,  # High confidence for adaptive local calculation
-                    "is_predicted": True,
+                    # Note: is_predicted column doesn't exist in database, removed to avoid errors
                     "fertility_prob": round(fert_prob, 3),
                     "predicted_ovulation_date": ovulation_date_str,
                     "luteal_estimate": round(luteal_mean, 2),
                     "luteal_sd": round(luteal_sd, 2),
                     "ovulation_sd": round(ovulation_sd, 2)
                 })
+                dates_with_phases += 1
+            else:
+                # This should never happen, but log if it does
+                if dates_processed % 30 == 0:  # Log every 30 days to avoid spam
+                    print(f"⚠️ Warning: Date {current_date.strftime('%Y-%m-%d')} has no phase (phase={phase}, phase_day_id={phase_day_id})")
             
             current_date += timedelta(days=1)
         
-        print(f"✅ Generated {len(phase_mappings)} phase mappings (no gaps)")
+        print(f"✅ Generated {len(phase_mappings)} phase mappings from {dates_processed} dates processed (no gaps)")
+        if dates_processed != len(phase_mappings):
+            print(f"⚠️ WARNING: Processed {dates_processed} dates but only generated {len(phase_mappings)} phase mappings!")
         return phase_mappings
     
     except Exception as e:

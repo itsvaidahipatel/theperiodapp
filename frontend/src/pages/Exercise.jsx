@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { format } from 'date-fns'
 import { useDataContext } from '../context/DataContext'
+import { useCalendarCache } from '../context/CalendarCacheContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { ArrowLeft } from 'lucide-react'
@@ -11,27 +13,44 @@ import { getExerciseData } from '../utils/api'
 
 const Exercise = () => {
   const { t } = useTranslation()
-  const { dashboardData, wellnessData, loading, loadingWellness } = useDataContext()
+  const { wellnessData, loadingWellness } = useDataContext()
+  const { cachedPhaseMap, cachedWellnessData } = useCalendarCache()
   const [user, setUser] = useState(null)
   const [selectedCategory, setSelectedCategory] = useState('')
   const [loadingCategory, setLoadingCategory] = useState(false)
   const [exercisesByCategory, setExercisesByCategory] = useState({})
   const navigate = useNavigate()
 
-  // Extract data from context
-  const currentPhase = dashboardData?.currentPhase || null
+  // Get today's phase from calendar cache (FAST - no API call needed!)
+  // Use same date format as dashboard: format(new Date(), 'yyyy-MM-dd')
+  const today = format(new Date(), 'yyyy-MM-dd') // System date in YYYY-MM-DD format (e.g., "2026-02-08")
+  const todayPhaseData = cachedPhaseMap[today]
+  const currentPhase = todayPhaseData ? {
+    phase: todayPhaseData.phase,
+    phase_day_id: todayPhaseData.phase_day_id,
+    id: todayPhaseData.phase_day_id
+  } : null
   const phaseDayId = currentPhase?.phase_day_id || currentPhase?.id
   
-  // Get exercises from wellnessData
-  // wellnessData.exercises can be:
-  // - null (no data available or empty array was normalized to null)
-  // - {exercises: [...]} (has data)
-  // - undefined (not loaded yet)
-  const defaultExercises = wellnessData?.exercises !== undefined
-    ? (wellnessData.exercises && wellnessData.exercises.exercises && Array.isArray(wellnessData.exercises.exercises) && wellnessData.exercises.exercises.length > 0
-        ? wellnessData.exercises.exercises
-        : null)  // null means tried to load but no data
-    : undefined  // undefined means not loaded yet
+  // Log for debugging
+  useEffect(() => {
+    console.log(`📅 Exercise page: Using TODAY's date: ${today}, phase_day_id: ${phaseDayId || 'NOT FOUND'}`)
+  }, [today, phaseDayId])
+  
+  // Check if we have preloaded wellness data for today's phase_day_id
+  const preloadedExercises = cachedWellnessData?.phaseDayId === phaseDayId 
+    ? cachedWellnessData?.exercises 
+    : null
+  
+  // Get exercises from preloaded data, then wellnessData context, then local state
+  // Priority: preloaded > context > local
+  const defaultExercises = preloadedExercises?.exercises
+    ? preloadedExercises.exercises
+    : (wellnessData?.exercises !== undefined
+        ? (wellnessData.exercises && wellnessData.exercises.exercises && Array.isArray(wellnessData.exercises.exercises) && wellnessData.exercises.exercises.length > 0
+            ? wellnessData.exercises.exercises
+            : null)  // null means tried to load but no data
+        : undefined)  // undefined means not loaded yet
   
   // Initialize exercisesByCategory with default exercises (favorite category)
   useEffect(() => {
@@ -97,7 +116,35 @@ const Exercise = () => {
     
     console.log(`🔄 Exercise: Loading data for category: ${selectedCategory}, phaseDayId: ${phaseDayId}`)
     
-    // Check preloaded data first
+    // Check preloaded data from calendar cache first
+    if (preloadedExercises && preloadedExercises.exercises && Array.isArray(preloadedExercises.exercises)) {
+      // Filter by category if needed, or use all exercises
+      let exercisesToUse = preloadedExercises.exercises
+      if (selectedCategory) {
+        exercisesToUse = preloadedExercises.exercises.filter(e => 
+          e.category && e.category.toLowerCase() === selectedCategory.toLowerCase()
+        )
+      }
+      
+      if (exercisesToUse.length > 0) {
+        console.log(`✅ Using preloaded exercise data from calendar cache for ${selectedCategory}:`, exercisesToUse.length, 'exercises')
+        setExercisesByCategory(prev => ({
+          ...prev,
+          [selectedCategory]: exercisesToUse
+        }))
+        return
+      } else if (preloadedExercises.exercises.length === 0) {
+        // Preloaded but empty - mark as no data
+        console.log(`⚠️ Preloaded exercise data for ${selectedCategory} is empty`)
+        setExercisesByCategory(prev => ({
+          ...prev,
+          [selectedCategory]: null
+        }))
+        return
+      }
+    }
+    
+    // Fallback: Check other preloaded data sources
     const preloaded = getPreloadedExerciseData(phaseDayId, selectedCategory)
     if (preloaded && preloaded.exercises && Array.isArray(preloaded.exercises) && preloaded.exercises.length > 0) {
       console.log(`✅ Using preloaded exercise data for ${selectedCategory}:`, preloaded.exercises.length, 'exercises')
@@ -262,14 +309,14 @@ const Exercise = () => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
           <h2 className="text-3xl font-bold text-gray-800 mb-4">{t('exercise.moveWithCycle')}</h2>
-          {currentPhase && (
+          {currentPhase && currentPhase.phase && (
             <p className="text-2xl text-gray-700 font-semibold mb-4">
               {t('exercise.currentPhase')}: <span className="text-period-pink capitalize">{t(`phase.${currentPhase.phase.toLowerCase()}`)}</span> - {t('dashboard.day')} <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
             </p>
           )}
         </div>
 
-        {(loading || loadingWellness || loadingCategory) ? (
+        {(loadingWellness || loadingCategory) ? (
           <LoadingSpinner message="Loading exercise data..." />
         ) : filteredExercises && Array.isArray(filteredExercises) && filteredExercises.length > 0 ? (
           <div className="space-y-6">

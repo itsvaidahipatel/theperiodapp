@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
-import { updateUserProfile, changePassword, getNotificationPreferences, updateNotificationPreferences, resetCycleData } from '../utils/api'
+import { updateUserProfile, changePassword, getNotificationPreferences, updateNotificationPreferences, resetCycleData, resetLastPeriod } from '../utils/api'
 import { Save, Lock, Bell, RotateCcw, AlertTriangle, X } from 'lucide-react'
 import { updateUserData } from '../utils/userPreferences'
 import { useTranslation } from '../utils/translations'
@@ -32,7 +32,9 @@ const Profile = () => {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [showResetConfirm, setShowResetConfirm] = useState(false)
+  const [showResetLastPeriodConfirm, setShowResetLastPeriodConfirm] = useState(false)
   const [resetting, setResetting] = useState(false)
+  const [resettingLastPeriod, setResettingLastPeriod] = useState(false)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -184,20 +186,54 @@ const Profile = () => {
       // Clear form data related to cycles
       setFormData(prev => ({ ...prev }))
       
-      // Dispatch event to refresh all cycle-related data
+      // Dispatch specific reset event to clear calendar cache and refresh
+      window.dispatchEvent(new CustomEvent('resetAllCycles'))
+      // Also dispatch periodLogged for other components
       window.dispatchEvent(new CustomEvent('periodLogged'))
       
       setSuccess('All cycle data has been reset successfully. Your calendar and statistics are now clean.')
       setShowResetConfirm(false)
       
-      // Refresh the page after a short delay to ensure all data is cleared
+      // Navigate to dashboard to see blank calendar (no page reload needed)
       setTimeout(() => {
-        window.location.reload()
-      }, 2000)
+        window.location.href = '/dashboard'
+      }, 1500)
     } catch (err) {
       setError(err.message || 'Failed to reset cycle data')
     } finally {
       setResetting(false)
+    }
+  }
+
+  const handleResetLastPeriod = async () => {
+    setResettingLastPeriod(true)
+    setError('')
+    setSuccess('')
+    
+    try {
+      const response = await resetLastPeriod()
+      
+      // Update local user data
+      const updatedUser = { ...user, ...response.user }
+      localStorage.setItem('user', JSON.stringify(updatedUser))
+      setUser(updatedUser)
+      
+      // Dispatch specific reset event to clear calendar cache and refresh
+      window.dispatchEvent(new CustomEvent('resetLastPeriod'))
+      // Also dispatch periodLogged for other components
+      window.dispatchEvent(new CustomEvent('periodLogged'))
+      
+      setSuccess(`Last period (${response.deleted_period_date}) has been reset successfully. Your calendar and predictions have been updated.`)
+      setShowResetLastPeriodConfirm(false)
+      
+      // Navigate to dashboard to see updated calendar (no page reload needed)
+      setTimeout(() => {
+        window.location.href = '/dashboard'
+      }, 1500)
+    } catch (err) {
+      setError(err.message || 'Failed to reset last period')
+    } finally {
+      setResettingLastPeriod(false)
     }
   }
 
@@ -547,6 +583,37 @@ const Profile = () => {
           </form>
         )}
 
+        {/* Reset Last Period Section */}
+        <div className="mt-8 bg-orange-50 border-2 border-orange-200 rounded-lg p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex-shrink-0">
+              <RotateCcw className="h-6 w-6 text-orange-600" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-bold text-orange-800 mb-2">Reset Last Period Start</h3>
+              <p className="text-sm text-orange-700 mb-4">
+                If you accidentally logged a period, you can remove just the most recently logged period start. This will:
+              </p>
+              <ul className="text-sm text-orange-700 list-disc list-inside mb-4 space-y-1">
+                <li>Delete the most recent period log</li>
+                <li>Remove that period from your calendar</li>
+                <li>Update your last period date to the previous period (if any)</li>
+                <li>Regenerate predictions based on your remaining period history</li>
+              </ul>
+              <p className="text-sm font-semibold text-orange-800 mb-4">
+                ⚠️ This action cannot be undone, but only affects the last logged period.
+              </p>
+              <button
+                onClick={() => setShowResetLastPeriodConfirm(true)}
+                className="bg-orange-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-orange-700 transition flex items-center gap-2"
+              >
+                <RotateCcw className="h-5 w-5" />
+                Reset Last Period Start
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Reset Cycle Data Section */}
         <div className="mt-8 bg-red-50 border-2 border-red-200 rounded-lg p-6">
           <div className="flex items-start gap-4">
@@ -578,7 +645,71 @@ const Profile = () => {
           </div>
         </div>
 
-        {/* Reset Confirmation Modal */}
+        {/* Reset Last Period Confirmation Modal */}
+        {showResetLastPeriodConfirm && (
+          <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="flex-shrink-0">
+                  <AlertTriangle className="h-8 w-8 text-orange-600" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-2xl font-bold text-orange-800 mb-2">Reset Last Period?</h3>
+                  <p className="text-gray-700 mb-4">
+                    This will remove only the <strong className="text-orange-600">most recently logged period start</strong>:
+                  </p>
+                  <ul className="text-sm text-gray-700 list-disc list-inside mb-4 space-y-1">
+                    <li>Delete the last period log entry</li>
+                    <li>Remove that period from your calendar</li>
+                    <li>Update your last period date to the previous period (if any)</li>
+                    <li>Regenerate predictions based on remaining history</li>
+                  </ul>
+                  <div className="bg-orange-50 border-2 border-orange-300 rounded-lg p-4 mb-4">
+                    <p className="text-sm font-bold text-orange-800">
+                      ⚠️ This action cannot be undone!
+                    </p>
+                    <p className="text-sm text-orange-700 mt-2">
+                      Only the most recent period will be removed. All other period history will remain intact.
+                    </p>
+                  </div>
+                  <p className="text-sm font-semibold text-gray-800 mb-4">
+                    Do you want to proceed?
+                  </p>
+                </div>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowResetLastPeriodConfirm(false)}
+                  disabled={resettingLastPeriod}
+                  className="flex-1 bg-gray-200 text-gray-800 px-4 py-3 rounded-lg font-semibold hover:bg-gray-300 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <X className="h-5 w-5" />
+                  Cancel
+                </button>
+                <button
+                  onClick={handleResetLastPeriod}
+                  disabled={resettingLastPeriod}
+                  className="flex-1 bg-orange-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-orange-700 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {resettingLastPeriod ? (
+                    <>
+                      <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                      <span>Resetting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="h-5 w-5" />
+                      <span>Yes, Reset Last Period</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Reset All Confirmation Modal */}
         {showResetConfirm && (
           <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">

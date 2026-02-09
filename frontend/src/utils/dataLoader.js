@@ -18,6 +18,17 @@ import { getCachedData, setCachedData, shouldRefetch, clearCache } from './dataC
  * Load dashboard data
  */
 export const loadDashboardData = async () => {
+  // CRITICAL: Check for auth token before making any protected API calls
+  const token = localStorage.getItem('access_token')
+  if (!token) {
+    console.log('No auth token, skipping dashboard data load')
+    return {
+      currentPhase: null,
+      phaseMap: null,
+      periodLogs: null
+    }
+  }
+
   try {
     // Get current phase first (with timeout)
     const currentPhasePromise = getCurrentPhase().catch(() => null)
@@ -36,15 +47,26 @@ export const loadDashboardData = async () => {
       const startDateStr = startDate.toISOString().split('T')[0]
       const endDateStr = endDate.toISOString().split('T')[0]
       
-      // Add timeout to prevent hanging
-      const phaseMapPromise = getPhaseMap(startDateStr, endDateStr)
-      const phaseMapTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Phase map timeout')), 30000)
-      )
-      const phaseMapResponse = await Promise.race([phaseMapPromise, phaseMapTimeout]).catch((err) => {
-        console.warn('Phase map request timed out or failed:', err)
+      // Get phase map (with built-in retry for 202 status)
+      const phaseMapResponse = await getPhaseMap(startDateStr, endDateStr).catch((err) => {
+        console.warn('Phase map request failed:', err)
+        // If processing, return empty array (will be populated later)
+        if (err.message?.includes('processing') || err.message?.includes('background')) {
+          return { status: 'processing', phase_map: [] }
+        }
         return { phase_map: [] }
       })
+      
+      // Handle processing status - don't retry immediately
+      if (phaseMapResponse?.status === 'processing') {
+        console.log('⏳ Phase map is being generated in background - returning empty for now')
+        return {
+          currentPhase: currentPhase || null,
+          phaseMap: null,
+          periodLogs: periodLogs || null
+        }
+      }
+      
       console.log('📅 Phase map response in dataLoader:', {
         hasPhaseMap: !!phaseMapResponse?.phase_map,
         length: phaseMapResponse?.phase_map?.length || 0,
@@ -109,6 +131,13 @@ export const loadDashboardData = async () => {
  * Now preloads all categories/cuisines for exercises and nutrition
  */
 export const loadWellnessData = async (phaseDayId = null, language = null, preloadAll = true) => {
+  // CRITICAL: Check for auth token before making any protected API calls
+  const token = localStorage.getItem('access_token')
+  if (!token) {
+    console.log('No auth token, skipping wellness data load')
+    return null
+  }
+
   const lang = language || getUserLanguage()
   
   // Check cache first
@@ -295,6 +324,13 @@ export const loadWellnessData = async (phaseDayId = null, language = null, prelo
  * Called after dashboard loads to preload everything in background
  */
 export const preloadAllWellnessData = async (phaseDayId = null, language = null) => {
+  // CRITICAL: Check for auth token before making any protected API calls
+  const token = localStorage.getItem('access_token')
+  if (!token) {
+    console.log('No auth token, skipping wellness data preload')
+    return
+  }
+
   if (!phaseDayId) return
   
   const lang = language || getUserLanguage()

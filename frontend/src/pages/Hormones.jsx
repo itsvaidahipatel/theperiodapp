@@ -1,23 +1,48 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { format } from 'date-fns'
 import { useDataContext } from '../context/DataContext'
+import { useCalendarCache } from '../context/CalendarCacheContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { ArrowLeft, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getUserLanguage, getLocalizedText } from '../utils/userPreferences'
 import { useTranslation } from '../utils/translations'
 import { translateHormoneLevel } from '../utils/translateHelpers'
+import { getHormonesData } from '../utils/api'
 
 const Hormones = () => {
   const { t } = useTranslation()
-  const { dashboardData, wellnessData, loading, loadingWellness } = useDataContext()
+  const { wellnessData, loadingWellness } = useDataContext()
+  const { cachedPhaseMap, cachedWellnessData } = useCalendarCache()
   const [user, setUser] = useState(null)
   const [language, setLanguage] = useState('en')
+  const [localHormonesData, setLocalHormonesData] = useState(null)
+  const [fetchingData, setFetchingData] = useState(false)
   const navigate = useNavigate()
 
-  // Extract data from context
-  const currentPhase = dashboardData?.currentPhase || null
-  const hormonesData = wellnessData?.hormones || null
+  // Get today's phase from calendar cache (FAST - no API call needed!)
+  // Use same date format as dashboard: format(new Date(), 'yyyy-MM-dd')
+  const today = format(new Date(), 'yyyy-MM-dd') // System date in YYYY-MM-DD format (e.g., "2026-02-08")
+  const todayPhaseData = cachedPhaseMap[today]
+  const currentPhase = todayPhaseData ? {
+    phase: todayPhaseData.phase,
+    phase_day_id: todayPhaseData.phase_day_id,
+    id: todayPhaseData.phase_day_id
+  } : null
+  
+  // Log for debugging
+  useEffect(() => {
+    console.log(`📅 Hormones page: Using TODAY's date: ${today}, phase_day_id: ${currentPhase?.phase_day_id || 'NOT FOUND'}`)
+  }, [today, currentPhase?.phase_day_id])
+
+  // Check if we have preloaded wellness data for today's phase_day_id
+  const preloadedHormones = cachedWellnessData?.phaseDayId === currentPhase?.phase_day_id 
+    ? cachedWellnessData?.hormones 
+    : null
+
+  // Extract data from context - prioritize preloaded data, then context, then local state
+  const hormonesData = preloadedHormones || wellnessData?.hormones || localHormonesData
 
   useEffect(() => {
     const userData = localStorage.getItem('user')
@@ -48,6 +73,76 @@ const Hormones = () => {
     }
   }, [])
 
+  // Fetch hormones data using phase_day_id from calendar cache (SIMPLE & FAST!)
+  // Only fetch if we don't have preloaded data
+  useEffect(() => {
+    // Check if we already have preloaded data
+    if (preloadedHormones) {
+      console.log('✅ Hormones page: Using preloaded data from calendar cache')
+      setLocalHormonesData(preloadedHormones)
+      return
+    }
+    
+    // Only fetch if we have a phase_day_id from calendar and haven't fetched yet
+    if (currentPhase?.phase_day_id && !localHormonesData && !fetchingData && !wellnessData?.hormones) {
+      console.log(`🚀 Hormones page: Starting fetch for phase_day_id: ${currentPhase.phase_day_id}`)
+      console.log(`   Current state: today=${today}, hasPhaseData=${!!todayPhaseData}, phase_day_id=${currentPhase.phase_day_id}`)
+      
+      setFetchingData(true)
+      
+      const fetchHormones = async () => {
+        const timeoutId = setTimeout(() => {
+          console.warn('⚠️ Hormones page: Fetch timeout after 10 seconds - clearing loading state')
+          setFetchingData(false)
+        }, 10000) // 10 second timeout
+        
+        try {
+          console.log(`📞 Hormones page: Calling getHormonesData('${currentPhase.phase_day_id}')...`)
+          
+          // Add timeout to the API call
+          const hormonesPromise = getHormonesData(currentPhase.phase_day_id)
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('getHormonesData timeout after 8 seconds')), 8000)
+          )
+          
+          const hormones = await Promise.race([hormonesPromise, timeoutPromise])
+          
+          clearTimeout(timeoutId)
+          
+          console.log(`📥 Hormones page: Received response:`, hormones ? 'has data' : 'no data')
+          
+          if (hormones) {
+            setLocalHormonesData(hormones)
+            console.log('✅ Hormones page: Successfully set hormones data')
+          } else {
+            console.warn('⚠️ Hormones page: No hormones data in response')
+          }
+        } catch (error) {
+          clearTimeout(timeoutId)
+          console.error('❌ Hormones page: Error fetching hormones data:', error.message || error)
+          // Don't set data, but clear loading state
+        } finally {
+          console.log('🏁 Hormones page: Fetch complete, setting fetchingData=false')
+          setFetchingData(false)
+        }
+      }
+      fetchHormones()
+    } else {
+      // Log why we're not fetching
+      if (preloadedHormones) {
+        console.log(`⏸️ Hormones page: Not fetching - using preloaded data`)
+      } else if (!currentPhase?.phase_day_id) {
+        console.log(`⏸️ Hormones page: Not fetching - no phase_day_id. currentPhase:`, currentPhase)
+      } else if (localHormonesData) {
+        console.log(`⏸️ Hormones page: Not fetching - already have localHormonesData`)
+      } else if (fetchingData) {
+        console.log(`⏸️ Hormones page: Not fetching - already fetching`)
+      } else if (wellnessData?.hormones) {
+        console.log(`⏸️ Hormones page: Not fetching - already have wellnessData.hormones`)
+      }
+    }
+  }, [currentPhase?.phase_day_id, localHormonesData, fetchingData, wellnessData?.hormones, preloadedHormones, today, todayPhaseData])
+
   const getTrendIcon = (trend) => {
     if (trend === 'up' || trend === '↑') return <TrendingUp className="h-5 w-5 text-green-600" />
     if (trend === 'down' || trend === '↓') return <TrendingDown className="h-5 w-5 text-red-600" />
@@ -74,12 +169,15 @@ const Hormones = () => {
 
   // Debug logging
   useEffect(() => {
-    console.log('Hormones page - dashboardData:', dashboardData)
-    console.log('Hormones page - wellnessData:', wellnessData)
-    console.log('Hormones page - hormonesData:', hormonesData)
-    console.log('Hormones page - todayData:', todayData)
-    console.log('Hormones page - loadingWellness:', loadingWellness)
-  }, [dashboardData, wellnessData, hormonesData, todayData, loadingWellness])
+    console.log('📊 Hormones page state:', {
+      today,
+      todayPhaseData,
+      currentPhase,
+      hasHormonesData: !!hormonesData,
+      fetchingData,
+      loadingWellness
+    })
+  }, [today, todayPhaseData, currentPhase, hormonesData, fetchingData, loadingWellness])
 
   if (!user) {
     return null
@@ -106,14 +204,14 @@ const Hormones = () => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8">
           <h2 className="text-3xl font-bold text-gray-800 mb-4">{t('hormones.title')}</h2>
-          {currentPhase && (
+          {currentPhase && currentPhase.phase && (
             <p className="text-2xl text-gray-700 font-semibold">
               {t('hormones.currentPhase')}: <span className="text-period-pink capitalize">{t(`phase.${currentPhase.phase.toLowerCase()}`)}</span> - {t('dashboard.day')} <span className="text-period-pink">{currentPhase.phase_day_id || currentPhase.id}</span>
             </p>
           )}
         </div>
 
-        {(loading || loadingWellness) ? (
+        {(loadingWellness || fetchingData) ? (
           <LoadingSpinner message="Loading hormone data..." />
         ) : todayData && todayData !== null ? (
           <div className="space-y-6">

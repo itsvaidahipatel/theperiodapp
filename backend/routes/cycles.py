@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
+import asyncio
 
 from database import supabase
 from routes.auth import get_current_user
@@ -11,6 +12,10 @@ from cycle_utils import (
 )
 
 router = APIRouter()
+
+# In-memory guard to prevent duplicate prediction jobs per user
+# Key: user_id, Value: timestamp when prediction started
+_prediction_in_progress: Dict[str, float] = {}
 
 class CyclePredictionRequest(BaseModel):
     past_cycle_data: List[Dict]
@@ -91,8 +96,13 @@ async def get_current_phase(
         user_id = current_user["id"]
         check_date = date or datetime.now().strftime("%Y-%m-%d")
         
+        # PREFER ACTUAL DATA: First check if date is in a logged period (actual data)
+        from cycle_utils import is_date_in_logged_period
+        is_actual = is_date_in_logged_period(user_id, check_date)
+        
         # FAST PATH: Try to get from stored cycle predictions first
-        phase_info = get_user_phase_day(user_id, check_date)
+        # prefer_actual=True means we'll use predicted data if actual doesn't exist
+        phase_info = get_user_phase_day(user_id, check_date, prefer_actual=True)
         
         if phase_info and phase_info.get("phase") and phase_info.get("phase_day_id"):
             # Check if today is p1 (first day of period) - auto-update last_period_date
@@ -105,10 +115,13 @@ async def get_current_phase(
                 }).eq("id", user_id).execute()
                 print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 detected)")
             
+            # Mark if this is actual or predicted data
+            phase_info["is_actual"] = is_actual
             return phase_info
         
         # FAST FALLBACK: Use calculate_today_phase_day_id (fast, single-date calculation)
         # This is much faster than calculating a full date range
+        # This is predicted data (no actual logged period for this date)
         from cycle_utils import calculate_today_phase_day_id
         today_phase_day_id = calculate_today_phase_day_id(user_id)
         
@@ -135,7 +148,8 @@ async def get_current_phase(
                 "phase": phase,
                 "phase_day_id": today_phase_day_id,
                 "date": check_date,
-                "calculated": True
+                "calculated": True,
+                "is_actual": False  # This is predicted data
             }
         
         # No data available
@@ -158,11 +172,64 @@ async def get_current_phase(
             "message": f"No phase data available: {str(e)}"
         }
 
+async def _generate_phase_map_background(
+    user_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    last_period_date_str: str,
+    cycle_length_int: int
+):
+    """Background task to generate phase map predictions."""
+    try:
+        from cycle_utils import calculate_phase_for_date_range, store_cycle_phase_map
+        from prediction_cache import get_first_logged_period_date
+        
+        # Get first logged period date - we don't need predictions before this
+        first_period_date = get_first_logged_period_date(user_id)
+        
+        # Adjust start_date to not be before first logged period
+        if first_period_date and start_date:
+            first_period_dt = datetime.strptime(first_period_date, "%Y-%m-%d")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            
+            if start_dt < first_period_dt:
+                # Start from first day of month containing first logged period
+                start_date = first_period_dt.replace(day=1).strftime("%Y-%m-%d")
+                print(f"📅 Adjusted start_date to first logged period month: {start_date}")
+        
+        print(f"🔄 BACKGROUND: Generating predictions for user {user_id} ({start_date} to {end_date})")
+        
+        calculated_map = calculate_phase_for_date_range(
+            user_id=user_id,
+            last_period_date=last_period_date_str,
+            cycle_length=cycle_length_int,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        if calculated_map:
+            # Store predictions in database
+            store_cycle_phase_map(user_id, calculated_map, update_future_only=False)
+            print(f"✅ BACKGROUND: Stored {len(calculated_map)} phase mappings for user {user_id}")
+        else:
+            print(f"⚠️ BACKGROUND: No phase mappings generated for user {user_id}")
+            
+    except Exception as e:
+        print(f"❌ BACKGROUND: Error generating phase map for user {user_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clear the in-progress flag
+        if user_id in _prediction_in_progress:
+            del _prediction_in_progress[user_id]
+            print(f"✅ BACKGROUND: Cleared prediction_in_progress flag for user {user_id}")
+
 @router.get("/phase-map")
 async def get_phase_map(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     force_recalculate: bool = False,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user: dict = Depends(get_current_user)
 ):
     """Get phase mappings for a date range. Calculates on the fly if not in database.
@@ -223,57 +290,44 @@ async def get_phase_map(
                 })
             return {"phase_map": formatted_data}
         
-        # If no stored data, generate predictions using local adaptive algorithms
-        print("=" * 60)
-        print("CALENDAR PHASE MAP REQUEST")
-        print(f"User ID: {user_id}")
-        print(f"Date range: {start_date} to {end_date}")
-        print("No stored predictions found. Generating using adaptive local algorithms...")
-        print("=" * 60)
+        # Check if prediction is already in progress for this user
+        import time
+        current_time = time.time()
+        prediction_started = _prediction_in_progress.get(user_id)
         
-        # Check date range and optimize for future months
-        try:
-            from datetime import datetime, timedelta
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else datetime.now()
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.now()
-            days_diff = (end_dt - start_dt).days
-            today = datetime.now()
-            
-            # If requesting far future dates (> 1 year ahead), limit to reasonable range
-            if end_dt > today + timedelta(days=365):
-                print(f"⚠️ Requested date range extends > 1 year in future. Limiting to 1 year ahead for performance.")
-                end_dt = today + timedelta(days=365)
-                end_date = end_dt.strftime("%Y-%m-%d")
-                days_diff = (end_dt - start_dt).days
-                print(f"📅 Adjusted date range: {days_diff} days ({start_date} to {end_date})")
-            else:
-                print(f"📅 Requested date range: {days_diff} days ({start_date} to {end_date})")
-        except:
-            pass  # Continue with original dates if parsing fails
+        # If prediction started more than 5 minutes ago, consider it stale and allow new one
+        if prediction_started and (current_time - prediction_started) < 300:
+            print(f"⏳ Prediction already in progress for user {user_id} (started {int(current_time - prediction_started)}s ago)")
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "processing",
+                    "message": "Predictions are being generated in the background. Please try again in a moment.",
+                    "phase_map": []  # Return empty array to prevent frontend errors
+                }
+            )
         
-        from cycle_utils import calculate_phase_for_date_range
+        # Mark prediction as in progress
+        _prediction_in_progress[user_id] = current_time
+        print(f"🚀 Starting background prediction for user {user_id}")
         
-        # Get user data
+        # Get user data (needed for background task)
         user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
         
         if not user_response.data or not user_response.data[0]:
             print("❌ ERROR: No user data found")
+            # Clear the flag
+            if user_id in _prediction_in_progress:
+                del _prediction_in_progress[user_id]
             return {"phase_map": []}
         
         user = user_response.data[0]
         last_period_date = user.get("last_period_date")
         cycle_length = user.get("cycle_length", 28)
         
-        print(f"✅ User data retrieved:")
-        print(f"   - last_period_date: {last_period_date}")
-        print(f"   - cycle_length: {cycle_length}")
-        
         if not last_period_date:
-            print("⚠️ No last_period_date found for user - generating predictions from today")
-            # Generate predictions from today using default cycle length
-            from datetime import datetime
             last_period_date = datetime.now().strftime("%Y-%m-%d")
-            print(f"💡 Using today ({last_period_date}) as last_period_date for predictions")
         
         # Convert last_period_date to string if it's a date object
         if hasattr(last_period_date, 'strftime'):
@@ -283,7 +337,9 @@ async def get_phase_map(
         else:
             last_period_date_str = str(last_period_date)
         
-        # Quick validation: ensure dates are valid
+        cycle_length_int = int(cycle_length) if cycle_length else 28
+        
+        # Validate dates
         try:
             datetime.strptime(last_period_date_str, "%Y-%m-%d")
             if start_date:
@@ -292,93 +348,43 @@ async def get_phase_map(
                 datetime.strptime(end_date, "%Y-%m-%d")
         except Exception as date_error:
             print(f"❌ Invalid date format: {str(date_error)}")
+            # Clear the flag
+            if user_id in _prediction_in_progress:
+                del _prediction_in_progress[user_id]
             return {"phase_map": []}
         
-        # Generate predictions using adaptive local algorithms (medically credible)
-        print(f"🔄 Generating predictions using adaptive local algorithms...")
-        try:
-            from cycle_utils import calculate_phase_for_date_range
-            cycle_length_int = int(cycle_length) if cycle_length else 28
-            
-            # Process full date range - predictions are optimized now
-            # No artificial limits - we want complete calendar coverage
-            try:
-                start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else datetime.now()
-                end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.now()
-                days_diff = (end_dt - start_dt).days
-                print(f"📊 Calculating phases for {days_diff} days")
-            except:
-                pass
-            
-            calculated_map = calculate_phase_for_date_range(
-                user_id=user_id,
-                last_period_date=last_period_date_str,
-                cycle_length=cycle_length_int,
-                start_date=start_date,
-                end_date=end_date
+        # Trigger background task to generate predictions
+        if background_tasks:
+            background_tasks.add_task(
+                _generate_phase_map_background,
+                user_id,
+                start_date,
+                end_date,
+                last_period_date_str,
+                cycle_length_int
             )
-            
-            # Format for response (include new fields for Flutter frontend)
-            formatted_map = []
-            # ⚠️ MEDICAL SAFETY: Minimum confidence threshold for fertility data
-            MIN_CONFIDENCE_FOR_FERTILITY = 0.5  # Only show fertility_prob if prediction_confidence >= 0.5
-            
-            for item in calculated_map:
-                formatted_entry = {
-                    "date": item["date"],
-                    "phase": item["phase"],
-                    "phase_day_id": item["phase_day_id"]
-                }
-                # Add new adaptive fields if present
-                
-                # ⚠️ MEDICAL SAFETY: Suppress fertility_prob if prediction_confidence is too low
-                prediction_confidence = item.get("prediction_confidence") or item.get("confidence", 0.0)  # Backward compatibility
-                if "fertility_prob" in item and prediction_confidence >= MIN_CONFIDENCE_FOR_FERTILITY:
-                    formatted_entry["fertility_prob"] = item["fertility_prob"]
-                # If prediction_confidence is low, do NOT include fertility_prob (suppressed for safety)
-                
-                # Always include predicted_ovulation_date but mark as "estimated"
-                if "predicted_ovulation_date" in item:
-                    formatted_entry["predicted_ovulation_date"] = item["predicted_ovulation_date"]
-                    formatted_entry["predicted_ovulation_date_label"] = "Estimated ovulation date"  # Medical safety wording
-                
-                if "ovulation_offset" in item:
-                    formatted_entry["ovulation_offset"] = item["ovulation_offset"]
-                if "luteal_estimate" in item:
-                    formatted_entry["luteal_estimate"] = item["luteal_estimate"]
-                if "luteal_sd" in item:
-                    formatted_entry["luteal_sd"] = item["luteal_sd"]
-                if "ovulation_sd" in item:
-                    formatted_entry["ovulation_sd"] = item["ovulation_sd"]
-                if "source" in item:
-                    formatted_entry["source"] = item["source"]
-                if "prediction_confidence" in item:
-                    formatted_entry["prediction_confidence"] = item["prediction_confidence"]
-                elif "confidence" in item:  # Backward compatibility
-                    formatted_entry["prediction_confidence"] = item["confidence"]
-                if "is_predicted" in item:
-                    formatted_entry["is_predicted"] = item["is_predicted"]
-                # Ensure fertility_prob is always included
-                if "fertility_prob" not in formatted_entry:
-                    formatted_entry["fertility_prob"] = item.get("fertility_prob", 0)
-                formatted_map.append(formatted_entry)
-            
-            print(f"✅ Calculated {len(formatted_map)} phase mappings using adaptive local algorithms")
-            if len(formatted_map) > 0:
-                sample_dates = [f"{item.get('date', 'N/A')} ({item.get('phase', 'N/A')})" for item in formatted_map[:3]]
-                print(f"   First 3 dates: {sample_dates}")
-                phases_found = set(item.get('phase') for item in formatted_map if item.get('phase'))
-                print(f"   Phases included: {phases_found}")
-            else:
-                print("⚠️ WARNING: No phase mappings generated!")
-            print("=" * 60)
-            return {"phase_map": formatted_map}
-        except Exception as calc_error:
-            print(f"❌ ERROR in fallback calculation: {str(calc_error)}")
-            import traceback
-            traceback.print_exc()
-            print("=" * 60)
-            return {"phase_map": []}
+        else:
+            # Fallback: run in background using asyncio
+            asyncio.create_task(
+                _generate_phase_map_background(
+                    user_id,
+                    start_date,
+                    end_date,
+                    last_period_date_str,
+                    cycle_length_int
+                )
+            )
+        
+        # Return 202 immediately - prediction is running in background
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "processing",
+                "message": "Predictions are being generated in the background. Please try again in a moment.",
+                "phase_map": []  # Return empty array to prevent frontend errors
+            }
+        )
     
     except Exception as e:
         print(f"Error getting phase map: {str(e)}")

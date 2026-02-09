@@ -3,6 +3,7 @@ import ProtectedRoute from './components/ProtectedRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { DataProvider } from './context/DataContext'
 import { ViewModeProvider } from './context/ViewModeContext'
+import { CalendarCacheProvider } from './context/CalendarCacheContext'
 import Home from './pages/Home'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -16,6 +17,7 @@ import SelfTests from './pages/SelfTests'
 import About from './pages/About'
 import CycleHealthCheck from './pages/CycleHealthCheck'
 import CycleHistoryPage from './pages/CycleHistory'
+import CycleStatistics from './pages/CycleStatistics'
 import NotFound from './pages/NotFound'
 
 function App() {
@@ -23,6 +25,7 @@ function App() {
     <ErrorBoundary>
       <ViewModeProvider>
       <DataProvider>
+      <CalendarCacheProvider>
         <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/login" element={<Login />} />
@@ -107,8 +110,17 @@ function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/cycle-statistics"
+          element={
+            <ProtectedRoute>
+              <CycleStatistics />
+            </ProtectedRoute>
+          }
+        />
         <Route path="*" element={<NotFound />} />
         </Routes>
+      </CalendarCacheProvider>
       </DataProvider>
       </ViewModeProvider>
     </ErrorBoundary>

@@ -8,6 +8,11 @@ import json
 from database import supabase
 from auth_utils import get_password_hash, verify_password
 from routes.auth import get_current_user
+from datetime import timedelta
+from cycle_utils import estimate_period_length
+from period_start_logs import sync_period_start_logs_from_period_logs
+from prediction_cache import regenerate_predictions_from_last_confirmed_period
+from cycle_stats import update_user_cycle_stats
 
 router = APIRouter()
 security = HTTPBearer()
@@ -360,4 +365,130 @@ async def reset_cycle_data(current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to reset cycle data: {str(e)}"
+        )
+
+@router.post("/reset-last-period")
+async def reset_last_period(current_user: dict = Depends(get_current_user)):
+    """
+    Reset only the most recently logged period start.
+    
+    This will:
+    - Delete the most recent period log
+    - Delete all user_cycle_days entries for that period range
+    - Update last_period_date to the previous period's date (if any)
+    - Sync period_start_logs
+    - Regenerate predictions from the new last period
+    
+    Useful if a user accidentally logged a period and wants to undo just that entry.
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get the most recent period log (ordered by date desc)
+        logs_response = supabase.table("period_logs").select("*").eq("user_id", user_id).order("date", desc=True).limit(1).execute()
+        
+        if not logs_response.data or len(logs_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No period logs found to reset"
+            )
+        
+        last_period_log = logs_response.data[0]
+        last_period_date_str = last_period_log["date"]
+        
+        # Parse the date
+        if isinstance(last_period_date_str, str):
+            last_period_date = datetime.strptime(last_period_date_str, "%Y-%m-%d").date()
+        else:
+            last_period_date = last_period_date_str
+        
+        # SAFETY: Handle period end date - use actual end_date if available, else estimate
+        # This ensures we delete the correct period range regardless of whether end_date exists
+        period_end_date = None
+        if last_period_log.get("end_date"):
+            # Use actual end_date if available
+            end_date_str = last_period_log["end_date"]
+            if isinstance(end_date_str, str):
+                period_end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            else:
+                period_end_date = end_date_str
+            print(f"🔄 Resetting last period: {last_period_date_str} to {period_end_date.strftime('%Y-%m-%d')} (using actual end_date)")
+        else:
+            # No end_date - use estimated period length (fallback)
+            period_length = estimate_period_length(user_id)
+            period_length_days = int(round(max(3.0, min(8.0, period_length))))
+            period_end_date = last_period_date + timedelta(days=period_length_days - 1)
+            print(f"🔄 Resetting last period: {last_period_date_str} to {period_end_date.strftime('%Y-%m-%d')} (estimated {period_length_days} days, end_date was NULL)")
+        
+        # Step 1: Delete the period log (handles both start_date only and start_date + end_date)
+        delete_response = supabase.table("period_logs").delete().eq("id", last_period_log["id"]).execute()
+        print(f"✅ Deleted period log: {last_period_date_str} (end_date was {'provided' if last_period_log.get('end_date') else 'NULL'})")
+        
+        # Step 2: Delete all user_cycle_days entries for this period range
+        # SAFETY: Only delete if we have a valid period_end_date
+        if period_end_date:
+            current_date = last_period_date
+            deleted_count = 0
+            while current_date <= period_end_date:
+                date_str = current_date.strftime("%Y-%m-%d")
+                try:
+                    supabase.table("user_cycle_days").delete().eq("user_id", user_id).eq("date", date_str).eq("phase", "Period").execute()
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not delete user_cycle_days for {date_str}: {str(e)}")
+                current_date += timedelta(days=1)
+            
+            print(f"✅ Deleted {deleted_count} user_cycle_days entries for period range")
+        else:
+            print(f"⚠️ Warning: Could not determine period_end_date, skipping user_cycle_days deletion")
+        
+        # Step 3: Update last_period_date to the previous period's date (if any)
+        remaining_logs = supabase.table("period_logs").select("*").eq("user_id", user_id).order("date", desc=True).limit(1).execute()
+        
+        new_last_period_date = None
+        if remaining_logs.data and len(remaining_logs.data) > 0:
+            new_last_period_date = remaining_logs.data[0]["date"]
+        
+        update_data = {
+            "last_period_date": new_last_period_date
+        }
+        
+        user_update = supabase.table("users").update(update_data).eq("id", user_id).execute()
+        
+        if not user_update.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update user's last_period_date"
+            )
+        
+        updated_user = user_update.data[0]
+        updated_user.pop("password", None)
+        updated_user.pop("password_hash", None)
+        
+        print(f"✅ Updated last_period_date to: {new_last_period_date}")
+        
+        # Step 4: Sync period_start_logs (rebuild from remaining period_logs)
+        sync_period_start_logs_from_period_logs(user_id)
+        print(f"✅ Synced period_start_logs")
+        
+        # Step 5: Update cycle stats
+        update_user_cycle_stats(user_id)
+        print(f"✅ Updated cycle stats")
+        
+        # Step 6: Regenerate predictions from the new last confirmed period
+        regenerate_predictions_from_last_confirmed_period(user_id, days_ahead=730)
+        print(f"✅ Regenerated predictions")
+        
+        return {
+            "message": "Last period has been reset successfully",
+            "user": updated_user,
+            "deleted_period_date": last_period_date_str
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset last period: {str(e)}"
         )

@@ -15,7 +15,8 @@ class RegisterRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
-    last_period_date: str  # Required
+    last_period_date: str  # Required - period start date (source of truth)
+    last_period_end_date: Optional[str] = None  # Optional - period end date
     cycle_length: int = 28  # Required, default 28
     allergies: Optional[list] = None
     language: Optional[str] = "en"
@@ -117,6 +118,56 @@ async def register(request: RegisterRequest):
         
         user = response.data[0]
         user.pop("password_hash", None)  # Remove password from response
+        
+        # SAFETY: Create period_logs entry if last_period_date is provided
+        # This ensures the period is logged with optional end_date
+        if request.last_period_date:
+            try:
+                from datetime import datetime, timedelta
+                
+                # Validate end_date if provided
+                end_date_value = None
+                is_manual_end_value = False
+                
+                if request.last_period_end_date:
+                    # User provided end_date - validate it
+                    last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
+                    end_date_dt = datetime.strptime(request.last_period_end_date, "%Y-%m-%d").date()
+                    
+                    if end_date_dt < last_period_dt:
+                        # Invalid - end_date before start_date, but don't fail registration
+                        print(f"⚠️ Warning: end_date ({request.last_period_end_date}) < start_date ({request.last_period_date}), ignoring end_date")
+                        end_date_value = None
+                    else:
+                        end_date_value = request.last_period_end_date
+                        is_manual_end_value = True
+                        print(f"✅ Registration: User provided end_date: {end_date_value}")
+                else:
+                    # No end_date provided - auto-assign using default period length (5 days)
+                    last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
+                    default_period_length = 5  # Safe default
+                    estimated_end_date = last_period_dt + timedelta(days=default_period_length - 1)
+                    end_date_value = estimated_end_date.strftime("%Y-%m-%d")
+                    is_manual_end_value = False
+                    print(f"📊 Registration: Auto-assigned end_date: {end_date_value} (default 5 days)")
+                
+                # Create period_logs entry
+                period_log_entry = {
+                    "user_id": user["id"],
+                    "date": request.last_period_date,  # start_date (REQUIRED - source of truth)
+                    "end_date": end_date_value,  # Optional - can be NULL or provided/auto-assigned
+                    "is_manual_end": is_manual_end_value,
+                    "flow": None,
+                    "notes": None
+                }
+                
+                supabase.table("period_logs").insert(period_log_entry).execute()
+                print(f"✅ Created period_logs entry for registration: start={request.last_period_date}, end={end_date_value}")
+            except Exception as period_log_error:
+                # Don't fail registration if period log creation fails, but log it
+                import traceback
+                print(f"⚠️ Warning: Failed to create period_logs entry during registration: {str(period_log_error)}")
+                print(traceback.format_exc())
         
         # Auto-generate cycle predictions if last_period_date is provided
         if request.last_period_date:

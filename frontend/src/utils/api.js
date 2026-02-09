@@ -8,6 +8,23 @@ const getToken = () => {
 // Helper function to make API requests
 const apiRequest = async (endpoint, options = {}) => {
   const token = getToken()
+  
+  // CRITICAL: Protected endpoints require authentication
+  // Fail early if no token is present for protected endpoints
+  // Public endpoints: /auth/register, /auth/login, /auth/logout
+  const isPublicEndpoint = endpoint.startsWith('/auth/register') || 
+                          endpoint.startsWith('/auth/login') || 
+                          endpoint.startsWith('/auth/logout')
+  
+  if (!token && !isPublicEndpoint) {
+    const error = new Error('Not authenticated')
+    error.response = { 
+      data: { detail: 'Authentication required' }, 
+      status: 401 
+    }
+    throw error
+  }
+  
   const headers = {
     'Content-Type': 'application/json',
     ...options.headers,
@@ -144,11 +161,24 @@ export const resetCycleData = async () => {
   })
 }
 
+export const resetLastPeriod = async () => {
+  return apiRequest('/user/reset-last-period', {
+    method: 'POST',
+  })
+}
+
 // Period API functions
 export const logPeriod = async (logData) => {
   return apiRequest('/periods/log', {
     method: 'POST',
     body: JSON.stringify(logData),
+  })
+}
+
+export const logPeriodEnd = async (endData) => {
+  return apiRequest('/periods/log-end', {
+    method: 'POST',
+    body: JSON.stringify(endData),
   })
 }
 
@@ -197,7 +227,7 @@ export const getCurrentPhase = async (date) => {
   }
 }
 
-export const getPhaseMap = async (startDate, endDate, forceRecalculate = false) => {
+export const getPhaseMap = async (startDate, endDate, forceRecalculate = false, retryCount = 0) => {
   try {
     const params = new URLSearchParams()
     if (startDate) params.append('start_date', startDate)
@@ -205,34 +235,55 @@ export const getPhaseMap = async (startDate, endDate, forceRecalculate = false) 
     if (forceRecalculate) params.append('force_recalculate', 'true')
     const query = params.toString() ? `?${params.toString()}` : ''
     
-    // Calculate date range to determine appropriate timeout
-    let timeoutDuration = 30000 // Default 30 seconds
-    if (startDate && endDate) {
-      try {
-        const start = new Date(startDate)
-        const end = new Date(endDate)
-        const daysDiff = Math.ceil((end - start) / (1000 * 60 * 60 * 24))
-        
-        // Longer timeout for larger date ranges (initial load = 7 months = ~210 days)
-        if (daysDiff > 180) {
-          timeoutDuration = 45000 // 45 seconds for large ranges (initial load)
-        } else if (daysDiff > 90) {
-          timeoutDuration = 35000 // 35 seconds for medium ranges
-        }
-        // For small ranges (< 90 days), use default 30 seconds
-      } catch {
-        // If date parsing fails, use default timeout
-      }
-    }
+    // Shorter timeout now (backend returns quickly)
+    const timeoutDuration = 10000 // 10 seconds - backend should respond quickly
     
-    // Add timeout - longer for initial loads, shorter for navigation
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeoutDuration)
     
     let response
     try {
-      response = await apiRequest(`/cycles/phase-map${query}`, { signal: controller.signal })
+      // Make request and check status
+      const rawResponse = await fetch(`${API_BASE_URL}/cycles/phase-map${query}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
+        signal: controller.signal
+      })
+      
       clearTimeout(timeoutId)
+      
+      // Handle 202 Accepted (processing)
+      if (rawResponse.status === 202) {
+        const data = await rawResponse.json()
+        console.log('⏳ Phase map is being generated in background:', data)
+        
+        // If this is the first attempt and we haven't retried, wait and retry once
+        if (retryCount === 0) {
+          console.log('🔄 Waiting 8 seconds before retry...')
+          await new Promise(resolve => setTimeout(resolve, 8000))
+          return getPhaseMap(startDate, endDate, forceRecalculate, 1) // Retry once
+        } else {
+          // Already retried once - return processing status
+          return {
+            status: 'processing',
+            phase_map: [],
+            message: data.message || 'Predictions are being generated. Please wait a moment.'
+          }
+        }
+      }
+      
+      // Handle other status codes
+      if (!rawResponse.ok) {
+        const errorData = await rawResponse.json().catch(() => ({ detail: `HTTP ${rawResponse.status}` }))
+        const error = new Error(errorData.detail || errorData.message || 'Request failed')
+        error.response = { data: errorData, status: rawResponse.status }
+        throw error
+      }
+      
+      response = await rawResponse.json()
     } catch (error) {
       clearTimeout(timeoutId)
       // Only show timeout error for actual timeouts, not other errors
