@@ -21,7 +21,7 @@ from period_service import (
 from database import supabase
 
 
-def compute_cycle_stats_from_period_starts(user_id: str) -> Dict:
+def compute_cycle_stats_from_period_starts(user_id: str, period_starts: Optional[List] = None) -> Dict:
     """
     Compute cycle statistics from PeriodStartLogs.
     
@@ -34,6 +34,7 @@ def compute_cycle_stats_from_period_starts(user_id: str) -> Dict:
     
     Args:
         user_id: User ID
+        period_starts: Optional list from sync_period_start_logs_from_period_logs return. Use to avoid DB read after sync.
     
     Returns:
         Dict with:
@@ -46,7 +47,7 @@ def compute_cycle_stats_from_period_starts(user_id: str) -> Dict:
         - irregular_count: Number of irregular cycles (> 45 days)
     """
     try:
-        cycles = get_cycles_from_period_starts(user_id)
+        cycles = get_cycles_from_period_starts(user_id, period_starts=period_starts)
         
         if not cycles or len(cycles) < 1:
             return {
@@ -115,7 +116,7 @@ def compute_cycle_stats_from_period_starts(user_id: str) -> Dict:
         }
 
 
-def update_user_cycle_stats(user_id: str) -> None:
+def update_user_cycle_stats(user_id: str, period_starts: Optional[List] = None) -> None:
     """
     Update user's cycle_length in users table based on PeriodStartLogs.
     
@@ -124,12 +125,13 @@ def update_user_cycle_stats(user_id: str) -> None:
     
     Args:
         user_id: User ID
+        period_starts: Optional list from sync_period_start_logs_from_period_logs return. Use after sync to avoid DB read.
     """
     try:
         from database import supabase
         from cycle_utils import update_cycle_length_bayesian
         
-        stats = compute_cycle_stats_from_period_starts(user_id)
+        stats = compute_cycle_stats_from_period_starts(user_id, period_starts=period_starts)
         
         if stats["cycle_count"] > 0:
             # Update cycle_length using Bayesian smoothing
@@ -180,14 +182,12 @@ def get_cycle_stats(user_id: str) -> Dict:
         print(f"   - Period starts from period_start_logs: {len(period_starts)}")
         print(f"   - Cycles from period_starts: {len(cycles)}")
         
-        # FALLBACK: If period_start_logs is empty, try to sync from period_logs
+        # FALLBACK: If period_start_logs is empty, try to sync from period_logs (use return value, no DB read)
         if not period_starts:
             print("⚠️ No period_start_logs found, attempting to sync from period_logs...")
             from period_start_logs import sync_period_start_logs_from_period_logs
-            sync_period_start_logs_from_period_logs(user_id)
-            # Try again after sync
-            period_starts = get_period_start_logs(user_id, confirmed_only=True)
-            cycles = get_cycles_from_period_starts(user_id)
+            period_starts = sync_period_start_logs_from_period_logs(user_id)
+            cycles = get_cycles_from_period_starts(user_id, period_starts=period_starts)
             print(f"   - After sync: {len(period_starts)} period starts, {len(cycles)} cycles")
         
         # If still empty, check period_logs directly as last resort

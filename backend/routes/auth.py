@@ -16,7 +16,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     last_period_date: str  # Required - period start date (source of truth)
-    last_period_end_date: Optional[str] = None  # Optional - period end date
+    avg_bleeding_days: int = 5  # Typical bleeding length (2-8+), default 5
     cycle_length: int = 28  # Required, default 28
     allergies: Optional[list] = None
     language: Optional[str] = "en"
@@ -88,15 +88,31 @@ async def register(request: RegisterRequest):
         
         # Hash password
         hashed_password = get_password_hash(request.password)
-        
-        # Create user - schema has: id, name, email, last_period_date, cycle_length, 
-        # allergies (ARRAY), language, favorite_cuisine, favorite_exercise, interests (ARRAY), created_at, password_hash
+
+        # Clamp cycle_length to 21-45; default 28 if missing or out of range
+        raw_cycle = request.cycle_length or 28
+        try:
+            cycle_length = max(21, min(45, int(raw_cycle)))
+        except (TypeError, ValueError):
+            cycle_length = 28
+
+        # Clamp avg_bleeding_days to 2-8+ (store 8 for "8+")
+        raw_bleeding = getattr(request, "avg_bleeding_days", 5) or 5
+        try:
+            avg_bleeding_days = max(2, min(9, int(raw_bleeding)))  # 2-8, or 9 for "8+"
+            if avg_bleeding_days == 9:
+                avg_bleeding_days = 8  # 8+ stored as 8
+        except (TypeError, ValueError):
+            avg_bleeding_days = 5
+
+        # Create user - schema includes avg_bleeding_days (Integer, default 5)
         user_data = {
             "name": request.name,
             "email": request.email,
             "password_hash": hashed_password,
             "last_period_date": request.last_period_date,
-            "cycle_length": request.cycle_length or 28,
+            "cycle_length": cycle_length,
+            "avg_bleeding_days": avg_bleeding_days,
             "allergies": request.allergies or [],
             "language": request.language or "en",
             "favorite_cuisine": request.favorite_cuisine,
@@ -119,43 +135,23 @@ async def register(request: RegisterRequest):
         user = response.data[0]
         user.pop("password_hash", None)  # Remove password from response
         
-        # SAFETY: Create period_logs entry if last_period_date is provided
-        # This ensures the period is logged with optional end_date
+        # Create first period_logs entry using avg_bleeding_days (end_date = start + (avg_bleeding_days - 1))
         if request.last_period_date:
             try:
                 from datetime import datetime, timedelta
-                
-                # Validate end_date if provided
-                end_date_value = None
+                last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
+                bleeding_days = max(2, min(8, avg_bleeding_days))
+                estimated_end_date = last_period_dt + timedelta(days=bleeding_days - 1)
+                end_date_value = estimated_end_date.strftime("%Y-%m-%d")
+                # Auto-calculated from typical bleeding length; is_manual_end=False
                 is_manual_end_value = False
-                
-                if request.last_period_end_date:
-                    # User provided end_date - validate it
-                    last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
-                    end_date_dt = datetime.strptime(request.last_period_end_date, "%Y-%m-%d").date()
-                    
-                    if end_date_dt < last_period_dt:
-                        # Invalid - end_date before start_date, but don't fail registration
-                        print(f"⚠️ Warning: end_date ({request.last_period_end_date}) < start_date ({request.last_period_date}), ignoring end_date")
-                        end_date_value = None
-                    else:
-                        end_date_value = request.last_period_end_date
-                        is_manual_end_value = True
-                        print(f"✅ Registration: User provided end_date: {end_date_value}")
-                else:
-                    # No end_date provided - auto-assign using default period length (5 days)
-                    last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
-                    default_period_length = 5  # Safe default
-                    estimated_end_date = last_period_dt + timedelta(days=default_period_length - 1)
-                    end_date_value = estimated_end_date.strftime("%Y-%m-%d")
-                    is_manual_end_value = False
-                    print(f"📊 Registration: Auto-assigned end_date: {end_date_value} (default 5 days)")
-                
+                print(f"📊 Registration: end_date={end_date_value} (avg_bleeding_days={bleeding_days})")
+
                 # Create period_logs entry
                 period_log_entry = {
                     "user_id": user["id"],
-                    "date": request.last_period_date,  # start_date (REQUIRED - source of truth)
-                    "end_date": end_date_value,  # Optional - can be NULL or provided/auto-assigned
+                    "date": request.last_period_date,
+                    "end_date": end_date_value,
                     "is_manual_end": is_manual_end_value,
                     "flow": None,
                     "notes": None
@@ -163,47 +159,21 @@ async def register(request: RegisterRequest):
                 
                 supabase.table("period_logs").insert(period_log_entry).execute()
                 print(f"✅ Created period_logs entry for registration: start={request.last_period_date}, end={end_date_value}")
+                # Sync period_start_logs and cycle stats so get_phase_map returns valid calendar on first login
+                try:
+                    from period_start_logs import sync_period_start_logs_from_period_logs
+                    from cycle_stats import update_user_cycle_stats
+                    period_starts = sync_period_start_logs_from_period_logs(user["id"])
+                    update_user_cycle_stats(user["id"], period_starts=period_starts)
+                    print(f"✅ Synced period_start_logs and cycle stats for new user {user['id']}")
+                except Exception as sync_error:
+                    import traceback
+                    print(f"⚠️ Warning: Failed to sync period_start_logs/cycle_stats during registration: {str(sync_error)}")
+                    print(traceback.format_exc())
             except Exception as period_log_error:
                 # Don't fail registration if period log creation fails, but log it
                 import traceback
                 print(f"⚠️ Warning: Failed to create period_logs entry during registration: {str(period_log_error)}")
-                print(traceback.format_exc())
-        
-        # Auto-generate cycle predictions if last_period_date is provided
-        if request.last_period_date:
-            try:
-                from cycle_utils import calculate_phase_for_date_range
-                from datetime import datetime, timedelta
-                
-                # Generate cycle predictions using local adaptive algorithms
-                last_period_date = request.last_period_date
-                cycle_length = request.cycle_length or 28
-                
-                # Calculate date range: from last period to 60 days ahead
-                last_period_dt = datetime.strptime(last_period_date, "%Y-%m-%d")
-                today = datetime.now()
-                start_date = last_period_date
-                end_date = (today + timedelta(days=60)).strftime("%Y-%m-%d")
-                
-                # Generate predictions using local adaptive algorithms
-                print(f"Auto-generating cycle predictions for new user {user['id']}")
-                phase_mappings = calculate_phase_for_date_range(
-                    user_id=user["id"],
-                    last_period_date=last_period_date,
-                    cycle_length=int(cycle_length),
-                    start_date=start_date,
-                    end_date=end_date
-                )
-                
-                # Store predictions in database
-                if phase_mappings:
-                    from cycle_utils import store_cycle_phase_map
-                    store_cycle_phase_map(user["id"], phase_mappings, update_future_only=False)
-                    print(f"Cycle predictions generated successfully for user {user['id']} ({len(phase_mappings)} days)")
-            except Exception as pred_error:
-                # Don't fail registration if prediction fails, but log it
-                import traceback
-                print(f"Warning: Failed to generate cycle predictions during registration: {str(pred_error)}")
                 print(traceback.format_exc())
         
         # Create access token

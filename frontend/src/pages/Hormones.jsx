@@ -213,6 +213,10 @@ const Hormones = () => {
 
         {(loadingWellness || fetchingData) ? (
           <LoadingSpinner message="Loading hormone data..." />
+        ) : !currentPhase || !currentPhase.phase_day_id ? (
+          <div className="text-center py-12 bg-white rounded-lg shadow-lg">
+            <p className="text-gray-600 text-lg mb-2">Log your period dates to get these details</p>
+          </div>
         ) : todayData && todayData !== null ? (
           <div className="space-y-6">
             {/* Mood Insights, Energy Insights, Best Work Type - Side by Side */}

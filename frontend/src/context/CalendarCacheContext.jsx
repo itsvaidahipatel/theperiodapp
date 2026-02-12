@@ -133,7 +133,7 @@ export const CalendarCacheProvider = ({ children }) => {
     return !hasLoaded || Object.keys(cachedPhaseMap).length === 0
   }, [cachedPhaseMap, hasLoaded])
 
-  // Listen for reset events to clear cache
+  // Listen for reset events and auth changes to clear cache
   useEffect(() => {
     const handleResetAllCycles = () => {
       console.log('🔄 Reset all cycles event - clearing calendar cache')
@@ -145,12 +145,19 @@ export const CalendarCacheProvider = ({ children }) => {
       clearCache()
     }
     
+    const handleAuthSuccess = () => {
+      console.log('🔄 Auth success - clearing calendar phase map cache for clean slate')
+      clearCache()
+    }
+    
     window.addEventListener('resetAllCycles', handleResetAllCycles)
     window.addEventListener('resetLastPeriod', handleResetLastPeriod)
+    window.addEventListener('authSuccess', handleAuthSuccess)
     
     return () => {
       window.removeEventListener('resetAllCycles', handleResetAllCycles)
       window.removeEventListener('resetLastPeriod', handleResetLastPeriod)
+      window.removeEventListener('authSuccess', handleAuthSuccess)
     }
   }, [clearCache])
 

@@ -20,6 +20,7 @@ security = HTTPBearer()
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     # cycle_length and last_period_date are NOT updatable via profile (managed automatically)
+    avg_bleeding_days: Optional[int] = None  # Typical bleeding length (2-8), used for auto end_date
     allergies: Optional[list] = None
     language: Optional[str] = None
     favorite_cuisine: Optional[str] = None
@@ -57,8 +58,11 @@ async def update_profile(
     try:
         user_id = current_user["id"]
         update_data = profile_data.dict(exclude_unset=True)
+        # Clamp avg_bleeding_days to 2-8 if present
+        if "avg_bleeding_days" in update_data and update_data["avg_bleeding_days"] is not None:
+            update_data["avg_bleeding_days"] = max(2, min(8, int(update_data["avg_bleeding_days"])))
         # Note: updated_at column doesn't exist in database, so we skip it
-        
+
         response = supabase.table("users").update(update_data).eq("id", user_id).execute()
         
         if not response.data:
@@ -468,11 +472,11 @@ async def reset_last_period(current_user: dict = Depends(get_current_user)):
         print(f"✅ Updated last_period_date to: {new_last_period_date}")
         
         # Step 4: Sync period_start_logs (rebuild from remaining period_logs)
-        sync_period_start_logs_from_period_logs(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(user_id)
         print(f"✅ Synced period_start_logs")
         
-        # Step 5: Update cycle stats
-        update_user_cycle_stats(user_id)
+        # Step 5: Update cycle stats (use returned data to avoid DB read)
+        update_user_cycle_stats(user_id, period_starts=period_starts)
         print(f"✅ Updated cycle stats")
         
         # Step 6: Regenerate predictions from the new last confirmed period

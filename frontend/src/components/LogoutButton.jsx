@@ -8,10 +8,13 @@ const LogoutButton = () => {
   const handleLogout = async () => {
     try {
       await logout()
+      sessionStorage.clear()
+      localStorage.removeItem('access_token')
+      localStorage.removeItem('user')
       navigate('/login')
     } catch (error) {
       console.error('Logout error:', error)
-      // Still navigate even if API call fails
+      sessionStorage.clear()
       localStorage.removeItem('access_token')
       localStorage.removeItem('user')
       navigate('/login')

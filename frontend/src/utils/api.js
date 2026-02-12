@@ -5,8 +5,11 @@ const getToken = () => {
   return localStorage.getItem('access_token')
 }
 
-// Helper function to make API requests
-const apiRequest = async (endpoint, options = {}) => {
+// Request deduplication: Track in-flight requests to prevent duplicates
+const pendingRequests = new Map()
+
+// Helper function to make API requests with retry for 502/503 errors
+const apiRequest = async (endpoint, options = {}, retryCount = 0) => {
   const token = getToken()
   
   // CRITICAL: Protected endpoints require authentication
@@ -25,6 +28,19 @@ const apiRequest = async (endpoint, options = {}) => {
     throw error
   }
   
+  // REQUEST DEDUPLICATION: Check if same request is already in progress
+  const requestKey = `${options.method || 'GET'}:${endpoint}`
+  if (pendingRequests.has(requestKey)) {
+    console.log(`⏳ Request deduplication: Waiting for existing request to ${endpoint}`)
+    // Wait for the existing request to complete
+    try {
+      return await pendingRequests.get(requestKey)
+    } catch (error) {
+      // If the existing request failed, we'll retry below
+      pendingRequests.delete(requestKey)
+    }
+  }
+  
   const headers = {
     'Content-Type': 'application/json',
     ...options.headers,
@@ -34,48 +50,73 @@ const apiRequest = async (endpoint, options = {}) => {
     headers['Authorization'] = `Bearer ${token}`
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
-    headers,
-  })
-
-  if (!response.ok) {
-    let errorData
+  // Create promise for this request
+  const requestPromise = (async () => {
     try {
-      errorData = await response.json()
-    } catch {
-      errorData = { detail: `HTTP ${response.status}: ${response.statusText}` }
-    }
-    
-    // Handle authentication errors (401/403) - clear invalid token
-    if (response.status === 401 || response.status === 403) {
-      // Clear invalid token
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
-      
-      // Only redirect if not already on login/register/home page
-      // Don't redirect from home page - it's a public route
-      const currentPath = window.location.pathname
-      const isPublicRoute = currentPath === '/' || 
-                           currentPath === '/login' || 
-                           currentPath === '/register' ||
-                           currentPath.startsWith('/login') ||
-                           currentPath.startsWith('/register')
-      
-      if (!isPublicRoute) {
-        // Redirect to login after a short delay to allow error to be logged
-        setTimeout(() => {
-          window.location.href = '/login'
-        }, 100)
-      }
-    }
-    
-    const error = new Error(errorData.detail || errorData.message || 'Request failed')
-    error.response = { data: errorData, status: response.status }
-    throw error
-  }
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        ...options,
+        headers,
+      })
 
-  return response.json()
+      // Handle 502/503 errors (Cloudflare/Supabase temporary errors) with retry
+      if (response.status === 502 || response.status === 503) {
+        if (retryCount < 3) {
+          const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000) // Exponential backoff: 1s, 2s, 4s
+          console.log(`⚠️ Server error ${response.status} (attempt ${retryCount + 1}/3), retrying in ${retryDelay}ms...`)
+          await new Promise(resolve => setTimeout(resolve, retryDelay))
+          return apiRequest(endpoint, options, retryCount + 1)
+        } else {
+          throw new Error(`Server temporarily unavailable (${response.status}). Please try again in a moment.`)
+        }
+      }
+
+      if (!response.ok) {
+        let errorData
+        try {
+          errorData = await response.json()
+        } catch {
+          errorData = { detail: `HTTP ${response.status}: ${response.statusText}` }
+        }
+        
+        // Handle authentication errors (401/403) - clear invalid token
+        if (response.status === 401 || response.status === 403) {
+          // Clear invalid token
+          localStorage.removeItem('access_token')
+          localStorage.removeItem('user')
+          
+          // Only redirect if not already on login/register/home page
+          // Don't redirect from home page - it's a public route
+          const currentPath = window.location.pathname
+          const isPublicRoute = currentPath === '/' || 
+                               currentPath === '/login' || 
+                               currentPath === '/register' ||
+                               currentPath.startsWith('/login') ||
+                               currentPath.startsWith('/register')
+          
+          if (!isPublicRoute) {
+            // Redirect to login after a short delay to allow error to be logged
+            setTimeout(() => {
+              window.location.href = '/login'
+            }, 100)
+          }
+        }
+        
+        const error = new Error(errorData.detail || errorData.message || 'Request failed')
+        error.response = { data: errorData, status: response.status }
+        throw error
+      }
+
+      return response.json()
+    } finally {
+      // Remove from pending requests when done
+      pendingRequests.delete(requestKey)
+    }
+  })()
+
+  // Store the promise for deduplication
+  pendingRequests.set(requestKey, requestPromise)
+  
+  return requestPromise
 }
 
 // Auth API functions
@@ -85,10 +126,15 @@ export const registerUser = async (payload) => {
     body: JSON.stringify(payload),
   })
   if (data.access_token) {
+    // Clean slate: clear session and calendar caches before redirect
+    sessionStorage.clear()
+    localStorage.removeItem('calendar_phase_map_cache')
+    localStorage.removeItem('calendar_period_logs_cache')
+    localStorage.removeItem('calendar_last_load_time')
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('user', JSON.stringify(data.user))
-    // Clear selectedLanguage after successful registration - user now has saved preference
     localStorage.removeItem('selectedLanguage')
+    window.dispatchEvent(new CustomEvent('authSuccess'))
   }
   return data
 }
@@ -99,10 +145,15 @@ export const loginUser = async (payload) => {
     body: JSON.stringify(payload),
   })
   if (data.access_token) {
+    // Clean slate: clear session and calendar caches before redirect
+    sessionStorage.clear()
+    localStorage.removeItem('calendar_phase_map_cache')
+    localStorage.removeItem('calendar_period_logs_cache')
+    localStorage.removeItem('calendar_last_load_time')
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('user', JSON.stringify(data.user))
-    // Clear selectedLanguage after successful login - user should use saved preference
     localStorage.removeItem('selectedLanguage')
+    window.dispatchEvent(new CustomEvent('authSuccess'))
   }
   return data
 }
@@ -112,8 +163,12 @@ export const getMe = async () => {
 }
 
 export const logout = async () => {
+  sessionStorage.clear()
   localStorage.removeItem('access_token')
   localStorage.removeItem('user')
+  localStorage.removeItem('calendar_phase_map_cache')
+  localStorage.removeItem('calendar_period_logs_cache')
+  localStorage.removeItem('calendar_last_load_time')
   return { msg: 'logged out' }
 }
 
@@ -165,6 +220,11 @@ export const resetLastPeriod = async () => {
   return apiRequest('/user/reset-last-period', {
     method: 'POST',
   })
+}
+
+/** Temporary debug: run 6-month phase analysis; backend prints [DEBUG] lines to terminal. */
+export const runSixMonthDiagnostic = async () => {
+  return apiRequest('/debug/analyze-phases')
 }
 
 // Period API functions

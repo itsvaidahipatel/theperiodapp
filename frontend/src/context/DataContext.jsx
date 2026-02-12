@@ -181,6 +181,15 @@ export const DataProvider = ({ children }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // Only run on mount - checkAndLoadData is stable (useCallback with empty deps)
 
+  // Listen for auth success (login/register) - reset phase map so dashboard gets fresh data
+  useEffect(() => {
+    const handleAuthSuccess = () => {
+      setDashboardData(prev => (prev ? { ...prev, phaseMap: {} } : null))
+    }
+    window.addEventListener('authSuccess', handleAuthSuccess)
+    return () => window.removeEventListener('authSuccess', handleAuthSuccess)
+  }, [])
+
   // Listen for period log events (clear cache and reload)
   useEffect(() => {
     const handlePeriodLogged = () => {
@@ -229,13 +238,19 @@ export const DataProvider = ({ children }) => {
     checkAndLoadData(true)
   }, [checkAndLoadData])
 
+  // Allow PeriodCalendar (or any consumer) to update phase map so Dashboard can show todayPhase
+  const updatePhaseMap = useCallback((phaseMap) => {
+    setDashboardData(prev => (prev ? { ...prev, phaseMap: phaseMap || {} } : { phaseMap: phaseMap || {} }))
+  }, [])
+
   const value = {
     dashboardData,
     wellnessData,
     loading,
     loadingWellness,
     error,
-    refreshData
+    refreshData,
+    updatePhaseMap
   }
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>

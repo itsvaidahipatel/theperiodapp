@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { X } from 'lucide-react'
-import { logPeriod, logPeriodEnd } from '../utils/api'
+import { logPeriod } from '../utils/api'
 import { formatDateForInput } from '../utils/indianDate'
 
-const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate, isLoggingEnd = false }) => {
+const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
   const [formData, setFormData] = useState({
     date: selectedDate || formatDateForInput(new Date()),
   })
@@ -46,29 +46,16 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate, isLoggingEnd
     }
 
     try {
-      if (isLoggingEnd) {
-        // Log period end
-        const response = await logPeriodEnd({ date: formData.date })
-        if (response.error) {
-          setError(response.error)
-          setLoading(false)
-          return
-        }
-        await onSuccess({ date: formData.date })
-      } else {
-        // Log period start
-        const response = await logPeriod(formData)
-        if (response.error) {
-          setError(response.error)
-          setLoading(false)
-          return
-        }
-        await onSuccess(formData)
+      const response = await logPeriod(formData)
+      if (response.error) {
+        setError(response.error)
+        setLoading(false)
+        return
       }
+      await onSuccess(formData)
       onClose()
     } catch (err) {
-      // Handle validation errors from backend
-      const errorMessage = err.response?.data?.detail || err.message || (isLoggingEnd ? 'Failed to log period end' : 'Failed to log period')
+      const errorMessage = err.response?.data?.detail || err.message || 'Failed to log period'
       setError(errorMessage)
       setLoading(false)
     }
@@ -81,7 +68,7 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate, isLoggingEnd
       <div className="bg-white rounded-lg max-w-md w-full max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center p-6 border-b">
           <h2 className="text-2xl font-bold text-period-pink">
-            {isLoggingEnd ? 'Log Period End' : 'Log Period Start'}
+            Log Period Start
           </h2>
           <button
             onClick={onClose}
@@ -92,25 +79,15 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate, isLoggingEnd
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          {!isLoggingEnd && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-              <p className="text-sm text-blue-800">
-                <strong>Note:</strong> Log only the date your period started. The system will automatically track the full period duration based on your cycle history.
-              </p>
-            </div>
-          )}
-          
-          {isLoggingEnd && (
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
-              <p className="text-sm text-green-800">
-                <strong>Note:</strong> Select the last day of your period. This helps the system learn your exact period length for better predictions.
-              </p>
-            </div>
-          )}
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+            <p className="text-sm text-blue-800">
+              <strong>Note:</strong> Log only the date your period started. The system will automatically set the period end based on your typical bleeding length.
+            </p>
+          </div>
           
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              {isLoggingEnd ? 'Period End Date' : 'Period Start Date'}
+              Period Start Date
             </label>
             <input
               type="date"
@@ -121,7 +98,7 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate, isLoggingEnd
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
             <p className="text-xs text-gray-500 mt-1">
-              {isLoggingEnd ? 'Select the last day of your period' : 'Select the first day of your period'}
+              Select the first day of your period
             </p>
           </div>
 
@@ -144,7 +121,7 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate, isLoggingEnd
               disabled={loading}
               className="flex-1 bg-period-pink text-white px-4 py-2 rounded-lg hover:bg-opacity-90 transition disabled:opacity-50"
             >
-              {loading ? 'Saving...' : (isLoggingEnd ? 'Log End' : 'Log Start')}
+              {loading ? 'Saving...' : 'Log Start'}
             </button>
           </div>
         </form>

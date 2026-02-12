@@ -318,6 +318,10 @@ const Exercise = () => {
 
         {(loadingWellness || loadingCategory) ? (
           <LoadingSpinner message="Loading exercise data..." />
+        ) : !currentPhase || !currentPhase.phase_day_id ? (
+          <div className="text-center py-12 bg-white rounded-lg shadow-lg">
+            <p className="text-gray-600 text-lg mb-2">Log your period dates to get these details</p>
+          </div>
         ) : filteredExercises && Array.isArray(filteredExercises) && filteredExercises.length > 0 ? (
           <div className="space-y-6">
             {/* Energy Level */}

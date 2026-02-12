@@ -8,11 +8,15 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
   const { t } = useTranslation(isLogin)
   const selectedLanguage = getSelectedLanguage()
   
+  const BLEEDING_OPTIONS = [2, 3, 4, 5, 6, 7, 8] // 8 = "8+"
+  const CYCLE_LENGTH_OPTIONS = [21, 24, 28, 30, 32, 35, 40, 45]
+
   const [formData, setFormData] = useState({
     name: '',
     email: '',
     password: '',
     last_period_date: '',
+    avg_bleeding_days: 5,
     cycle_length: 28,
     allergies: [],
     language: selectedLanguage,
@@ -40,21 +44,23 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
     const { name, value } = e.target
     setFormData((prev) => ({
       ...prev,
-      [name]: value,
+      [name]: name === 'cycle_length' ? (value === '' ? 28 : parseInt(value, 10)) : value,
     }))
   }
 
   const handleSubmit = (e) => {
     e.preventDefault()
     const submitData = { ...formData }
-    
-    // Clean up empty optional fields
+    if (!isLogin) {
+      const cl = submitData.cycle_length
+      submitData.cycle_length = Math.min(45, Math.max(21, typeof cl === 'number' ? cl : (parseInt(cl, 10) || 28)))
+      submitData.avg_bleeding_days = Math.min(8, Math.max(2, parseInt(submitData.avg_bleeding_days, 10) || 5))
+    }
     if (!submitData.last_period_date) delete submitData.last_period_date
     if (!submitData.favorite_cuisine) delete submitData.favorite_cuisine
     if (!submitData.favorite_exercise) delete submitData.favorite_exercise
     if (submitData.allergies.length === 0) delete submitData.allergies
     if (submitData.interests.length === 0) delete submitData.interests
-    
     onSubmit(submitData)
   }
 
@@ -121,7 +127,7 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
         <>
           <div>
             <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
-              {t('auth.lastPeriodDate')} <span className="text-red-500">*</span>
+              {t('auth.periodStartDate')} <span className="text-red-500">*</span>
             </label>
             <input
               type="date"
@@ -132,23 +138,51 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
               max={new Date().toISOString().split('T')[0]}
               className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
             />
-            <p className="text-xs text-gray-500 mt-1.5">{t('auth.lastPeriodDate')}</p>
+          </div>
+
+          <div>
+            <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
+              {t('auth.typicalBleedingLength')}
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {BLEEDING_OPTIONS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setFormData((prev) => ({ ...prev, avg_bleeding_days: n }))}
+                  className={`px-4 py-2 rounded-lg font-medium transition ${
+                    formData.avg_bleeding_days === n
+                      ? 'bg-period-pink text-white ring-2 ring-period-pink ring-offset-1'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {n === 8 ? '8+' : n}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 mt-1.5">{t('auth.typicalBleedingLengthHelp')}</p>
           </div>
 
           <div>
             <label className="block text-sm sm:text-base font-medium text-gray-700 mb-2">
               {t('auth.cycleLength')} <span className="text-red-500">*</span>
             </label>
-            <input
-              type="number"
-              name="cycle_length"
-              value={formData.cycle_length}
-              onChange={handleChange}
-              required
-              min={21}
-              max={35}
-              className="w-full px-4 py-3 sm:py-2.5 text-base sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-period-pink focus:border-transparent"
-            />
+            <div className="flex flex-wrap gap-2">
+              {CYCLE_LENGTH_OPTIONS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setFormData((prev) => ({ ...prev, cycle_length: n }))}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
+                    formData.cycle_length === n
+                      ? 'bg-period-pink text-white ring-2 ring-period-pink ring-offset-1'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
             <p className="text-xs text-gray-500 mt-1.5">{t('auth.cycleLengthHelp')}</p>
           </div>
 

@@ -89,13 +89,15 @@ const Chat = () => {
   const handleLogout = async () => {
     try {
       await logout()
-      // Clear chat cache on logout
+      sessionStorage.clear()
       clearChatCache()
-      navigate('/login')
-    } catch (error) {
       localStorage.removeItem('access_token')
       localStorage.removeItem('user')
-      // Clear chat cache on logout
+      navigate('/login')
+    } catch (error) {
+      sessionStorage.clear()
+      localStorage.removeItem('access_token')
+      localStorage.removeItem('user')
       clearChatCache()
       navigate('/login')
     }

@@ -13,9 +13,7 @@ from cycle_utils import (
 
 router = APIRouter()
 
-# In-memory guard to prevent duplicate prediction jobs per user
-# Key: user_id, Value: timestamp when prediction started
-_prediction_in_progress: Dict[str, float] = {}
+# NOTE: _prediction_in_progress removed - predictions are now calculated synchronously on-demand
 
 class CyclePredictionRequest(BaseModel):
     past_cycle_data: List[Dict]
@@ -91,80 +89,76 @@ async def get_current_phase(
     date: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
-    """Get current phase-day information for user. Fast lookup with minimal calculation."""
+    """Get current phase using the same logic as the calendar (calculate_phase_for_date_range).
+    If the date is inside a period_log, phase is always Period (p1, p2, ...)."""
     try:
+        from database import supabase
+        from cycle_utils import get_period_phase_day_from_logs, calculate_phase_for_date_range
+
         user_id = current_user["id"]
         check_date = date or datetime.now().strftime("%Y-%m-%d")
-        
-        # PREFER ACTUAL DATA: First check if date is in a logged period (actual data)
-        from cycle_utils import is_date_in_logged_period
-        is_actual = is_date_in_logged_period(user_id, check_date)
-        
-        # FAST PATH: Try to get from stored cycle predictions first
-        # prefer_actual=True means we'll use predicted data if actual doesn't exist
-        phase_info = get_user_phase_day(user_id, check_date, prefer_actual=True)
-        
-        if phase_info and phase_info.get("phase") and phase_info.get("phase_day_id"):
-            # Check if today is p1 (first day of period) - auto-update last_period_date
-            phase_day_id = phase_info.get("phase_day_id", "").lower()
-            if phase_day_id == "p1":
-                # Auto-update last_period_date to today
-                from database import supabase
-                supabase.table("users").update({
-                    "last_period_date": check_date
-                }).eq("id", user_id).execute()
-                print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 detected)")
-            
-            # Mark if this is actual or predicted data
-            phase_info["is_actual"] = is_actual
-            return phase_info
-        
-        # FAST FALLBACK: Use calculate_today_phase_day_id (fast, single-date calculation)
-        # This is much faster than calculating a full date range
-        # This is predicted data (no actual logged period for this date)
-        from cycle_utils import calculate_today_phase_day_id
-        today_phase_day_id = calculate_today_phase_day_id(user_id)
-        
-        if today_phase_day_id:
-            # Determine phase from phase_day_id
-            phase_map = {
-                "p": "Period",
-                "f": "Follicular", 
-                "o": "Ovulation",
-                "l": "Luteal"
+
+        # 1) Fetch user and period_logs once (same as phase-map)
+        user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+        if not user_response.data or not user_response.data[0]:
+            return {"phase": None, "phase_day_id": None, "id": None, "message": "User data not found."}
+        user = user_response.data[0]
+        last_period_date = user.get("last_period_date") or datetime.now().strftime("%Y-%m-%d")
+        if hasattr(last_period_date, "strftime"):
+            last_period_date = last_period_date.strftime("%Y-%m-%d")
+        cycle_length = int(user.get("cycle_length", 28))
+
+        logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+        period_logs = logs_response.data or []
+
+        # 2) If date is inside a period_log, always return Period + pN (matches calendar)
+        period_day_id = get_period_phase_day_from_logs(user_id, period_logs, check_date)
+        if period_day_id is not None:
+            if period_day_id.lower() == "p1":
+                supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
+                print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 in log)")
+            return {
+                "phase": "Period",
+                "phase_day_id": period_day_id,
+                "date": check_date,
+                "is_actual": True,
             }
-            phase_prefix = today_phase_day_id[0].lower()
-            phase = phase_map.get(phase_prefix, "Period")
-            
-            # Check if today is p1 - auto-update last_period_date
-            if today_phase_day_id.lower() == "p1":
-                from database import supabase
-                supabase.table("users").update({
-                    "last_period_date": check_date
-                }).eq("id", user_id).execute()
-                print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 calculated)")
-            
+
+        # 3) Use same math as calendar: single-day calculate_phase_for_date_range
+        phase_mappings = calculate_phase_for_date_range(
+            user_id=user_id,
+            last_period_date=last_period_date,
+            cycle_length=cycle_length,
+            period_logs=period_logs,
+            start_date=check_date,
+            end_date=check_date,
+        )
+        if phase_mappings and len(phase_mappings) >= 1:
+            m = phase_mappings[0]
+            phase = m.get("phase") or "Follicular"
+            phase_day_id = m.get("phase_day_id") or "f1"
+            if phase_day_id.lower() == "p1":
+                supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
+                print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 from calc)")
             return {
                 "phase": phase,
-                "phase_day_id": today_phase_day_id,
+                "phase_day_id": phase_day_id,
                 "date": check_date,
-                "calculated": True,
-                "is_actual": False  # This is predicted data
+                "is_actual": False,
+                **{k: m[k] for k in ("fertility_prob", "predicted_ovulation_date", "luteal_estimate") if k in m},
             }
-        
-        # No data available
+
+        # Fallback: no phase data
         return {
             "phase": None,
             "phase_day_id": None,
             "id": None,
             "message": "No phase data available. Please set your last period date."
         }
-    
     except Exception as e:
         import traceback
         print(f"❌ Error in get_current_phase: {str(e)}")
         traceback.print_exc()
-        # Return a response instead of raising an error
         return {
             "phase": None,
             "phase_day_id": None,
@@ -172,154 +166,35 @@ async def get_current_phase(
             "message": f"No phase data available: {str(e)}"
         }
 
-async def _generate_phase_map_background(
-    user_id: str,
-    start_date: Optional[str],
-    end_date: Optional[str],
-    last_period_date_str: str,
-    cycle_length_int: int
-):
-    """Background task to generate phase map predictions."""
-    try:
-        from cycle_utils import calculate_phase_for_date_range, store_cycle_phase_map
-        from prediction_cache import get_first_logged_period_date
-        
-        # Get first logged period date - we don't need predictions before this
-        first_period_date = get_first_logged_period_date(user_id)
-        
-        # Adjust start_date to not be before first logged period
-        if first_period_date and start_date:
-            first_period_dt = datetime.strptime(first_period_date, "%Y-%m-%d")
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            
-            if start_dt < first_period_dt:
-                # Start from first day of month containing first logged period
-                start_date = first_period_dt.replace(day=1).strftime("%Y-%m-%d")
-                print(f"📅 Adjusted start_date to first logged period month: {start_date}")
-        
-        print(f"🔄 BACKGROUND: Generating predictions for user {user_id} ({start_date} to {end_date})")
-        
-        calculated_map = calculate_phase_for_date_range(
-            user_id=user_id,
-            last_period_date=last_period_date_str,
-            cycle_length=cycle_length_int,
-            start_date=start_date,
-            end_date=end_date
-        )
-        
-        if calculated_map:
-            # Store predictions in database
-            store_cycle_phase_map(user_id, calculated_map, update_future_only=False)
-            print(f"✅ BACKGROUND: Stored {len(calculated_map)} phase mappings for user {user_id}")
-        else:
-            print(f"⚠️ BACKGROUND: No phase mappings generated for user {user_id}")
-            
-    except Exception as e:
-        print(f"❌ BACKGROUND: Error generating phase map for user {user_id}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # Clear the in-progress flag
-        if user_id in _prediction_in_progress:
-            del _prediction_in_progress[user_id]
-            print(f"✅ BACKGROUND: Cleared prediction_in_progress flag for user {user_id}")
+# NOTE: _generate_phase_map_background removed - predictions are now calculated synchronously on-demand
 
 @router.get("/phase-map")
 async def get_phase_map(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    force_recalculate: bool = False,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    force_recalculate: bool = False,  # Kept for API compatibility but ignored
     current_user: dict = Depends(get_current_user)
 ):
-    """Get phase mappings for a date range. Calculates on the fly if not in database.
+    """
+    Get phase mappings for a date range. Calculates on-demand in RAM.
+    
+    NEW STATELESS ARCHITECTURE:
+    - Fetches period_logs once (source of truth)
+    - Calculates phases in RAM using calculate_phase_for_date_range()
+    - Returns JSON immediately (no background tasks, no DB writes)
     
     Args:
         start_date: Start date for phase map (YYYY-MM-DD)
         end_date: End date for phase map (YYYY-MM-DD)
-        force_recalculate: If True, force regeneration even if data exists in database
+        force_recalculate: Ignored (always calculates fresh)
     """
     try:
         user_id = current_user["id"]
         
-        # Try to get from database first (stored predictions)
-        query = supabase.table("user_cycle_days").select("*").eq("user_id", user_id)
-        
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
-        
-        try:
-            response = query.order("date").execute()
-            stored_data = response.data or []
-        except Exception as db_error:
-            print(f"Database query error (non-fatal, will calculate): {str(db_error)}")
-            stored_data = []
-        
-        print(f"Retrieved {len(stored_data)} stored phase mappings for user {user_id}")
-        
-        # If force_recalculate is True, delete old data first
-        if force_recalculate and stored_data:
-            print("🔄 Force recalculation requested - clearing old phase map data...")
-            try:
-                delete_query = supabase.table("user_cycle_days").delete().eq("user_id", user_id)
-                if start_date:
-                    delete_query = delete_query.gte("date", start_date)
-                if end_date:
-                    delete_query = delete_query.lte("date", end_date)
-                delete_query.execute()
-                print("✅ Old phase map data cleared")
-                stored_data = []  # Clear stored_data so we regenerate
-            except Exception as delete_error:
-                print(f"⚠️ Error clearing old data (non-fatal): {str(delete_error)}")
-        
-        # If we have stored data, return it IMMEDIATELY (unless force_recalculate is True)
-        # This is FAST - no calculation needed
-        if stored_data and not force_recalculate:
-            print(f"⚡ FAST PATH: Returning {len(stored_data)} stored predictions from database")
-            # Convert stored data to the expected format - optimized for speed
-            formatted_data = []
-            for item in stored_data:
-                formatted_data.append({
-                    "date": item.get("date"),
-                    "phase": item.get("phase"),
-                    "phase_day_id": item.get("phase_day_id") or item.get("id"),
-                    "fertility_prob": item.get("fertility_prob") or 0,
-                    "is_predicted": item.get("is_predicted", True)
-                })
-            return {"phase_map": formatted_data}
-        
-        # Check if prediction is already in progress for this user
-        import time
-        current_time = time.time()
-        prediction_started = _prediction_in_progress.get(user_id)
-        
-        # If prediction started more than 5 minutes ago, consider it stale and allow new one
-        if prediction_started and (current_time - prediction_started) < 300:
-            print(f"⏳ Prediction already in progress for user {user_id} (started {int(current_time - prediction_started)}s ago)")
-            from fastapi.responses import JSONResponse
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "status": "processing",
-                    "message": "Predictions are being generated in the background. Please try again in a moment.",
-                    "phase_map": []  # Return empty array to prevent frontend errors
-                }
-            )
-        
-        # Mark prediction as in progress
-        _prediction_in_progress[user_id] = current_time
-        print(f"🚀 Starting background prediction for user {user_id}")
-        
-        # Get user data (needed for background task)
+        # 1) Get user cycle config
         user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
         
         if not user_response.data or not user_response.data[0]:
-            print("❌ ERROR: No user data found")
-            # Clear the flag
-            if user_id in _prediction_in_progress:
-                del _prediction_in_progress[user_id]
             return {"phase_map": []}
         
         user = user_response.data[0]
@@ -329,8 +204,8 @@ async def get_phase_map(
         if not last_period_date:
             last_period_date = datetime.now().strftime("%Y-%m-%d")
         
-        # Convert last_period_date to string if it's a date object
-        if hasattr(last_period_date, 'strftime'):
+        # Normalize last_period_date to string
+        if hasattr(last_period_date, "strftime"):
             last_period_date_str = last_period_date.strftime("%Y-%m-%d")
         elif isinstance(last_period_date, str):
             last_period_date_str = last_period_date
@@ -339,7 +214,11 @@ async def get_phase_map(
         
         cycle_length_int = int(cycle_length) if cycle_length else 28
         
-        # Validate dates
+        # 2) Fetch period_logs once (source of truth)
+        logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+        period_logs = logs_response.data or []
+        
+        # 3) Validate dates
         try:
             datetime.strptime(last_period_date_str, "%Y-%m-%d")
             if start_date:
@@ -348,49 +227,25 @@ async def get_phase_map(
                 datetime.strptime(end_date, "%Y-%m-%d")
         except Exception as date_error:
             print(f"❌ Invalid date format: {str(date_error)}")
-            # Clear the flag
-            if user_id in _prediction_in_progress:
-                del _prediction_in_progress[user_id]
             return {"phase_map": []}
         
-        # Trigger background task to generate predictions
-        if background_tasks:
-            background_tasks.add_task(
-                _generate_phase_map_background,
-                user_id,
-                start_date,
-                end_date,
-                last_period_date_str,
-                cycle_length_int
-            )
-        else:
-            # Fallback: run in background using asyncio
-            asyncio.create_task(
-                _generate_phase_map_background(
-                    user_id,
-                    start_date,
-                    end_date,
-                    last_period_date_str,
-                    cycle_length_int
-                )
-            )
-        
-        # Return 202 immediately - prediction is running in background
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=202,
-            content={
-                "status": "processing",
-                "message": "Predictions are being generated in the background. Please try again in a moment.",
-                "phase_map": []  # Return empty array to prevent frontend errors
-            }
+        # 4) PURE RAM calculation (no DB I/O inside the function)
+        phase_mappings = calculate_phase_for_date_range(
+            user_id=user_id,
+            last_period_date=last_period_date_str,
+            cycle_length=cycle_length_int,
+            period_logs=period_logs,
+            start_date=start_date,
+            end_date=end_date,
         )
+        
+        # 5) Return directly
+        return {"phase_map": phase_mappings}
     
     except Exception as e:
         print(f"Error getting phase map: {str(e)}")
         import traceback
         traceback.print_exc()
-        # Return empty map instead of raising error
         return {"phase_map": []}
 
 @router.get("/health-check")

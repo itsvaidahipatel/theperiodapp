@@ -29,24 +29,34 @@ MIN_CYCLE_DAYS = 21
 MAX_CYCLE_DAYS = 45
 
 
-def sync_period_start_logs_from_period_logs(user_id: str) -> None:
+def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
     """
-    Sync PeriodStartLogs from period_logs using incremental upserts.
+    Sync PeriodStartLogs from period_logs by COMPLETELY DELETING and REBUILDING.
+    
+    CRITICAL: This function now performs a full rebuild to handle out-of-order period logging.
+    When periods are logged out of chronological order (e.g., Month 4, then Month 3),
+    cycle lengths must be recalculated correctly.
     
     Since period_logs now represents cycle starts (one per cycle),
-    we extract unique dates and create/update PeriodStartLogs.
+    we extract unique dates, SORT BY DATE, and completely rebuild PeriodStartLogs.
     
     Rules:
     - One log = one cycle start
-    - Duplicate dates are prevented (keep latest)
+    - Duplicate dates are prevented (keep first occurrence)
     - Future dates are marked as is_confirmed=false
     - Past dates are marked as is_confirmed=true
-    - Preserves created_at timestamps for existing records
-    - Only updates changed records (is_confirmed status)
-    - Only deletes records that no longer exist in period_logs
+    - COMPLETE REBUILD: Deletes all existing records and inserts fresh ones
+    - SORTED BY DATE: Ensures cycle lengths are calculated correctly even if logged out of order
+    
+    Does NOT call get_period_start_logs() to verify - returns the inserted data directly
+    so callers can use it without a follow-up DB read (avoids 20s sync verification loop).
     
     Args:
         user_id: User ID
+    
+    Returns:
+        List of period-start dicts (same shape as get_period_start_logs): start_date, is_confirmed.
+        Empty list if no records inserted or on error.
     """
     try:
         # Get all period logs (these are cycle start dates)
@@ -67,7 +77,8 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> None:
                     except:
                         continue
         
-        # Sort by date
+        # CRITICAL: Sort by date to ensure correct cycle length calculation
+        # This handles out-of-order logging (e.g., Month 4 logged before Month 3)
         start_dates = sorted(set(start_dates))
         
         # Determine which are confirmed (past dates) vs predicted (future dates)
@@ -76,47 +87,18 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> None:
         # Use service role client if available (bypasses RLS), otherwise use regular client
         client = supabase_admin if supabase_admin else supabase
         
-        # Get existing PeriodStartLogs to compare
-        existing_response = client.table("period_start_logs").select("start_date, is_confirmed").eq("user_id", user_id).execute()
-        existing_logs = existing_response.data or []
+        # COMPLETE REBUILD: Delete ALL existing PeriodStartLogs for this user
+        print(f"🔄 COMPLETE REBUILD: Deleting all existing PeriodStartLogs for user {user_id}")
+        try:
+            client.table("period_start_logs").delete().eq("user_id", user_id).execute()
+            print(f"✅ Deleted all existing PeriodStartLogs for user {user_id}")
+        except Exception as delete_error:
+            print(f"⚠️ Warning: Error deleting existing PeriodStartLogs (non-fatal): {str(delete_error)}")
         
-        # Create sets for comparison
-        expected_dates = {date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date) for date in start_dates}
-        existing_dates = {log["start_date"] for log in existing_logs}
-        
-        # Track what needs to be done
-        dates_to_insert = []
-        dates_to_update = []
-        dates_to_delete = []
-        
-        # Find dates that need to be inserted (new)
-        for start_date in start_dates:
-            date_str = start_date.strftime("%Y-%m-%d") if hasattr(start_date, 'strftime') else str(start_date)
-            if date_str not in existing_dates:
-                dates_to_insert.append(start_date)
-        
-        # Find dates that need to be updated (is_confirmed status changed)
-        existing_by_date = {log["start_date"]: log for log in existing_logs}
-        for start_date in start_dates:
-            date_str = start_date.strftime("%Y-%m-%d") if hasattr(start_date, 'strftime') else str(start_date)
-            if date_str in existing_dates:
-                existing_log = existing_by_date[date_str]
-                new_is_confirmed = start_date <= today
-                if existing_log["is_confirmed"] != new_is_confirmed:
-                    dates_to_update.append((date_str, new_is_confirmed))
-        
-        # Find dates that need to be deleted (no longer in period_logs)
-        for existing_log in existing_logs:
-            if existing_log["start_date"] not in expected_dates:
-                dates_to_delete.append(existing_log["start_date"])
-        
-        # Perform incremental updates
-        stats = {"inserted": 0, "updated": 0, "deleted": 0}
-        
-        # Insert new records
-        if dates_to_insert:
+        # REBUILD: Insert all period starts in sorted order
+        if start_dates:
             insert_data = []
-            for start_date in dates_to_insert:
+            for start_date in start_dates:
                 is_confirmed = start_date <= today
                 insert_data.append({
                     "user_id": user_id,
@@ -124,28 +106,22 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> None:
                     "is_confirmed": is_confirmed
                 })
             
-            client.table("period_start_logs").insert(insert_data).execute()
-            stats["inserted"] = len(insert_data)
-        
-        # Update changed records (is_confirmed status)
-        for date_str, new_is_confirmed in dates_to_update:
-            client.table("period_start_logs").update({
-                "is_confirmed": new_is_confirmed
-            }).eq("user_id", user_id).eq("start_date", date_str).execute()
-            stats["updated"] += 1
-        
-        # Delete records that no longer exist
-        if dates_to_delete:
-            for date_str in dates_to_delete:
-                client.table("period_start_logs").delete().eq("user_id", user_id).eq("start_date", date_str).execute()
-            stats["deleted"] = len(dates_to_delete)
-        
-        # Log summary
-        if any(stats.values()):
-            changes = [f"{k}={v}" for k, v in stats.items() if v > 0]
-            print(f"✅ Incrementally synced PeriodStartLogs for user {user_id}: {', '.join(changes)}")
+            if insert_data:
+                # Execute insert and return inserted data (do NOT call get_period_start_logs to verify)
+                insert_response = client.table("period_start_logs").insert(insert_data).execute()
+                inserted = insert_response.data if insert_response.data else insert_data
+                inserted_count = len(inserted)
+                print(f"✅ REBUILT PeriodStartLogs for user {user_id}: {inserted_count} records inserted (sorted by date)")
+                # Return data in same shape as get_period_start_logs (start_date, is_confirmed)
+                result = [{"start_date": r.get("start_date"), "is_confirmed": r.get("is_confirmed", True)} for r in inserted]
+                if len(start_dates) > 1:
+                    for i in range(len(start_dates) - 1):
+                        cycle_length = (start_dates[i + 1] - start_dates[i]).days
+                        print(f"   Cycle {i+1}: {start_dates[i].strftime('%Y-%m-%d')} to {start_dates[i+1].strftime('%Y-%m-%d')} = {cycle_length} days")
+                return result
         else:
-            print(f"✅ PeriodStartLogs already in sync for user {user_id}")
+            print(f"✅ REBUILT PeriodStartLogs for user {user_id}: 0 records (no period logs found)")
+        return []
     
     except Exception as e:
         error_msg = str(e)
@@ -158,6 +134,7 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> None:
             print(f"Error syncing period start logs: {error_msg}")
         import traceback
         traceback.print_exc()
+        return []
 
 
 def get_period_start_logs(user_id: str, confirmed_only: bool = False) -> List[Dict]:
@@ -185,7 +162,7 @@ def get_period_start_logs(user_id: str, confirmed_only: bool = False) -> List[Di
         return []
 
 
-def get_cycles_from_period_starts(user_id: str) -> List[Dict]:
+def get_cycles_from_period_starts(user_id: str, period_starts: Optional[List[Dict]] = None) -> List[Dict]:
     """
     Derive cycles from PeriodStartLogs.
     
@@ -197,13 +174,16 @@ def get_cycles_from_period_starts(user_id: str) -> List[Dict]:
     
     Args:
         user_id: User ID
+        period_starts: Optional pre-fetched list (e.g. from sync return). If provided, used instead of DB. Filtered by is_confirmed=True.
     
     Returns:
         List of cycle dicts with: cycle_number, start_date, length
     """
     try:
-        # Get confirmed PeriodStartLogs only (for cycle calculation)
-        period_starts = get_period_start_logs(user_id, confirmed_only=True)
+        if period_starts is not None:
+            period_starts = [p for p in period_starts if p.get("is_confirmed", True)]
+        else:
+            period_starts = get_period_start_logs(user_id, confirmed_only=True)
         
         if len(period_starts) < 2:
             return []

@@ -7,7 +7,7 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 
-from routes import auth, user, periods, ai_chat, cycles, wellness, feedback
+from routes import auth, user, periods, ai_chat, cycles, wellness, feedback, debug
 
 # Optional notification service (graceful degradation if apscheduler not installed)
 try:
@@ -45,6 +45,7 @@ app.include_router(ai_chat.router, prefix="/ai", tags=["AI"])
 app.include_router(cycles.router, prefix="/cycles", tags=["Cycles"])
 app.include_router(wellness.router, prefix="/wellness", tags=["Wellness"])
 app.include_router(feedback.router, prefix="/feedback", tags=["Feedback"])
+app.include_router(debug.router, prefix="/debug", tags=["Debug"])
 
 @app.get("/")
 async def root():

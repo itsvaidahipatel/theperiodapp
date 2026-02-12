@@ -5,7 +5,6 @@
 
 import { 
   getCurrentPhase, 
-  getPhaseMap, 
   getPeriodLogs,
   getHormonesData,
   getNutritionData,
@@ -37,78 +36,7 @@ export const loadDashboardData = async () => {
     )
     const currentPhase = await Promise.race([currentPhasePromise, timeoutPromise]).catch(() => null)
     
-    // Get phase map for calendar (3 months: previous, current, next)
-    let phaseMap = {}
-    try {
-      const today = new Date()
-      const startDate = new Date(today.getFullYear(), today.getMonth() - 1, 1)
-      const endDate = new Date(today.getFullYear(), today.getMonth() + 2, 0)
-      
-      const startDateStr = startDate.toISOString().split('T')[0]
-      const endDateStr = endDate.toISOString().split('T')[0]
-      
-      // Get phase map (with built-in retry for 202 status)
-      const phaseMapResponse = await getPhaseMap(startDateStr, endDateStr).catch((err) => {
-        console.warn('Phase map request failed:', err)
-        // If processing, return empty array (will be populated later)
-        if (err.message?.includes('processing') || err.message?.includes('background')) {
-          return { status: 'processing', phase_map: [] }
-        }
-        return { phase_map: [] }
-      })
-      
-      // Handle processing status - don't retry immediately
-      if (phaseMapResponse?.status === 'processing') {
-        console.log('⏳ Phase map is being generated in background - returning empty for now')
-        return {
-          currentPhase: currentPhase || null,
-          phaseMap: null,
-          periodLogs: periodLogs || null
-        }
-      }
-      
-      console.log('📅 Phase map response in dataLoader:', {
-        hasPhaseMap: !!phaseMapResponse?.phase_map,
-        length: phaseMapResponse?.phase_map?.length || 0,
-        first3: phaseMapResponse?.phase_map?.slice(0, 3) || []
-      })
-      if (phaseMapResponse?.phase_map && Array.isArray(phaseMapResponse.phase_map)) {
-        phaseMapResponse.phase_map.forEach((item) => {
-          // Ensure date is in correct format
-          let dateKey = item.date
-          if (dateKey && typeof dateKey === 'string') {
-            // If date includes time, extract just the date part
-            if (dateKey.includes('T')) {
-              dateKey = dateKey.split('T')[0]
-            }
-            
-            // Derive phase from phase_day_id if phase field is missing
-            if (!item.phase && item.phase_day_id) {
-              const phaseDayId = item.phase_day_id.toLowerCase()
-              const firstChar = phaseDayId.charAt(0)
-              if (firstChar === 'p') {
-                item.phase = 'Period'
-              } else if (firstChar === 'f') {
-                item.phase = 'Follicular'
-              } else if (firstChar === 'o') {
-                item.phase = 'Ovulation'
-              } else if (firstChar === 'l') {
-                item.phase = 'Luteal'
-              }
-            }
-            
-            phaseMap[dateKey] = item
-          }
-        })
-        console.log('✅ Processed phase map with', Object.keys(phaseMap).length, 'dates')
-      } else {
-        console.warn('⚠️ Phase map response is not valid:', phaseMapResponse)
-      }
-    } catch (mapError) {
-      console.log('No phase map data available yet:', mapError)
-    }
-    
-    // Get period logs (with timeout)
+    // Phase map is NOT fetched here - only PeriodCalendar fetches it and updates context via updatePhaseMap
     const periodLogsPromise = getPeriodLogs().catch(() => null)
     const periodLogsTimeout = new Promise((_, reject) => 
       setTimeout(() => reject(new Error('Period logs timeout')), 10000)
@@ -117,7 +45,7 @@ export const loadDashboardData = async () => {
     
     return {
       currentPhase: currentPhase || null,
-      phaseMap: Object.keys(phaseMap).length > 0 ? phaseMap : null,
+      phaseMap: null,
       periodLogs: periodLogs || null
     }
   } catch (error) {

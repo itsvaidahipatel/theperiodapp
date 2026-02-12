@@ -364,6 +364,10 @@ const Nutrition = () => {
 
         {(loadingWellness || loadingCuisine) ? (
           <LoadingSpinner message="Loading nutrition data..." />
+        ) : !currentPhase || !currentPhase.phase_day_id ? (
+          <div className="text-center py-12 bg-white rounded-lg shadow-lg">
+            <p className="text-gray-600 text-lg mb-2">Log your period dates to get these details</p>
+          </div>
         ) : filteredRecipes && Array.isArray(filteredRecipes) && filteredRecipes.length > 0 ? (
           <div className="space-y-6">
             {/* Recipes */}

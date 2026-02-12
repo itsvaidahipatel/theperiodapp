@@ -95,81 +95,63 @@ async def log_period(
         # Check for anomaly
         is_anomaly = check_anomaly(user_id, date_obj)
         
-        # NEW: Check if this date is within an existing period range
-        # If user tries to log a date that's already part of a logged period, reject it
-        from period_start_logs import get_period_start_logs
-        from cycle_utils import estimate_period_length
-        # NOTE: timedelta is already imported at top level - do NOT re-import here
-        
-        existing_starts = get_period_start_logs(user_id, confirmed_only=False)
-        period_length = estimate_period_length(user_id)
-        period_length_days = int(round(max(3.0, min(8.0, period_length))))  # Normalized period length
-        
-        # Check if date falls within any existing period range
-        for start_log in existing_starts:
-            start_date_str = start_log["start_date"]
-            if isinstance(start_date_str, str):
-                start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+        # Check if date falls within any existing period range (from period_logs)
+        period_length_days_for_check = max(2, min(8, int(current_user.get("avg_bleeding_days") or 5)))
+        logs_check = supabase.table("period_logs").select("date", "end_date").eq("user_id", user_id).execute()
+        for row in (logs_check.data or []):
+            start_date_str = row.get("date")
+            if not start_date_str:
+                continue
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date() if isinstance(start_date_str, str) else start_date_str
+            end_date_str = row.get("end_date")
+            if end_date_str:
+                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date() if isinstance(end_date_str, str) else end_date_str
             else:
-                start_date = start_date_str
-            
-            period_end = start_date + timedelta(days=period_length_days - 1)
-            
-            # If logging a date within an existing period range, reject it
-            if start_date <= date_obj <= period_end:
+                end_date = start_date + timedelta(days=period_length_days_for_check - 1)
+            if start_date <= date_obj <= end_date:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"This date falls within an existing period (started {start_date_str}). Please log only the period start date."
                 )
-        
-        # Step 1: Handle end_date (optional - user can provide it or it will be auto-assigned)
-        # SAFETY: Validate end_date if provided
-        end_date_value = None
-        is_manual_end_value = False
-        
-        if log_data.end_date:
-            # User provided end_date - validate it
-            try:
-                end_date_obj_provided = datetime.strptime(log_data.end_date, "%Y-%m-%d").date()
-                if end_date_obj_provided < date_obj:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"End date ({log_data.end_date}) cannot be before start date ({log_data.date})"
-                    )
-                end_date_value = log_data.end_date
-                is_manual_end_value = True  # User manually provided end_date
-            except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid end_date format: {log_data.end_date}. Use YYYY-MM-DD format."
-                )
-        else:
-            # No end_date provided - auto-assign using estimated period length
-            # This ensures system has a complete period range for calculations
-            period_length_days = int(round(max(3.0, min(8.0, period_length))))
-            estimated_end_date = date_obj + timedelta(days=period_length_days - 1)
-            end_date_value = estimated_end_date.strftime("%Y-%m-%d")
-            is_manual_end_value = False  # Auto-assigned, not manually ended
-            print(f"📊 Auto-assigned end_date: {end_date_value} (estimated {period_length_days} days)")
-        
-        # Step 2: Save period START log (end_date is optional but we auto-assign if not provided)
+
+        # Step 1: Auto-assign end_date from user's typical bleeding length (avg_bleeding_days)
+        avg_bleeding_days = int(current_user.get("avg_bleeding_days") or 5)
+        avg_bleeding_days = max(2, min(8, avg_bleeding_days))
+        estimated_end_date = date_obj + timedelta(days=avg_bleeding_days - 1)
+        end_date_value = estimated_end_date.strftime("%Y-%m-%d")
+        is_manual_end_value = False  # Auto-generated from avg_bleeding_days
+        print(f"📊 Auto-assigned end_date: {end_date_value} (avg_bleeding_days={avg_bleeding_days})")
+
+        # Overlap protection: if the previous period (by start date) has auto end_date >= new start, trim it
+        prev_logs = supabase.table("period_logs").select("id", "date", "end_date", "is_manual_end").eq("user_id", user_id).lt("date", log_data.date).order("date", desc=True).limit(1).execute()
+        if prev_logs.data:
+            prev = prev_logs.data[0]
+            prev_end = prev.get("end_date")
+            prev_manual = prev.get("is_manual_end", True)
+            if not prev_manual and prev_end:
+                prev_end_dt = datetime.strptime(prev_end, "%Y-%m-%d").date()
+                if prev_end_dt >= date_obj:
+                    trim_end = date_obj - timedelta(days=1)
+                    trim_end_str = trim_end.strftime("%Y-%m-%d")
+                    supabase.table("period_logs").update({"end_date": trim_end_str}).eq("id", prev["id"]).execute()
+                    print(f"✂️ Trimmed previous period end to {trim_end_str} (overlap protection)")
+
+        # Step 2: Save period START log
         log_entry = {
             "user_id": user_id,
-            "date": log_data.date,  # This is the start_date (REQUIRED - source of truth)
-            "end_date": end_date_value,  # Optional - can be NULL or provided/auto-assigned
-            "is_manual_end": is_manual_end_value,  # True if user provided, False if auto-assigned
+            "date": log_data.date,
+            "end_date": end_date_value,
+            "is_manual_end": is_manual_end_value,
             "flow": log_data.flow,
             "notes": log_data.notes
         }
-        
+
         # Check if this date already exists as a period start
         existing = supabase.table("period_logs").select("*").eq("user_id", user_id).eq("date", log_data.date).execute()
-        
+
         if existing.data:
-            # Update existing log
             response = supabase.table("period_logs").update(log_entry).eq("user_id", user_id).eq("date", log_data.date).execute()
         else:
-            # Insert new period start log
             response = supabase.table("period_logs").insert(log_entry).execute()
         
         if not response.data:
@@ -180,65 +162,33 @@ async def log_period(
         
         print(f"✅ Period log created: start={log_data.date}, end={end_date_value} (manual={is_manual_end_value})")
         
-        # Step 4: Automatically create period days in user_cycle_days based on estimated period length
-        # This ensures the calendar shows the full period range even though user only logged start
-        from cycle_utils import store_cycle_phase_map
-        
-        period_days = []
-        for day_offset in range(period_length_days):
-            period_date = date_obj + timedelta(days=day_offset)
-            period_date_str = period_date.strftime("%Y-%m-%d")
-            
-            # Create phase mapping for this period day
-            period_days.append({
-                "date": period_date_str,
-                "phase": "Period",
-                "phase_day_id": f"p{day_offset + 1}",
-                "fertility_prob": 0
-                # Note: is_predicted column doesn't exist in database, removed to avoid errors
-            })
-        
-        # NOTE: We don't store period days separately here because:
-        # 1. They'll be included in the full phase calculation below
-        # 2. Storing them separately and then deleting them in store_cycle_phase_map causes issues
-        # The phase calculation will create period days based on cycle starts
-        print(f"📝 Period days ({len(period_days)} days) will be created as part of full phase calculation")
+        # NOTE: Period days are no longer stored in user_cycle_days.
+        # Calendar will calculate phases on-demand from period_logs when viewed.
         
         # Step 4: Rebuild PeriodStartLogs (one log = one cycle start)
         from period_start_logs import sync_period_start_logs_from_period_logs
         print(f"🔄 Syncing period_start_logs for user {user_id} after logging period start on {log_data.date}")
-        sync_period_start_logs_from_period_logs(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(user_id)
         
-        # Verify sync worked
-        from period_start_logs import get_period_start_logs
-        synced_starts = get_period_start_logs(user_id, confirmed_only=False)
-        print(f"✅ Verified: {len(synced_starts)} period_start_logs after sync")
-        
-        # Step 5: Recompute cycle stats from PeriodEvents
+        # Step 5: Recompute cycle stats using returned data (no DB read - avoids 20s verification loop)
         from cycle_stats import update_user_cycle_stats
-        update_user_cycle_stats(user_id)
+        update_user_cycle_stats(user_id, period_starts=period_starts)
         
-        # Step 4: Calculate delta BEFORE hard invalidation (we need predicted data to compare)
-        # Calculate delta (difference between predicted and actual period start)
-        # If delta > 3 days, trigger full recalculation
+        # Step 4: Calculate delta (use period_starts from sync return - do NOT re-query DB; avoids 0 records / rebuild loop)
         from cycle_utils import get_user_phase_day
-        from period_start_logs import get_period_start_logs
         # NOTE: datetime is already imported at top level - do NOT re-import here
         
         logged_date = datetime.strptime(log_data.date, "%Y-%m-%d").date()
         delta_days = None
         
-        # Check if there was a predicted period start near this date
+        # Check if there was a predicted period start near this date (use period_starts we already have from sync)
         predicted_phase_data = get_user_phase_day(user_id, log_data.date, prefer_actual=False)
-        if predicted_phase_data and predicted_phase_data.get("phase") == "Period":
-            # There was a predicted period for this date
-            # Get the most recent predicted cycle start before this date
-            period_starts = get_period_start_logs(user_id, confirmed_only=False)
-            if period_starts:
-                # Find the predicted start that would have been closest to this date
-                for start_log in period_starts:
-                    if not start_log.get("confirmed", False):  # This is a prediction
-                        start_date_str = start_log["start_date"]
+        if predicted_phase_data and predicted_phase_data.get("phase") == "Period" and period_starts:
+            # Find the predicted start that would have been closest to this date (period_starts from sync return)
+            for start_log in period_starts:
+                if not start_log.get("is_confirmed", True):  # This is a prediction
+                    start_date_str = start_log.get("start_date")
+                    if start_date_str:
                         if isinstance(start_date_str, str):
                             predicted_start = datetime.strptime(start_date_str, "%Y-%m-%d").date()
                         else:
@@ -249,119 +199,9 @@ async def log_period(
                             print(f"⚠️ Large delta ({delta_days} days) - will trigger full recalculation of next 3 cycles")
                         break
         
-        # HARD INVALIDATION - Delete ALL predicted phases >= logged period date
-        # This fixes the "Ghost Cycle" problem where old predicted periods remain
-        # when a user logs a period earlier than predicted
-        # CRITICAL: This must happen BEFORE generating new predictions to ensure clean state
-        from prediction_cache import hard_invalidate_predictions_from_date, cleanup_predictions_before_first_period
-        print(f"🗑️ HARD INVALIDATION: Deleting ALL phases from {log_data.date} onwards")
-        hard_invalidate_predictions_from_date(user_id, log_data.date)  # HARD DELETE all phases >= logged date
-        cleanup_predictions_before_first_period(user_id)  # Remove predictions before first logged period
-        print(f"✅ Hard invalidation complete - all old predictions deleted")
-        
-        # Step 7: Generate predictions IMMEDIATELY from logged period date forward
-        # This ensures calendar updates instantly with ACCURATE calculations
-        # CRITICAL: Start from the logged period date (or 3 months before it) to include past months
-        from cycle_utils import calculate_phase_for_date_range, store_cycle_phase_map
-        from datetime import timedelta
-        
-        try:
-            # Parse the logged period date
-            logged_period_date = datetime.strptime(log_data.date, "%Y-%m-%d").date()
-            today = datetime.now().date()
-            
-            # Get first logged period date - we only need predictions from this date onwards
-            from prediction_cache import get_first_logged_period_date
-            first_period_date = get_first_logged_period_date(user_id)
-            
-            # Calculate start of logged period month for reference
-            logged_period_datetime = datetime.strptime(log_data.date, "%Y-%m-%d")
-            start_of_logged_month = logged_period_datetime.replace(day=1).date()
-            
-            if first_period_date:
-                first_period_dt = datetime.strptime(first_period_date, "%Y-%m-%d").date()
-                # Start from the first day of the month containing the first logged period
-                first_period_month_start = datetime.strptime(first_period_date, "%Y-%m-%d").replace(day=1).date()
-                start_date_obj = first_period_month_start
-            else:
-                # No previous periods, start from the logged period month
-                start_date_obj = start_of_logged_month
-            
-            start_date = start_date_obj.strftime("%Y-%m-%d")
-            
-            # End at current month + 3 months ahead
-            end_date = (today + timedelta(days=90)).strftime("%Y-%m-%d")
-            
-            print(f"📅 Date range calculation: Logged period month starts {start_of_logged_month.strftime('%Y-%m-%d')}, calculated start_date: {start_date}")
-            
-            # Get user cycle length (will be updated by sync_period_start_logs)
-            user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
-            cycle_length = user_response.data[0].get("cycle_length", 28) if user_response.data else 28
-            
-            # CRITICAL: Use the newly logged period date for accurate calculations
-            # This ensures predictions are based on the most recent period
-            # IMPORTANT: The start_date should include the logged period month
-            print(f"🔄 Generating predictions immediately from {start_date} to {end_date} using logged period: {log_data.date}")
-            print(f"   Logged period month: {start_of_logged_month.strftime('%Y-%m')}, Start date: {start_date}")
-            
-            phase_mappings = calculate_phase_for_date_range(
-                user_id=user_id,
-                last_period_date=log_data.date,  # Use newly logged date for accuracy
-                cycle_length=int(cycle_length),
-                start_date=start_date,
-                end_date=end_date
-            )
-            
-            # Verify the logged period date is in the phase mappings
-            logged_period_in_mappings = any(m["date"] == log_data.date for m in phase_mappings)
-            if not logged_period_in_mappings:
-                print(f"⚠️ WARNING: Logged period date {log_data.date} is NOT in phase mappings! This might cause the month to not show phases.")
-            else:
-                print(f"✅ Verified: Logged period date {log_data.date} is included in phase mappings")
-            
-            # Store immediately - this updates the date range with accurate calculations
-            # NOTE: This will overwrite the period days we created earlier, but that's OK because
-            # the phase_mappings should include the period days (calculated from cycle starts)
-            if phase_mappings:
-                # Count how many mappings are for the logged period month
-                logged_month = logged_period_datetime.strftime("%Y-%m")
-                logged_month_mappings = [m for m in phase_mappings if m["date"].startswith(logged_month)]
-                
-                # Count phases in the logged month
-                period_count = len([m for m in logged_month_mappings if m["phase"] == "Period"])
-                follicular_count = len([m for m in logged_month_mappings if m["phase"] == "Follicular"])
-                ovulation_count = len([m for m in logged_month_mappings if m["phase"] == "Ovulation"])
-                luteal_count = len([m for m in logged_month_mappings if m["phase"] == "Luteal"])
-                
-                print(f"📊 Phase mappings for logged month ({logged_month}): {len(logged_month_mappings)} dates")
-                print(f"   Period: {period_count}, Follicular: {follicular_count}, Ovulation: {ovulation_count}, Luteal: {luteal_count}")
-                
-                if len(logged_month_mappings) < 28:
-                    print(f"⚠️ WARNING: Logged month only has {len(logged_month_mappings)} phase mappings (expected ~28-31 for full month)")
-                
-                store_cycle_phase_map(user_id, phase_mappings, update_future_only=False)
-                print(f"✅ Generated {len(phase_mappings)} ACCURATE predictions immediately from {start_date} to {end_date}")
-            else:
-                print("⚠️ No phase mappings generated - this might mean the logged period month wasn't included!")
-        except Exception as e:
-            print(f"⚠️ Immediate prediction generation failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        # Step 8: Regenerate full range in BACKGROUND (non-blocking)
-        # This runs in background for complete calendar coverage
-        # Only generates from first logged period to current + 6 months ahead
-        from prediction_cache import regenerate_predictions_from_last_confirmed_period
-        
-        def regenerate_background():
-            try:
-                # Generate from first logged period to current + 6 months ahead (reasonable range)
-                regenerate_predictions_from_last_confirmed_period(user_id, days_ahead=180)
-            except Exception as e:
-                print(f"⚠️ Background prediction regeneration failed: {str(e)}")
-        
-        # Add to background tasks - runs after response is sent
-        background_tasks.add_task(regenerate_background)
+        # NOTE: Predictions are no longer stored in user_cycle_days.
+        # Calendar will calculate phases on-demand from period_logs when viewed.
+        # This eliminates the 181+ individual database upserts that were causing Errno 35 errors.
         
         # Step 9: Asynchronous luteal learning (non-blocking)
         # Only learns from confirmed cycles with high-confidence ovulation predictions
@@ -653,9 +493,7 @@ async def update_period_log(
             else:
                 print(f"⚠️ Warning: Could not determine old_period_end, skipping old predictions deletion")
             
-            # Step 2: HARD INVALIDATE predictions from new date
-            from prediction_cache import hard_invalidate_predictions_from_date
-            hard_invalidate_predictions_from_date(user_id, new_date)
+            # NOTE: Hard invalidation removed - predictions are now calculated on-demand
             
             # Step 3: Update the period log
             # SAFETY: Validate end_date if provided in update
@@ -693,40 +531,13 @@ async def update_period_log(
                     detail="Failed to update period log"
                 )
             
-            # Step 4: Sync period_start_logs and update cycle stats
+            # Step 4: Sync period_start_logs and update cycle stats (use returned data to avoid DB read)
             from period_start_logs import sync_period_start_logs_from_period_logs
             from cycle_stats import update_user_cycle_stats
-            sync_period_start_logs_from_period_logs(user_id)
-            update_user_cycle_stats(user_id)
+            period_starts = sync_period_start_logs_from_period_logs(user_id)
+            update_user_cycle_stats(user_id, period_starts=period_starts)
             
-            # Step 5: Regenerate predictions from new date
-            from cycle_utils import calculate_phase_for_date_range, store_cycle_phase_map
-            from prediction_cache import get_first_logged_period_date
-            
-            first_period_date = get_first_logged_period_date(user_id)
-            if first_period_date:
-                first_period_dt = datetime.strptime(first_period_date, "%Y-%m-%d")
-                start_date_obj = first_period_dt.replace(day=1).date()
-            else:
-                start_date_obj = new_date_obj.replace(day=1)
-            
-            start_date = start_date_obj.strftime("%Y-%m-%d")
-            end_date = (today + timedelta(days=90)).strftime("%Y-%m-%d")
-            
-            user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
-            cycle_length = user_response.data[0].get("cycle_length", 28) if user_response.data else 28
-            
-            phase_mappings = calculate_phase_for_date_range(
-                user_id=user_id,
-                last_period_date=new_date,
-                cycle_length=int(cycle_length),
-                start_date=start_date,
-                end_date=end_date
-            )
-            
-            if phase_mappings:
-                store_cycle_phase_map(user_id, phase_mappings, update_future_only=False)
-                print(f"✅ Regenerated {len(phase_mappings)} predictions after editing period start date")
+            # NOTE: Prediction regeneration removed - calendar will calculate on-demand
             
             # Step 6: Update user's last_period_date if this was the most recent period
             if new_date == old_date or new_date > old_date:
@@ -781,19 +592,13 @@ async def delete_period_log(
         
         supabase.table("period_logs").delete().eq("id", log_id).execute()
         
-        # Rebuild PeriodStartLogs
+        # Rebuild PeriodStartLogs and update cycle stats (use returned data to avoid DB read)
         from period_start_logs import sync_period_start_logs_from_period_logs
-        sync_period_start_logs_from_period_logs(user_id)
-        
-        # Recompute cycle stats
         from cycle_stats import update_user_cycle_stats
-        update_user_cycle_stats(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        update_user_cycle_stats(user_id, period_starts=period_starts)
         
-        # Regenerate predictions
-        from prediction_cache import invalidate_predictions_after_period
-        invalidate_predictions_after_period(user_id, period_start_date=None)
-        from prediction_cache import regenerate_predictions_from_last_confirmed_period
-        regenerate_predictions_from_last_confirmed_period(user_id, days_ahead=60)
+        # NOTE: Prediction regeneration removed - calendar will calculate on-demand
         
         return {"message": "Period log deleted"}
     
@@ -875,55 +680,13 @@ async def log_period_end(
                 detail="Failed to update period log with end date."
             )
         
-        # Hard invalidate predictions from start date
-        from prediction_cache import hard_invalidate_predictions_from_date
-        hard_invalidate_predictions_from_date(user_id, start_date_str)
-        print(f"✅ Hard invalidated predictions from {start_date_str}")
+        # NOTE: Prediction regeneration removed - calendar will calculate on-demand
         
-        # Recalculate phases with actual period range
-        from cycle_utils import calculate_phase_for_date_range, store_cycle_phase_map
-        from prediction_cache import get_first_logged_period_date
-        
-        first_period_date = get_first_logged_period_date(user_id)
-        if first_period_date:
-            first_period_dt = datetime.strptime(first_period_date, "%Y-%m-%d")
-            start_date_calc = first_period_dt.replace(day=1).date()
-        else:
-            start_date_calc = start_date_obj.replace(day=1)
-        
-        start_date_calc_str = start_date_calc.strftime("%Y-%m-%d")
-        end_date_calc = (today + timedelta(days=90)).strftime("%Y-%m-%d")
-        
-        user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
-        cycle_length = user_response.data[0].get("cycle_length", 28) if user_response.data else 28
-        
-        phase_mappings = calculate_phase_for_date_range(
-            user_id=user_id,
-            last_period_date=start_date_str,
-            cycle_length=int(cycle_length),
-            start_date=start_date_calc_str,
-            end_date=end_date_calc
-        )
-        
-        if phase_mappings:
-            store_cycle_phase_map(user_id, phase_mappings, update_future_only=False)
-            print(f"✅ Regenerated {len(phase_mappings)} predictions with actual period range")
-        
-        # Update cycle stats (actual duration will be used)
+        # Update cycle stats (use returned data to avoid DB read)
         from period_start_logs import sync_period_start_logs_from_period_logs
         from cycle_stats import update_user_cycle_stats
-        sync_period_start_logs_from_period_logs(user_id)
-        update_user_cycle_stats(user_id)
-        
-        # Background regeneration for full range
-        from prediction_cache import regenerate_predictions_from_last_confirmed_period
-        def regenerate_background():
-            try:
-                regenerate_predictions_from_last_confirmed_period(user_id, days_ahead=180)
-            except Exception as e:
-                print(f"⚠️ Background regeneration failed: {str(e)}")
-        
-        background_tasks.add_task(regenerate_background)
+        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        update_user_cycle_stats(user_id, period_starts=period_starts)
         
         return {
             "message": f"Period end logged successfully. Duration: {duration} days.",

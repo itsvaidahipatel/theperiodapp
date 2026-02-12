@@ -12,8 +12,12 @@ const Navbar = () => {
   const handleLogout = async () => {
     try {
       await logout()
+      sessionStorage.clear()
+      localStorage.removeItem('access_token')
+      localStorage.removeItem('user')
       navigate('/login')
     } catch (error) {
+      sessionStorage.clear()
       localStorage.removeItem('access_token')
       localStorage.removeItem('user')
       navigate('/login')

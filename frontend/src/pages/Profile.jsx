@@ -2,19 +2,25 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
-import { updateUserProfile, changePassword, getNotificationPreferences, updateNotificationPreferences, resetCycleData, resetLastPeriod } from '../utils/api'
+import { updateUserProfile, changePassword, getNotificationPreferences, updateNotificationPreferences, resetCycleData, resetLastPeriod, runSixMonthDiagnostic } from '../utils/api'
 import { Save, Lock, Bell, RotateCcw, AlertTriangle, X } from 'lucide-react'
 import { updateUserData } from '../utils/userPreferences'
 import { useTranslation } from '../utils/translations'
+import { useCalendarCache } from '../context/CalendarCacheContext'
+import { useDataContext } from '../context/DataContext'
 
 const Profile = () => {
   const { t } = useTranslation()
+  const { clearCache } = useCalendarCache()
+  const { updatePhaseMap } = useDataContext()
   const [user, setUser] = useState(null)
+  const BLEEDING_OPTIONS = [2, 3, 4, 5, 6, 7, 8]
   const [formData, setFormData] = useState({
     name: '',
     language: 'en',
     favorite_cuisine: '',
     favorite_exercise: '',
+    avg_bleeding_days: 5,
   })
   const [passwordData, setPasswordData] = useState({
     current_password: '',
@@ -35,6 +41,7 @@ const Profile = () => {
   const [showResetLastPeriodConfirm, setShowResetLastPeriodConfirm] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [resettingLastPeriod, setResettingLastPeriod] = useState(false)
+  const [diagnosticRunning, setDiagnosticRunning] = useState(false)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -47,6 +54,7 @@ const Profile = () => {
         language: parsedUser.language || 'en',
         favorite_cuisine: parsedUser.favorite_cuisine || '',
         favorite_exercise: parsedUser.favorite_exercise || '',
+        avg_bleeding_days: parsedUser.avg_bleeding_days ?? 5,
       })
       
       // Load notification preferences
@@ -183,18 +191,14 @@ const Profile = () => {
       localStorage.setItem('user', JSON.stringify(updatedUser))
       setUser(updatedUser)
       
-      // Clear form data related to cycles
       setFormData(prev => ({ ...prev }))
-      
-      // Dispatch specific reset event to clear calendar cache and refresh
+      clearCache()
+      updatePhaseMap({})
+      sessionStorage.clear()
       window.dispatchEvent(new CustomEvent('resetAllCycles'))
-      // Also dispatch periodLogged for other components
       window.dispatchEvent(new CustomEvent('periodLogged'))
-      
       setSuccess('All cycle data has been reset successfully. Your calendar and statistics are now clean.')
       setShowResetConfirm(false)
-      
-      // Navigate to dashboard to see blank calendar (no page reload needed)
       setTimeout(() => {
         window.location.href = '/dashboard'
       }, 1500)
@@ -217,16 +221,13 @@ const Profile = () => {
       const updatedUser = { ...user, ...response.user }
       localStorage.setItem('user', JSON.stringify(updatedUser))
       setUser(updatedUser)
-      
-      // Dispatch specific reset event to clear calendar cache and refresh
+      clearCache()
+      updatePhaseMap({})
+      sessionStorage.clear()
       window.dispatchEvent(new CustomEvent('resetLastPeriod'))
-      // Also dispatch periodLogged for other components
       window.dispatchEvent(new CustomEvent('periodLogged'))
-      
       setSuccess(`Last period (${response.deleted_period_date}) has been reset successfully. Your calendar and predictions have been updated.`)
       setShowResetLastPeriodConfirm(false)
-      
-      // Navigate to dashboard to see updated calendar (no page reload needed)
       setTimeout(() => {
         window.location.href = '/dashboard'
       }, 1500)
@@ -234,6 +235,20 @@ const Profile = () => {
       setError(err.message || 'Failed to reset last period')
     } finally {
       setResettingLastPeriod(false)
+    }
+  }
+
+  const handleRunSixMonthDiagnostic = async () => {
+    setDiagnosticRunning(true)
+    setError('')
+    setSuccess('')
+    try {
+      const res = await runSixMonthDiagnostic()
+      setSuccess(res?.message || 'Diagnostic complete. Check the backend terminal for [DEBUG] lines.')
+    } catch (err) {
+      setError(err.message || 'Diagnostic request failed')
+    } finally {
+      setDiagnosticRunning(false)
     }
   }
 
@@ -350,6 +365,28 @@ const Profile = () => {
                 <option value="Mind">Mind</option>
                 <option value="Stretching">Stretching</option>
               </select>
+            </div>
+
+            {/* Period Settings: Typical bleeding length */}
+            <div className="pt-4 border-t border-gray-200">
+              <h3 className="text-sm font-semibold text-gray-800 mb-2">{t('profile.periodSettings')}</h3>
+              <p className="text-xs text-gray-500 mb-3">{t('profile.typicalBleedingLengthHelp')}</p>
+              <div className="flex flex-wrap gap-2">
+                {BLEEDING_OPTIONS.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setFormData((prev) => ({ ...prev, avg_bleeding_days: n }))}
+                    className={`px-4 py-2 rounded-lg font-medium transition ${
+                      formData.avg_bleeding_days === n
+                        ? 'bg-period-pink text-white ring-2 ring-period-pink ring-offset-1'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {n === 8 ? '8+' : n}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {error && (
@@ -643,6 +680,29 @@ const Profile = () => {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* Run 6-Month Diagnostic (temporary debug) */}
+        <div className="mt-6 bg-gray-50 border border-gray-200 rounded-xl p-4">
+          <h3 className="text-lg font-bold text-gray-700 mb-2">Debug: 6-Month Phase Analysis</h3>
+          <p className="text-sm text-gray-600 mb-3">
+            Runs phase calculation for today ±90 days and prints [DEBUG] lines to the backend terminal.
+          </p>
+          <button
+            type="button"
+            onClick={handleRunSixMonthDiagnostic}
+            disabled={diagnosticRunning}
+            className="bg-gray-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-gray-700 transition disabled:opacity-50 flex items-center gap-2"
+          >
+            {diagnosticRunning ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+                Running...
+              </>
+            ) : (
+              'Run 6-Month Diagnostic'
+            )}
+          </button>
         </div>
 
         {/* Reset Last Period Confirmation Modal */}
