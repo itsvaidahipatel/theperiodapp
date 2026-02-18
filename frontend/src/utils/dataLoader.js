@@ -6,6 +6,7 @@
 import { 
   getCurrentPhase, 
   getPeriodLogs,
+  getPhaseMap,
   getHormonesData,
   getNutritionData,
   getExerciseData
@@ -14,38 +15,48 @@ import { getUserLanguage } from './userPreferences'
 import { getCachedData, setCachedData, shouldRefetch, clearCache } from './dataCache'
 
 /**
- * Load dashboard data
+ * Load dashboard data (single source of truth for phase map).
+ * Fetches 3 months past to 6 months future once so calendar shows colors instantly.
+ * @param {boolean} forceRefresh - If true, getPhaseMap is called with force_recalculate
  */
-export const loadDashboardData = async () => {
-  // CRITICAL: Check for auth token before making any protected API calls
+export const loadDashboardData = async (forceRefresh = false) => {
   const token = localStorage.getItem('access_token')
   if (!token) {
-    console.log('No auth token, skipping dashboard data load')
-    return {
-      currentPhase: null,
-      phaseMap: null,
-      periodLogs: null
-    }
+    return { currentPhase: null, phaseMap: null, periodLogs: null }
   }
 
   try {
-    // Get current phase first (with timeout)
-    const currentPhasePromise = getCurrentPhase().catch(() => null)
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Timeout')), 15000)
-    )
-    const currentPhase = await Promise.race([currentPhasePromise, timeoutPromise]).catch(() => null)
-    
-    // Phase map is NOT fetched here - only PeriodCalendar fetches it and updates context via updatePhaseMap
-    const periodLogsPromise = getPeriodLogs().catch(() => null)
-    const periodLogsTimeout = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Period logs timeout')), 10000)
-    )
-    const periodLogs = await Promise.race([periodLogsPromise, periodLogsTimeout]).catch(() => null)
-    
+    const now = new Date()
+    // Request a full month range (start_date to end_date) for calendar display - at least current month
+    const start = new Date(now.getFullYear(), now.getMonth() - 3, 1)
+    const end = new Date(now.getFullYear(), now.getMonth() + 6 + 1, 0)
+    const startDate = start.toISOString().slice(0, 10)
+    let endDate = end.toISOString().slice(0, 10)
+    // Ensure we never request a single day (full month required)
+    if (startDate === endDate) {
+      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0)
+      endDate = endOfMonth.toISOString().slice(0, 10)
+    }
+
+    const [currentPhase, periodLogs, phaseMapResponse] = await Promise.all([
+      getCurrentPhase().catch(() => null),
+      getPeriodLogs().catch(() => null),
+      getPhaseMap(startDate, endDate, forceRefresh).catch(() => null)
+    ])
+
+    // Pass raw array to DataContext so it can save under key 'phaseMap' with consistent mapping
+    const phase_map = (phaseMapResponse?.phase_map && Array.isArray(phaseMapResponse.phase_map))
+      ? phaseMapResponse.phase_map
+      : []
+
+    // #region agent log
+    const firstItem = phase_map[0]
+    fetch('http://127.0.0.1:7242/ingest/6e7c83a7-9704-42b4-bb73-f91cceedfc17',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'dataLoader.js:loadDashboardData',message:'phase_map from API',data:{length:phase_map.length,firstDate:firstItem?.date,firstPhase:firstItem?.phase,firstPhaseDayId:firstItem?.phase_day_id},timestamp:Date.now(),hypothesisId:'A,B,D'})}).catch(()=>{});
+    // #endregion
+
     return {
       currentPhase: currentPhase || null,
-      phaseMap: null,
+      phase_map,
       periodLogs: periodLogs || null
     }
   } catch (error) {

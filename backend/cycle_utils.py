@@ -8,106 +8,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import math
 from database import supabase
-# ⚠️ requests library no longer needed (RapidAPI removed)
 
-# ⚠️ RAPIDAPI CODE REMOVED - System now uses adaptive local algorithms only
-# The following functions are kept for reference but are no longer used:
-# - call_womens_health_api()
-# - get_cached_request_id()
-# - cache_request_id()
-# - process_cycle_data()
-# - get_predicted_cycle_starts()
-# - get_average_period_length()
-# - get_average_cycle_length()
-# - get_cycle_phases()
-# - generate_cycle_phase_map() (RapidAPI version)
-# 
-# All cycle predictions now use:
-# - predict_cycle_starts_from_period_logs() - Predicts cycle starts from period logs
-# - calculate_phase_for_date_range() - Primary calculation method
-# - Adaptive algorithms (luteal estimation, period length, ovulation prediction)
-
-def get_cached_request_id(user_id: str) -> Optional[str]:
-    """
-    Get cached RapidAPI request_id for user if still valid.
-    
-    Args:
-        user_id: User ID
-    
-    Returns:
-        request_id if cached and valid, None otherwise
-    """
-    try:
-        user_response = supabase.table("users").select("rapidapi_request_id, rapidapi_request_id_expires_at").eq("id", user_id).execute()
-        if user_response.data and len(user_response.data) > 0:
-            user_data = user_response.data[0]
-            request_id = user_data.get("rapidapi_request_id")
-            expires_at_str = user_data.get("rapidapi_request_id_expires_at")
-            
-            if request_id and expires_at_str:
-                # Check if request_id is still valid (not expired)
-                expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-                if datetime.now(expires_at.tzinfo) < expires_at:
-                    print(f"✅ Using cached request_id: {request_id} (expires: {expires_at_str})")
-                    return request_id
-                else:
-                    print(f"⚠️ Cached request_id expired: {request_id} (expired: {expires_at_str})")
-                    return None
-            return None
-    except Exception as e:
-        print(f"⚠️ Error checking cached request_id: {str(e)}")
-        return None
-
-def cache_request_id(user_id: str, request_id: str, expires_in_hours: int = 24) -> None:
-    """
-    Cache RapidAPI request_id for user to reduce API calls.
-    
-    Args:
-        user_id: User ID
-        request_id: RapidAPI request_id to cache
-        expires_in_hours: Hours until request_id expires (default 24)
-    """
-    try:
-        expires_at = datetime.now() + timedelta(hours=expires_in_hours)
-        supabase.table("users").update({
-            "rapidapi_request_id": request_id,
-            "rapidapi_request_id_expires_at": expires_at.isoformat()
-        }).eq("id", user_id).execute()
-        print(f"✅ Cached request_id: {request_id} (expires: {expires_at.isoformat()})")
-    except Exception as e:
-        print(f"⚠️ Error caching request_id: {str(e)}")
-        # Non-fatal - continue without caching
-
-# ⚠️ DEPRECATED: These RapidAPI functions are no longer used
-# The system now uses local adaptive algorithms instead of RapidAPI
-# These functions are kept for reference but will raise errors if called
-
-def process_cycle_data(past_cycle_data: List[Dict], current_date: str, max_predictions: int = 6, user_id: Optional[str] = None) -> str:
-    """
-    DEPRECATED: RapidAPI function no longer used.
-    Raises error if called.
-    """
-    raise NotImplementedError("process_cycle_data is deprecated. Use local adaptive algorithms instead.")
-
-def get_predicted_cycle_starts(request_id: str) -> List[str]:
-    """DEPRECATED: RapidAPI function no longer used."""
-    raise NotImplementedError("get_predicted_cycle_starts is deprecated. Use local adaptive algorithms instead.")
-
-def get_average_period_length(request_id: str) -> float:
-    """DEPRECATED: RapidAPI function no longer used."""
-    raise NotImplementedError("get_average_period_length is deprecated. Use estimate_period_length() instead.")
-
-def get_average_cycle_length(request_id: str) -> float:
-    """DEPRECATED: RapidAPI function no longer used."""
-    raise NotImplementedError("get_average_cycle_length is deprecated. Use compute_cycle_stats_from_period_events() instead.")
-
-def get_cycle_phases(request_id: str) -> List[Dict]:
-    """DEPRECATED: RapidAPI function no longer used."""
-    raise NotImplementedError("get_cycle_phases is deprecated. Use calculate_phase_for_date_range() instead.")
-
-def predict_cycle_phases(cycle_start_date: str, next_cycle_start_date: str, period_length: int) -> dict:
-    """DEPRECATED: RapidAPI function no longer used."""
-    raise NotImplementedError("predict_cycle_phases is deprecated. Use calculate_phase_for_date_range() instead.")
+# Deprecated RapidAPI stubs moved to legacy_utils.py. All cycle predictions use calculate_phase_for_date_range().
 
 def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
     """
@@ -830,445 +732,6 @@ def update_cycle_length_bayesian(user_id: str, new_cycle_length: int) -> int:
         print(f"Warning: Failed to update cycle_length with Bayesian smoothing: {str(e)}")
         return new_cycle_length
 
-def generate_cycle_phase_map(
-    user_id: str,
-    past_cycle_data: List[Dict],
-    current_date: str,
-    update_future_only: bool = False
-) -> List[Dict]:
-    """
-    DEPRECATED: This function is no longer used. RapidAPI has been removed.
-    Use calculate_phase_for_date_range() instead for local adaptive calculations.
-    
-    This function raises an error if called.
-    
-    RAPIDAPI DATA TRUST RULES (Field-Level):
-    =========================================
-    
-    TRUSTED FROM RAPIDAPI:
-    ✓ Dates (entry.get("date")) - Use as-is, these are accurate
-    ✓ Cycle boundaries - Use first_cycle_start from API (p1 days)
-    ✓ Timeline structure - Process entries in order
-    ✓ predicted_starts - Use API's cycle start dates for fallback mode
-    
-    OVERRIDDEN / CALCULATED LOCALLY:
-    ✗ Phase names (entry.get("phase")) - We recalculate to ensure 1-3 day ovulation
-    ✗ Ovulation dates - We calculate our own using predict_ovulation() (not API's)
-    ✗ Phase-day IDs (day_in_phase) - We recalculate with our phase counters
-    ✗ Fertility probabilities - We calculate using fertility_probability() (not in API)
-    
-    HYBRID APPROACH:
-    - Use API cycle boundaries (first_cycle_start) for structure
-    - Use API dates for timeline
-    - Override phases with our logic (ensures 1-3 day ovulation window)
-    - Calculate our own ovulation dates (more accurate with adaptive cycle_start_sd)
-    - Add fertility probabilities (not provided by API)
-    
-    This ensures:
-    1. We keep API's cycle structure (boundaries, dates)
-    2. We enforce our ovulation window constraints (1-3 days)
-    3. We use our adaptive ovulation predictions (cycle_start_sd, fertility_probability)
-    4. We add fertility tracking (not in API)
-    
-    Args:
-        user_id: User ID
-        past_cycle_data: List of past cycle data
-        current_date: Current date in YYYY-MM-DD format
-        update_future_only: If True, only update dates >= current_date (preserve past data)
-    
-    Returns list of dicts with:
-    - date: YYYY-MM-DD (from RapidAPI)
-    - phase: Phase name (our calculation, overrides API)
-    - phase_day_id: Phase-day ID (e.g., p1, f5, o2, l10) (our calculation)
-    - source: "api" | "adjusted" | "fallback"
-    - confidence: float (0.9 for API+adjusted, 0.7 for adjusted, 0.5 for fallback)
-    """
-    try:
-        print(f"Starting cycle prediction for user {user_id} with {len(past_cycle_data)} past cycles")
-        print(f"Update future only: {update_future_only}")
-        
-        # Step 1: Process cycle data and get request_id (with caching)
-        print("Calling process_cycle_data API...")
-        request_id = process_cycle_data(past_cycle_data, current_date, user_id=user_id)
-        print(f"Got request_id: {request_id}")
-        
-        # Step 2: Get predictions and averages
-        print("Getting predicted cycle starts...")
-        predicted_starts = get_predicted_cycle_starts(request_id)
-        print(f"Got {len(predicted_starts)} predicted cycle starts: {predicted_starts}")
-        
-        print("Getting average period length...")
-        average_period_length = round(get_average_period_length(request_id))
-        print(f"Average period length: {average_period_length} days")
-        
-        print("Getting average cycle length...")
-        average_cycle_length = round(get_average_cycle_length(request_id))
-        print(f"Average cycle length: {average_cycle_length} days")
-        
-        # Update cycle_length using Bayesian smoothing
-        updated_cycle_length = update_cycle_length_bayesian(user_id, int(average_cycle_length))
-        
-        # Step 3: Get complete cycle phase timeline from RapidAPI (PRIMARY SOURCE)
-        print("Getting cycle phases timeline from RapidAPI...")
-        try:
-            cycle_phases_timeline = get_cycle_phases(request_id)
-            print(f"Got {len(cycle_phases_timeline)} phase entries from RapidAPI")
-            
-            if cycle_phases_timeline and len(cycle_phases_timeline) > 0:
-                """
-                RAPIDAPI DATA TRUST RULES (Field-Level):
-                =========================================
-                
-                TRUSTED FROM RAPIDAPI:
-                ✓ Dates (entry.get("date")) - Use as-is, these are accurate
-                ✓ Cycle boundaries - Use first_cycle_start from API (p1 days)
-                ✓ Timeline structure - Process entries in order
-                
-                OVERRIDDEN / CALCULATED LOCALLY:
-                ✗ Phase names (entry.get("phase")) - We recalculate to ensure 1-3 day ovulation
-                ✗ Ovulation dates - We calculate our own using predict_ovulation()
-                ✗ Phase-day IDs (day_in_phase) - We recalculate with our phase counters
-                ✗ Fertility probabilities - We calculate using fertility_probability()
-                
-                HYBRID APPROACH:
-                - Use API cycle boundaries (first_cycle_start) for structure
-                - Use API dates for timeline
-                - Override phases with our logic (ensures 1-3 day ovulation window)
-                - Calculate our own ovulation dates (more accurate with adaptive SD)
-                - Add fertility probabilities (not provided by API)
-                
-                This ensures:
-                1. We keep API's cycle structure (boundaries, dates)
-                2. We enforce our ovulation window constraints (1-3 days)
-                3. We use our adaptive ovulation predictions (cycle_start_sd, fertility_probability)
-                4. We add fertility tracking (not in API)
-                """
-                
-                # Get adaptive luteal estimate for fertility calculations
-                luteal_mean, luteal_sd = estimate_luteal(user_id)
-                
-                phase_mappings = []
-                # TRUSTED: Use first cycle start from RapidAPI timeline (p1 date)
-                # This is the cycle boundary - we trust API's cycle structure
-                first_cycle_start = None
-                for entry in cycle_phases_timeline:
-                    if entry.get("phase", "").lower() in ["period", "menstrual"] and entry.get("day_in_phase", 0) == 1:
-                        first_cycle_start = entry.get("date")
-                        break
-                
-                # If no p1 found, use first date as cycle start
-                if not first_cycle_start and cycle_phases_timeline:
-                    first_cycle_start = cycle_phases_timeline[0].get("date")
-                
-                if not first_cycle_start:
-                    raise Exception("No valid cycle start found in RapidAPI timeline")
-                
-                # Calculate cycle length from timeline (approximate)
-                if len(cycle_phases_timeline) > 0:
-                    first_date = datetime.strptime(cycle_phases_timeline[0].get("date"), "%Y-%m-%d")
-                    last_date = datetime.strptime(cycle_phases_timeline[-1].get("date"), "%Y-%m-%d")
-                    total_days = (last_date - first_date).days + 1
-                    # Estimate: divide total days by number of cycles (approximate)
-                    num_cycles = max(1, total_days // 28)  # Rough estimate
-                    estimated_cycle_length = max(28, min(35, total_days // num_cycles))
-                else:
-                    estimated_cycle_length = 28
-                
-                # OVERRIDDEN: Calculate our own ovulation date (not using API's ovulation date)
-                # We use our adaptive predict_ovulation() with cycle_start_sd estimation
-                # cycle_start_sd will be estimated adaptively based on cycle variance and logging consistency
-                ovulation_date_str, ovulation_sd, ovulation_offset = predict_ovulation(
-                    first_cycle_start,
-                    float(estimated_cycle_length),
-                    luteal_mean,
-                    luteal_sd,
-                    cycle_start_sd=None,  # Will be estimated adaptively
-                    user_id=user_id
-                )
-                ovulation_date = datetime.strptime(ovulation_date_str, "%Y-%m-%d")
-                
-                # OVERRIDDEN: Pre-calculate ovulation days using our top-N by fertility probability
-                # This ensures 1-3 day ovulation window (API may have different window)
-                ovulation_days = select_ovulation_days(ovulation_sd, max_days=3)
-                
-                # Process all entries in timeline
-                # TRUSTED: Use API dates and cycle structure
-                # OVERRIDDEN: Recalculate phases to ensure 1-3 day ovulation window
-                phase_counters = {"Period": 0, "Follicular": 0, "Ovulation": 0, "Luteal": 0}
-                first_cycle_start_date = datetime.strptime(first_cycle_start, "%Y-%m-%d")
-                previous_days_since_start = None
-                
-                for entry in cycle_phases_timeline:
-                    # TRUSTED: Use API date
-                    date_str = entry.get("date")
-                    # NOT USED: original_phase_name = entry.get("phase", "") - We override this
-                    # NOT USED: day_in_phase = entry.get("day_in_phase", 1) - We recalculate this
-                    
-                    if not date_str:
-                        continue
-                    
-                    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                    
-                    # CALCULATED: Our own ovulation and fertility probabilities
-                    offset_from_ov = (date_obj - ovulation_date).days
-                    ov_prob = ovulation_probability(offset_from_ov, ovulation_sd)
-                    fert_prob = fertility_probability(offset_from_ov, ovulation_sd)
-                    
-                    # OVERRIDDEN: Determine phase using our logic (not API's phase)
-                    # This ensures 1-3 day ovulation window and uses fertility_probability
-                    # TRUSTED: Use API's cycle start for day calculation
-                    # ⚠️ CRITICAL: days_since_cycle_start is 1-INDEXED (cycle start = day 1, not day 0)
-                    # Formula: (date_obj - first_cycle_start_date).days + 1
-                    # Example: If period_days = 5, then days 1-5 inclusive = Period phase (5 days total)
-                    days_since_cycle_start = (date_obj - first_cycle_start_date).days + 1
-                    # Prefer user's typical bleeding length (Settings) for period phase length
-                    user_bleeding = get_user_avg_bleeding_days(user_id)
-                    period_days = float(user_bleeding) if user_bleeding is not None else estimate_period_length(user_id, normalized=True)
-                    
-                    # Detect cycle boundary: if days_since_cycle_start resets (decreases), we've crossed a cycle boundary
-                    # Explicitly reset phase counters at cycle boundary
-                    if previous_days_since_start is not None and days_since_cycle_start < previous_days_since_start:
-                        # We've crossed into a new cycle - reset all counters
-                        phase_counters["Period"] = 0
-                        phase_counters["Follicular"] = 0
-                        phase_counters["Ovulation"] = 0
-                        phase_counters["Luteal"] = 0
-                    elif days_since_cycle_start == 1:
-                        # First day of cycle - ensure counters are reset
-                        phase_counters["Period"] = 0
-                        phase_counters["Follicular"] = 0
-                        phase_counters["Ovulation"] = 0
-                        phase_counters["Luteal"] = 0
-                    
-                    previous_days_since_start = days_since_cycle_start
-                    
-                    # ⚠️ CRITICAL: days_since_cycle_start is 1-INDEXED
-                    # If period_days = 5, then days 1, 2, 3, 4, 5 are Period phase (5 days inclusive)
-                    # DO NOT change to < period_days or period_days + 1 - this will break silently
-                    if days_since_cycle_start <= period_days:
-                        phase_name = "Period"
-                    elif offset_from_ov in ovulation_days:
-                        # Ovulation phase: Top-N days by fertility probability (1-3 days max, pre-calculated)
-                        # Uses fertility_probability (biologically meaningful) to align with fertile window
-                        phase_name = "Ovulation"
-                    elif date_obj < ovulation_date:
-                        # Follicular: before ovulation phase
-                        phase_name = "Follicular"
-                    else:
-                        # Luteal: after ovulation phase
-                        phase_name = "Luteal"
-                    
-                    # Increment phase counter and get day_in_phase
-                    phase_counters[phase_name] += 1
-                    day_in_phase = phase_counters[phase_name]
-                    
-                    # Generate phase_day_id
-                    phase_day_id = generate_phase_day_id(phase_name, day_in_phase)
-                    
-                    phase_mappings.append({
-                        "date": date_str,  # TRUSTED: From RapidAPI (accurate)
-                        "phase": phase_name,  # OVERRIDDEN: Our calculated phase (not RapidAPI's)
-                        "phase_day_id": phase_day_id,  # OVERRIDDEN: Our calculated phase_day_id
-                        "source": "api",  # Indicates data came from RapidAPI, but phases were adjusted
-                        "prediction_confidence": 0.9,  # High confidence (API structure + our phase logic)
-                        "fertility_prob": round(fert_prob, 3),  # CALCULATED: Our fertility probability (not in API)
-                        "predicted_ovulation_date": ovulation_date_str,  # OVERRIDDEN: Our ovulation date (not API's)
-                        "ovulation_offset": ovulation_offset,  # STORED: Days from cycle start to ovulation (integer)
-                        "luteal_estimate": round(luteal_mean, 2),  # CALCULATED: Our adaptive estimate
-                        "luteal_sd": round(luteal_sd, 2),  # CALCULATED: Our adaptive estimate
-                        "ovulation_sd": round(ovulation_sd, 2),  # CALCULATED: Our adaptive estimate
-                        # Note: is_predicted column doesn't exist in database, removed to avoid errors
-                        "rapidapi_request_id": request_id  # Cache request_id for future use
-                    })
-                
-                print(f"Generated {len(phase_mappings)} phase mappings from RapidAPI timeline")
-                
-                # Step 4: Store in database (with partial update if requested)
-                print(f"Storing {len(phase_mappings)} phase mappings in database...")
-                store_cycle_phase_map(user_id, phase_mappings, update_future_only=update_future_only, current_date=current_date)
-                print(f"Successfully stored phase mappings for user {user_id}")
-                
-                return phase_mappings
-            else:
-                print("⚠️ RapidAPI cycle_phases returned empty, falling back to manual calculation")
-                raise Exception("Empty cycle_phases from RapidAPI")
-                
-        except Exception as api_error:
-            print(f"⚠️ Failed to get cycle_phases from RapidAPI: {str(api_error)}")
-            print("   Falling back to manual phase calculation...")
-            # Fall through to fallback calculation below
-        
-        # FALLBACK: If RapidAPI cycle_phases fails, use adaptive calculation with fertility probabilities
-        if len(predicted_starts) < 2:
-            raise Exception("Not enough predicted cycles")
-        
-        # Get adaptive luteal estimate
-        luteal_mean, luteal_sd = estimate_luteal(user_id)
-        
-        # Use adaptive fallback with fertility probabilities
-        phase_mappings = []
-        current_date_obj = datetime.strptime(current_date, "%Y-%m-%d")
-        fallback_request_id = None  # Fallback path doesn't have request_id
-        
-        for i in range(len(predicted_starts) - 1):
-            cycle_start_date = predicted_starts[i]
-            cycle_start = datetime.strptime(cycle_start_date, "%Y-%m-%d")
-            next_cycle_start = datetime.strptime(predicted_starts[i + 1], "%Y-%m-%d")
-            
-            # Only process cycles that include or are after current_date
-            if next_cycle_start < current_date_obj and update_future_only:
-                continue
-            
-            cycle_length = (next_cycle_start - cycle_start).days
-            
-            # Predict ovulation using adaptive method
-            # cycle_start_sd will be estimated adaptively based on cycle variance and logging consistency
-            ovulation_date_str, ovulation_sd, ovulation_offset = predict_ovulation(
-                cycle_start_date,
-                float(cycle_length),
-                luteal_mean,
-                luteal_sd,
-                cycle_start_sd=None,  # Will be estimated adaptively
-                user_id=user_id
-            )
-            ovulation_date = datetime.strptime(ovulation_date_str, "%Y-%m-%d")
-            
-            # Pre-calculate ovulation days using top-N by probability approach
-            ovulation_days = select_ovulation_days(ovulation_sd, max_days=3)
-            
-            # Period phase - use adaptive period length (from RapidAPI average or user history)
-            # Prefer user's typical bleeding length for period phase
-            user_bleeding = get_user_avg_bleeding_days(user_id)
-            period_days = float(user_bleeding) if user_bleeding is not None else (average_period_length if average_period_length else estimate_period_length(user_id, normalized=True))
-            date_obj = cycle_start
-            phase_counter = {"Period": 0, "Follicular": 0, "Ovulation": 0, "Luteal": 0}
-            current_phase = None
-            
-            # Generate mappings for each day in cycle
-            # Safety limit per cycle
-            max_cycle_days = 50  # Maximum days per cycle (safety)
-            cycle_days_processed = 0
-            
-            while date_obj < next_cycle_start and cycle_days_processed < max_cycle_days:
-                if update_future_only and date_obj < current_date_obj:
-                    date_obj += timedelta(days=1)
-                    cycle_days_processed += 1
-                    continue
-                
-                # Explicitly reset phase counters at cycle boundary
-                # This prevents counters from continuing from previous cycle if phases are skipped
-                if date_obj == cycle_start:
-                    phase_counter["Period"] = 0
-                    phase_counter["Follicular"] = 0
-                    phase_counter["Ovulation"] = 0
-                    phase_counter["Luteal"] = 0
-                
-                date_str = date_obj.strftime("%Y-%m-%d")
-                
-                # Calculate offset from ovulation
-                offset_from_ov = (date_obj - ovulation_date).days
-                
-                # Calculate ovulation probability for phase determination (NOT fertility probability)
-                # This ensures Ovulation phase is 1-4 days, not 6+ days
-                ov_prob = ovulation_probability(offset_from_ov, ovulation_sd)
-                
-                # Also calculate fertility probability for tracking purposes
-                fert_prob = fertility_probability(offset_from_ov, ovulation_sd)
-                
-                # Determine phase based on rules
-                # ⚠️ CRITICAL: days_since_start is 1-INDEXED (cycle start = day 1, not day 0)
-                # Formula: (date_obj - cycle_start).days + 1
-                # Example: If period_days = 5, then days 1, 2, 3, 4, 5 are Period phase (5 days inclusive)
-                days_since_start = (date_obj - cycle_start).days + 1
-                
-                # Determine which phase this day belongs to
-                # Biologically accurate phase calculation:
-                # Period: first period_days
-                # Follicular: after period until ovulation phase starts (extends until ovulation window)
-                # Ovulation: days with high ovulation probability (1-3 days max)
-                # Luteal: starts after ovulation phase until next period (uses adaptive luteal_mean)
-                
-                # Determine phase based on ovulation probability (not fertility probability)
-                # This ensures Ovulation phase represents actual ovulation event (1-3 days max)
-                # Follicular phase extends until ovulation phase starts
-                # Adaptive threshold: regular cycles (1-2 days) vs irregular cycles (2-3 days)
-                ovulation_threshold = get_ovulation_fertility_threshold(ovulation_sd)
-                
-                # ⚠️ CRITICAL: days_since_start is 1-INDEXED
-                # If period_days = 5, then days 1, 2, 3, 4, 5 are Period phase (5 days inclusive)
-                # DO NOT change to < period_days or period_days + 1 - this will break silently
-                if days_since_start <= period_days:
-                    # Period phase
-                    phase = "Period"
-                elif offset_from_ov in ovulation_days:
-                    # Ovulation phase: Top-N days by fertility probability (1-3 days max, pre-calculated)
-                    # Uses fertility_probability (biologically meaningful) to align with fertile window
-                    phase = "Ovulation"
-                elif ov_prob < ovulation_threshold:
-                    # Follicular phase: extends from end of period until ovulation phase starts
-                    # This ensures follicular phase continues until ovulation probability is high enough
-                    if date_obj < ovulation_date:
-                        # Before predicted ovulation date and not in ovulation phase = Follicular
-                        phase = "Follicular"
-                    else:
-                        # After predicted ovulation date but not in ovulation phase = Luteal
-                        # (This handles edge cases where ovulation probability drops quickly)
-                        phase = "Luteal"
-                else:
-                    # Fallback: use date-based logic
-                    if date_obj < ovulation_date:
-                        phase = "Follicular"
-                    else:
-                        phase = "Luteal"
-                
-                # Reset counter if phase changed (except for first day)
-                if current_phase is not None and current_phase != phase:
-                    # Phase changed, but don't reset - continue counting within phase
-                    pass
-                
-                # Increment counter for current phase
-                phase_counter[phase] += 1
-                day_in_phase = phase_counter[phase]
-                phase_day_id = generate_phase_day_id(phase, day_in_phase)
-                
-                # Update current phase for next iteration
-                current_phase = phase
-                
-                # Create mapping with all required fields
-                mapping = {
-                    "date": date_str,
-                    "phase": phase,
-                    "phase_day_id": phase_day_id,
-                    "source": "adjusted",
-                    "prediction_confidence": 0.7,
-                    "fertility_prob": round(fert_prob, 3),
-                    "predicted_ovulation_date": ovulation_date_str,
-                    "ovulation_offset": ovulation_offset,
-                    "luteal_estimate": round(luteal_mean, 2),
-                    "luteal_sd": round(luteal_sd, 2),
-                    "ovulation_sd": round(ovulation_sd, 2),
-                    # Note: is_predicted column doesn't exist in database, removed to avoid errors
-                    "rapidapi_request_id": fallback_request_id
-                }
-                
-                phase_mappings.append(mapping)
-                date_obj += timedelta(days=1)
-                cycle_days_processed += 1
-        
-        # Step 4: Store in database
-        print(f"Storing {len(phase_mappings)} phase mappings in database (adjusted fallback)...")
-        store_cycle_phase_map(user_id, phase_mappings, update_future_only=update_future_only, current_date=current_date)
-        print(f"Successfully stored phase mappings for user {user_id}")
-        
-        return phase_mappings
-    
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"Error in generate_cycle_phase_map: {str(e)}")
-        print(f"Traceback: {error_trace}")
-        raise Exception(f"Failed to generate cycle phase map: {str(e)}")
-
 def store_cycle_phase_map(
     user_id: str, 
     phase_mappings: List[Dict],
@@ -1844,7 +1307,7 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
 
 def calculate_phase_for_date_range(
     user_id: str,
-    last_period_date: str,
+    last_period_date: Optional[str],
     cycle_length: int,
     period_logs: List[Dict],
     start_date: Optional[str] = None,
@@ -1854,15 +1317,22 @@ def calculate_phase_for_date_range(
     """
     Calculate phase mappings for a date range using adaptive, medically credible algorithms.
     
+    CONTRACT: period_logs must be pre-sorted by date (e.g. .order("date") in the database query).
+    No redundant .sort() or grouping is performed here; pass in sorted data to save CPU.
+    
+    ZERO-DATA STATE (Log to See Data):
+    - If user has no data in period_logs AND no last_period_date, returns [] (empty calendar).
+    - No virtual/fallback cycles are generated from today's date.
+    
     STATELESS PURE RAM VERSION:
-    - Accepts period_logs as input (must be sorted by date; caller typically uses .order("date"))
+    - Accepts period_logs as input (caller must provide sorted by date)
     - All calculations performed in memory
     - No writes to user_cycle_days table
     
-    ANCHOR LOGIC (every date belongs to a cycle):
+    ANCHOR LOGIC (when user has logged data):
     - For each current_date: find the nearest "Real" cycle start (the Anchor).
-    - If date is before all real logs: project backward from the earliest real log by repeatedly subtracting cycle_length.
-    - If date is between two real logs with a gap > 45 days: projected "Predicted" starts are inserted to fill the gap (forward from the earlier log).
+    - Dates before the first logged period are not assigned a phase (no Predicted-Backward fill).
+    - If date is between two real logs with a gap > 45 days: projected "Predicted" starts fill the gap (forward only).
     - Phase (P1-P5, F1-F10, O1-O4, L1-L14) is calculated from day-in-cycle relative to that anchor.
     
     This is the PRIMARY method for cycle prediction. It uses:
@@ -1881,20 +1351,23 @@ def calculate_phase_for_date_range(
     
     Args:
         user_id: User ID (for adaptive estimates like luteal_mean, period_length)
-        last_period_date: Last known period date (YYYY-MM-DD) - fallback anchor
+        last_period_date: Last known period date (YYYY-MM-DD), or None when no data (returns [])
         cycle_length: Estimated cycle length (days)
         period_logs: List of period log dicts with "date" (and optional "end_date") keys
         start_date: Optional start date for calculation range (YYYY-MM-DD)
         end_date: Optional end date for calculation range (YYYY-MM-DD)
     
     Returns:
-        List of dicts with date, phase, phase_day_id, fertility_prob, and other fields
+        List of dicts with date, phase, phase_day_id, fertility_prob, and other fields; [] when no data.
     """
     try:
-        # datetime and timedelta are already imported at module level
-        # Parse dates
-        last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
-        
+        # ZERO-DATA: No period_logs and no last_period_date -> empty calendar (Log to See Data)
+        has_logs = bool(period_logs and len(period_logs) > 0)
+        has_last_period = bool(last_period_date and (isinstance(last_period_date, str) and last_period_date.strip()))
+        if not has_logs and not has_last_period:
+            print("📭 Zero data: no period_logs and no last_period_date - returning empty phase map")
+            return []
+
         # Default date range: 3 months around today
         today = datetime.now()
         if not start_date:
@@ -1907,15 +1380,19 @@ def calculate_phase_for_date_range(
         else:
             end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
         
-        # Get adaptive estimates (not fixed!)
+        # Hoist statistics: compute once at start, pass into loops (no per-day recalculation)
         luteal_mean, luteal_sd = estimate_luteal(user_id)
-        period_days = estimate_period_length(user_id)
+        period_days = estimate_period_length(user_id, normalized=True)
+        period_length_days = int(round(max(3.0, min(8.0, period_days))))
         
         phase_mappings = []
         current_date = start_date_obj
         
         # Initialize phase counters dictionary for tracking phase days per cycle
         phase_counters_by_cycle = {}
+        
+        # last_period is only needed when we have no logs (for fallback path we exit early) or for backward ref; set after we have validated_period_starts
+        last_period = None
         
         # STATELESS: Derive cycle starts from provided period_logs (no DB calls)
         # Each period_log entry with "date" represents a cycle start
@@ -1993,8 +1470,7 @@ def calculate_phase_for_date_range(
             except Exception:
                 continue
         
-        # Sort chronologically
-        period_start_dates = sorted(period_start_dates)
+        # Assume period_logs was pre-sorted by caller (.order("date")); no redundant sort here.
         
         # MEDICAL GUARDRAIL: 21-day minimum between cycle starts (ACOG).
         # Logs closer than 21 days are treated as Spotting / same cycle - ignored as new cycle start.
@@ -2002,10 +1478,7 @@ def calculate_phase_for_date_range(
         if period_start_dates:
             validated_period_starts.append(period_start_dates[0])  # First is always valid
             
-            # Get estimated period length to check if dates are within the same period
-            period_length_est = estimate_period_length(user_id)
-            period_length_days = int(round(max(3.0, min(8.0, period_length_est))))
-            
+            # Use hoisted period_length_days for same-period check
             for i in range(1, len(period_start_dates)):
                 current_date = period_start_dates[i]
                 last_start = validated_period_starts[-1]
@@ -2030,20 +1503,28 @@ def calculate_phase_for_date_range(
             cycle_starts_raw.append(cs)
             cycle_sources[cs] = "real"
         
-        # GAP FILL: Between two real logs with gap > 45 days, insert predicted cycle starts
-        # so every date in the range has an anchor (no long "F1" stretches).
-        _cycle_days_fill = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length)))
+        # Set last_period for backward-reference paths (only used when we have logs; fallback path returns [] before using it)
+        if has_last_period:
+            last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
+        elif validated_period_starts:
+            last_period = validated_period_starts[0]
+        
+        # GAP FILL: When gap between two real logs > MAX_CYCLE_DAYS, MUST insert predicted
+        # cycle starts every cycle_length days so the daily loop has anchors (no giant Follicular block).
+        cycle_days_fill = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length)))
         for i in range(len(validated_period_starts) - 1):
             earlier = validated_period_starts[i]
             later = validated_period_starts[i + 1]
             gap_days = (later - earlier).days
             if gap_days > MAX_CYCLE_DAYS:
-                fill_start = earlier + timedelta(days=_cycle_days_fill)
-                while fill_start < later and (later - fill_start).days >= MIN_CYCLE_DAYS:
+                # Insert predicted cycle start every cycle_length days until we would reach or pass 'later'
+                fill_start = earlier + timedelta(days=cycle_days_fill)
+                while fill_start < later:
                     if fill_start not in cycle_starts_raw:
                         cycle_starts_raw.append(fill_start)
                         cycle_sources[fill_start] = "predicted"
-                    fill_start += timedelta(days=_cycle_days_fill)
+                    fill_start += timedelta(days=cycle_days_fill)
+                print(f"📅 GAP FILL: inserted {(later - earlier).days // cycle_days_fill} predicted cycle(s) between {earlier.strftime('%Y-%m-%d')} and {later.strftime('%Y-%m-%d')} (gap={gap_days}d)")
         
         # Predict future cycles from the most recent period start
         if validated_period_starts:
@@ -2061,15 +1542,12 @@ def calculate_phase_for_date_range(
                     cycles_predicted += 1
                 current_start = next_start
         
-        # Source 3: Fallback anchor (ONLY if no real logs exist)
+        # No real/predicted cycles -> return empty list (Log to See Data; no virtual/fallback cycles)
         use_fallback = False
         if not cycle_starts_raw:
-            # No real cycles - use fallback anchor (today or last_period_date)
             use_fallback = True
-            fallback_anchor = datetime.strptime(last_period_date, "%Y-%m-%d") if last_period_date else today
-            cycle_starts_raw.append(fallback_anchor)
-            cycle_sources[fallback_anchor] = "fallback"
-            print(f"DEBUG: No real period logs found - using fallback anchor: {fallback_anchor.strftime('%Y-%m-%d')} (source=fallback, will not be persisted)")
+            print("📭 No period logs found - returning empty phase map (use_fallback, no virtual anchor)")
+            return []
         
         # DEDUPLICATE: Remove duplicates using date-only equality
         # Convert to date objects for comparison, then back to datetime
@@ -2104,15 +1582,15 @@ def calculate_phase_for_date_range(
                 current_start = cycle_starts_deduped[i]
                 last_valid_start = cycle_starts[-1]
                 gap = (current_start - last_valid_start).days
-                
-                if gap >= MIN_CYCLE_DAYS:
+                source = cycle_sources.get(current_start, "unknown")
+                # Always keep "real" period starts; enforce MIN_CYCLE_DAYS only for predicted/predicted or predicted/real
+                if source == "real" or gap >= MIN_CYCLE_DAYS:
                     cycle_starts.append(current_start)
                     cycle_metadata[current_start] = {
-                        "source": cycle_sources.get(current_start, "unknown"),
-                        "is_fallback": cycle_sources.get(current_start, "unknown") == "fallback"
+                        "source": source,
+                        "is_fallback": source == "fallback"
                     }
                 else:
-                    source = cycle_sources.get(current_start, "unknown")
                     print(f"⚠️ Skipping cycle start {current_start.strftime('%Y-%m-%d')} - only {gap} days from previous (minimum {MIN_CYCLE_DAYS} days, source={source})")
         
         # Log cycle normalization result
@@ -2121,14 +1599,8 @@ def calculate_phase_for_date_range(
         fallback_count = sum(1 for cs in cycle_starts if cycle_metadata.get(cs, {}).get("is_fallback"))
         print(f"✅ Cycle normalization complete: {len(cycle_starts)} cycles (real={real_count}, predicted={predicted_count}, fallback={fallback_count})")
         
-        # B) Fallback handling (CRITICAL):
-        # If we're in fallback mode (no real period logs), return EMPTY list for blank calendar.
-        # User wants 0 colors when there are 0 logs.
-        if use_fallback:
-            print("📭 No period logs found - returning empty phase map for blank calendar")
-            return []  # EARLY EXIT: Return empty list instead of calculating fallback phases
         # Backward extension: add predicted cycles until start_date is covered (earliest cycle start <= start_date_obj)
-        elif cycle_starts and start_date_obj < cycle_starts[0]:
+        if cycle_starts and start_date_obj < cycle_starts[0]:
             first_cycle = cycle_starts[0]
             cycle_days = max(int(cycle_length), MIN_CYCLE_DAYS)
             extended_cycle = first_cycle - timedelta(days=cycle_days)
@@ -2261,15 +1733,21 @@ def calculate_phase_for_date_range(
                     break
             
             anchor_source_for_diagnostic = None
+            use_backward_virtual_cycle = False  # When True, day_in_cycle comes from modulo formula (no default F1)
             if current_cycle_start is None and earliest_real_dt is not None and current_date < earliest_real_dt:
-                # BEFORE FIRST LOG: anchor = first_log - k*cycle_length so date is in that cycle (Luteal/Ovulation leading into period, NOT F1)
+                # BEFORE FIRST LOG: use day_in_virtual_cycle formula so every date follows the cycle wave (Period -> F -> O -> L)
                 first_log_date = earliest_real_dt
-                days_diff = (first_log_date - current_date).days
-                k = max(1, (days_diff + cycle_days_int - 1) // cycle_days_int)
+                days_until_first_log = (first_log_date - current_date).days
+                day_in_virtual_cycle = (cycle_days_int - (days_until_first_log % cycle_days_int)) % cycle_days_int
+                # 1-indexed: 0 -> day 1 (cycle start), 1..cycle_days_int-1 -> day 2..cycle_days_int
+                day_in_cycle_backward = (day_in_virtual_cycle % cycle_days_int) + 1
+                use_backward_virtual_cycle = True
+                # Anchor for metadata/counters: virtual cycle start so rest of pipeline works
+                k = max(1, (days_until_first_log + cycle_days_int - 1) // cycle_days_int)
                 current_cycle_start = first_log_date - timedelta(days=k * cycle_days_int)
                 use_metadata_from_cycle_str = first_log_date.strftime("%Y-%m-%d")
                 anchor_source_for_diagnostic = "Predicted-Backward"
-                print(f"[DEBUG] Backward: date={current_date.strftime('%Y-%m-%d')} < first_log={first_log_date.strftime('%Y-%m-%d')}, cycle_length={cycle_days_int}, k={k}, anchor={current_cycle_start.strftime('%Y-%m-%d')}")
+                print(f"[DEBUG] Backward: date={current_date.strftime('%Y-%m-%d')} < first_log={first_log_date.strftime('%Y-%m-%d')}, cycle_length={cycle_days_int}, days_until_first={days_until_first_log}, day_in_virtual_cycle={day_in_virtual_cycle}, day_in_cycle={day_in_cycle_backward}")
             elif current_cycle_start is None and first_cycle_start_dt is not None and current_date < first_cycle_start_dt:
                 anchor_candidate = first_cycle_start_dt
                 while anchor_candidate > current_date:
@@ -2281,7 +1759,10 @@ def calculate_phase_for_date_range(
                 anchor_source_for_diagnostic = "Predicted-Backward"
             
             if current_cycle_start is None:
-                reference_dt = earliest_real_dt if earliest_real_dt else last_period
+                reference_dt = earliest_real_dt if earliest_real_dt else (last_period if last_period else None)
+                if not reference_dt:
+                    current_date += timedelta(days=1)
+                    continue
                 anchor_candidate = reference_dt
                 while anchor_candidate > current_date:
                     anchor_candidate -= timedelta(days=cycle_days_int)
@@ -2291,8 +1772,16 @@ def calculate_phase_for_date_range(
                 use_metadata_from_cycle_str = (earliest_real_dt.strftime("%Y-%m-%d") if earliest_real_dt else last_period.strftime("%Y-%m-%d")) if reference_dt else None
                 anchor_source_for_diagnostic = "Predicted-Backward"
             
+            # Log to See Data: do not assign phases to dates before the first logged period (no Predicted-Backward fill)
+            if anchor_source_for_diagnostic == "Predicted-Backward":
+                current_date += timedelta(days=1)
+                continue
+            
             # Calculate day_in_cycle (1-indexed); ensure never negative or None
-            days_in_current_cycle = (current_date - current_cycle_start).days + 1
+            if use_backward_virtual_cycle:
+                days_in_current_cycle = day_in_cycle_backward
+            else:
+                days_in_current_cycle = (current_date - current_cycle_start).days + 1
             if days_in_current_cycle is None or days_in_current_cycle < 1:
                 days_in_current_cycle = 1
             
@@ -2300,7 +1789,9 @@ def calculate_phase_for_date_range(
             cycle_start_str = current_cycle_start.strftime("%Y-%m-%d")
             metadata_key = use_metadata_from_cycle_str if use_metadata_from_cycle_str else cycle_start_str
             
-            # Initialize phase counters for this cycle if not exists
+            # Phase counters are per-cycle (keyed by cycle_start_str). When date moves to a new
+            # anchor (e.g. predicted cycle in a gap), this lookup creates a new counter set at 0,
+            # so the cycle starts over at P1 -> F1 -> O1 -> L1.
             if cycle_start_str not in phase_counters_by_cycle:
                 phase_counters_by_cycle[cycle_start_str] = {
                     "Period": 0, "Follicular": 0, "Ovulation": 0, "Luteal": 0
@@ -2442,14 +1933,8 @@ def calculate_phase_for_date_range(
                     try:
                         period_end = datetime.strptime(period_log["end_date"], "%Y-%m-%d").date()
                     except Exception:
-                        # Fallback to estimated length
-                        period_length = estimate_period_length(user_id, normalized=True)
-                        period_length_days = int(round(max(3.0, min(8.0, period_length))))
                         period_end = period_start + timedelta(days=period_length_days - 1)
                 else:
-                    # Use estimated period length
-                    period_length = estimate_period_length(user_id, normalized=True)
-                    period_length_days = int(round(max(3.0, min(8.0, period_length))))
                     period_end = period_start + timedelta(days=period_length_days - 1)
                 
                 if period_start <= current_date_date <= period_end:
@@ -2488,15 +1973,18 @@ def calculate_phase_for_date_range(
                 phase_day_id = generate_phase_day_id(phase, day_in_phase)
                 print(f"⚠️ Catch-all: Generated phase_day_id {phase_day_id} for date {current_date.strftime('%Y-%m-%d')}")
             
+            # Low confidence when ovulation_sd very high (potentially anovulatory / highly irregular)
+            is_low_confidence = ovulation_sd > 4.0
+            prediction_confidence = 0.4 if is_low_confidence else 0.8
+            
             # CRITICAL: Every date MUST result in a phase mapping
-            # This ensures the array length matches the requested date range perfectly
             phase_mappings.append({
                 "date": current_date.strftime("%Y-%m-%d"),
                 "phase": phase,
                 "phase_day_id": phase_day_id,
                 "source": "local",
-                "prediction_confidence": 0.8,  # High confidence for adaptive local calculation
-                # Note: is_predicted column doesn't exist in database, removed to avoid errors
+                "prediction_confidence": prediction_confidence,
+                "is_low_confidence": is_low_confidence,
                 "fertility_prob": round(fert_prob, 3),
                 "predicted_ovulation_date": ovulation_date_str,
                 "luteal_estimate": round(luteal_mean, 2),
@@ -2523,13 +2011,14 @@ def calculate_phase_for_date_range(
                 })
             current_date += timedelta(days=1)
         
-        # GUARANTEE: Frontend must receive exactly one object per requested day (e.g. 90 days -> 90 objects)
+        # Build final list: include only dates we have phase for; do not fill before first log (Log to See Data)
         by_date = {m["date"]: m for m in phase_mappings}
         follicular_default = {
             "phase": "Follicular",
             "phase_day_id": "f1",
             "source": "local",
             "prediction_confidence": 0.5,
+            "is_low_confidence": False,
             "fertility_prob": 0.0,
             "predicted_ovulation_date": None,
             "luteal_estimate": 14.0,
@@ -2543,10 +2032,12 @@ def calculate_phase_for_date_range(
             m = by_date.get(date_str)
             if m:
                 phase_mappings.append(m)
-            else:
+            elif earliest_real_dt and d.date() >= earliest_real_dt.date():
+                # Fill gap only for dates on or after first logged period
                 phase_mappings.append({"date": date_str, **follicular_default})
+            # else: date is before first log - no phase (omit from list for clean calendar)
             d += timedelta(days=1)
-        print(f"✅ Generated {len(phase_mappings)} phase mappings for {total_days} requested days (no gaps)")
+        print(f"✅ Generated {len(phase_mappings)} phase mappings (dates on/after first log only, no backward virtual fill)")
         return phase_mappings
     
     except Exception as e:

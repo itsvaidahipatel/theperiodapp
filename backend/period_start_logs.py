@@ -87,8 +87,8 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
         # Use service role client if available (bypasses RLS), otherwise use regular client
         client = supabase_admin if supabase_admin else supabase
         
-        # COMPLETE REBUILD: Delete ALL existing PeriodStartLogs for this user
-        print(f"🔄 COMPLETE REBUILD: Deleting all existing PeriodStartLogs for user {user_id}")
+        # Sync: rebuild period_start_logs from period_logs (returns inserted list; callers use it to avoid a follow-up select)
+        print(f"🔄 Syncing period_start_logs for user {user_id}")
         try:
             client.table("period_start_logs").delete().eq("user_id", user_id).execute()
             print(f"✅ Deleted all existing PeriodStartLogs for user {user_id}")
@@ -111,7 +111,7 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
                 insert_response = client.table("period_start_logs").insert(insert_data).execute()
                 inserted = insert_response.data if insert_response.data else insert_data
                 inserted_count = len(inserted)
-                print(f"✅ REBUILT PeriodStartLogs for user {user_id}: {inserted_count} records inserted (sorted by date)")
+                print(f"✅ period_start_logs synced: {inserted_count} records (returned to caller, no DB read needed)")
                 # Return data in same shape as get_period_start_logs (start_date, is_confirmed)
                 result = [{"start_date": r.get("start_date"), "is_confirmed": r.get("is_confirmed", True)} for r in inserted]
                 if len(start_dates) > 1:
@@ -120,7 +120,7 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
                         print(f"   Cycle {i+1}: {start_dates[i].strftime('%Y-%m-%d')} to {start_dates[i+1].strftime('%Y-%m-%d')} = {cycle_length} days")
                 return result
         else:
-            print(f"✅ REBUILT PeriodStartLogs for user {user_id}: 0 records (no period logs found)")
+            print(f"✅ period_start_logs synced: 0 records (no period logs)")
         return []
     
     except Exception as e:

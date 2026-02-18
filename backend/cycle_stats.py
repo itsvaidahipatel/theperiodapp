@@ -125,12 +125,14 @@ def update_user_cycle_stats(user_id: str, period_starts: Optional[List] = None) 
     
     Args:
         user_id: User ID
-        period_starts: Optional list from sync_period_start_logs_from_period_logs return. Use after sync to avoid DB read.
+        period_starts: Optional list from sync_period_start_logs_from_period_logs return.
+            When provided, no DB read is performed (stops COMPLETE REBUILD verification loop).
     """
     try:
         from database import supabase
         from cycle_utils import update_cycle_length_bayesian
         
+        # Use passed period_starts when available (e.g. after sync) to avoid querying period_start_logs again
         stats = compute_cycle_stats_from_period_starts(user_id, period_starts=period_starts)
         
         if stats["cycle_count"] > 0:

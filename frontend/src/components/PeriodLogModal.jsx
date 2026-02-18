@@ -3,9 +3,24 @@ import { X } from 'lucide-react'
 import { logPeriod } from '../utils/api'
 import { formatDateForInput } from '../utils/indianDate'
 
+const BLEEDING_OPTIONS = [2, 3, 4, 5, 6, 7, 8]
+
+const getDefaultBleedingDays = () => {
+  try {
+    const u = localStorage.getItem('user')
+    if (u) {
+      const user = JSON.parse(u)
+      const n = user?.avg_bleeding_days
+      if (n != null) return Math.max(2, Math.min(8, Number(n) || 5))
+    }
+  } catch {}
+  return 5
+}
+
 const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
   const [formData, setFormData] = useState({
     date: selectedDate || formatDateForInput(new Date()),
+    bleeding_days: getDefaultBleedingDays(),
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -15,6 +30,7 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
     if (isOpen) {
       setFormData({
         date: selectedDate || formatDateForInput(new Date()),
+        bleeding_days: getDefaultBleedingDays(),
       })
       setError('')
     }
@@ -46,7 +62,11 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
     }
 
     try {
-      const response = await logPeriod(formData)
+      const payload = {
+        date: formData.date,
+        bleeding_days: Math.max(2, Math.min(8, Number(formData.bleeding_days) || 5)),
+      }
+      const response = await logPeriod(payload)
       if (response.error) {
         setError(response.error)
         setLoading(false)
@@ -81,8 +101,30 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
             <p className="text-sm text-blue-800">
-              <strong>Note:</strong> Log only the date your period started. The system will automatically set the period end based on your typical bleeding length.
+              <strong>Note:</strong> Log the period start date and how many days you bleed. End date is set immediately from your choice.
             </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Bleeding duration (days)
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {BLEEDING_OPTIONS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setFormData((prev) => ({ ...prev, bleeding_days: n }))}
+                  className={`px-3 py-2 rounded-lg border text-sm font-medium transition ${
+                    (formData.bleeding_days ?? getDefaultBleedingDays()) === n
+                      ? 'bg-period-pink text-white border-period-pink'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
           </div>
           
           <div>

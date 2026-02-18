@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { loadDashboardData, loadWellnessData, getCachedWellnessData, refreshAllData, preloadAllWellnessData } from '../utils/dataLoader'
 import { shouldRefetch, clearCache } from '../utils/dataCache'
 import { getUserLanguage } from '../utils/userPreferences'
@@ -27,22 +27,43 @@ export const DataProvider = ({ children }) => {
       return null
     }
   })
+  const isFetchingRef = useRef(false)
+  const lastFetchRef = useRef(0)
+  const FETCH_THROTTLE_MS = 2000
 
   // Check if we need to refetch (date changed or cache invalid)
   const checkAndLoadData = useCallback(async (forceRefresh = false) => {
+    if (isFetchingRef.current) {
+      console.log('⏳ Dashboard data fetch already in progress, skipping')
+      return
+    }
+    const now = Date.now()
+    if (now - lastFetchRef.current < FETCH_THROTTLE_MS) {
+      console.log('⏳ Dashboard data fetch throttled (2000ms), skipping')
+      return
+    }
+    lastFetchRef.current = now
+    isFetchingRef.current = true
     try {
       setLoading(true)
       setError(null)
 
       // Load dashboard data first (always fetch, no cache)
       // Add timeout to prevent hanging
-      const dashboardPromise = loadDashboardData()
+      const dashboardPromise = loadDashboardData(forceRefresh)
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error('Dashboard data loading timeout after 30 seconds')), 30000)
       )
       
       const dashboard = await Promise.race([dashboardPromise, timeoutPromise])
-      setDashboardData(dashboard)
+      const data = dashboard || {}
+      // Transform phase_map array (snake_case from /cycles/phase-map) into keyed object for phaseMap
+      const dataArray = data.phase_map || []
+      const keyedMap = {}
+      dataArray.forEach(item => {
+        if (item.date) keyedMap[item.date] = item
+      })
+      setDashboardData(prev => ({ ...(prev || {}), ...data, phaseMap: keyedMap }))
       setLoading(false)
 
       // Get phase-day ID from dashboard
@@ -123,6 +144,8 @@ export const DataProvider = ({ children }) => {
       setLoadingWellness(false)
       // Set empty data structure to prevent rendering issues
       setDashboardData(prev => prev || { currentPhase: null, phaseMap: null, periodLogs: null })
+    } finally {
+      isFetchingRef.current = false
     }
   }, []) // Empty deps - stable function
 
@@ -211,6 +234,25 @@ export const DataProvider = ({ children }) => {
     }
   }, [checkAndLoadData])
 
+  // Listen for calendar reset/refresh so phase map stays in sync (single source of truth)
+  useEffect(() => {
+    const token = localStorage.getItem('access_token')
+    if (!token) return
+    const handleResetAllCycles = () => {
+      setDashboardData(prev => (prev ? { ...prev, phaseMap: {} } : null))
+    }
+    const handleResetLastPeriod = () => { checkAndLoadData(true) }
+    const handleCalendarRefresh = () => { checkAndLoadData(true) }
+    window.addEventListener('resetAllCycles', handleResetAllCycles)
+    window.addEventListener('resetLastPeriod', handleResetLastPeriod)
+    window.addEventListener('calendarRefresh', handleCalendarRefresh)
+    return () => {
+      window.removeEventListener('resetAllCycles', handleResetAllCycles)
+      window.removeEventListener('resetLastPeriod', handleResetLastPeriod)
+      window.removeEventListener('calendarRefresh', handleCalendarRefresh)
+    }
+  }, [checkAndLoadData])
+
   // Listen for language changes (clear cache and reload)
   useEffect(() => {
     const handleLanguageChange = () => {
@@ -243,8 +285,25 @@ export const DataProvider = ({ children }) => {
     setDashboardData(prev => (prev ? { ...prev, phaseMap: phaseMap || {} } : { phaseMap: phaseMap || {} }))
   }, [])
 
+  // Ensure calendar always gets a keyed phaseMap: use phaseMap when present, else derive from phase_map array.
+  // Fixes race where dashboardData.phaseMap was empty when PeriodCalendar first read context.
+  const effectiveDashboardData = useMemo(() => {
+    if (!dashboardData) return null
+    const pm = dashboardData.phaseMap
+    if (pm && typeof pm === 'object' && Object.keys(pm).length > 0) return dashboardData
+    const arr = dashboardData.phase_map
+    if (Array.isArray(arr) && arr.length > 0) {
+      const keyed = {}
+      arr.forEach(item => {
+        if (item.date) keyed[item.date] = item
+      })
+      return { ...dashboardData, phaseMap: keyed }
+    }
+    return dashboardData
+  }, [dashboardData])
+
   const value = {
-    dashboardData,
+    dashboardData: effectiveDashboardData,
     wellnessData,
     loading,
     loadingWellness,

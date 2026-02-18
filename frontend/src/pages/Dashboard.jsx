@@ -160,42 +160,26 @@ const Dashboard = () => {
   const currentPhase = dashboardData?.currentPhase || null
   const phaseMap = dashboardData?.phaseMap || {}
   const periodLogs = dashboardData?.periodLogs || []
-  
-  // Get today's phase from phaseMap (same as PeriodCalendar) - ensures consistency
-  const [todayPhase, setTodayPhase] = useState(null)
-  
-  useEffect(() => {
-    const updateTodayPhase = () => {
-      const today = format(new Date(), 'yyyy-MM-dd')
-      const phaseData = phaseMap[today]
-      
-      if (phaseData) {
-        const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
-        const phaseDayId = typeof phaseData === 'object' ? (phaseData.phase_day_id || null) : null
-        
-        if (phase) {
-          setTodayPhase({
-            phase: phase,
-            phaseDayId: phaseDayId
-          })
-          return
-        }
-      }
-      
-      // Fallback to currentPhase from context if phaseMap doesn't have today
-      if (currentPhase?.phase) {
-        setTodayPhase({
-          phase: currentPhase.phase,
-          phaseDayId: currentPhase.phase_day_id || currentPhase.id || null
-        })
-      } else {
-        setTodayPhase(null)
+  console.log('Current phaseMap:', phaseMap)
+
+  // Derive today's phase from phaseMap/currentPhase in render (no useEffect = no loop)
+  const todayPhase = (() => {
+    const today = format(new Date(), 'yyyy-MM-dd')
+    const phaseData = phaseMap[today]
+    if (phaseData) {
+      const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
+      const phaseDayId = typeof phaseData === 'object' ? (phaseData.phase_day_id || null) : null
+      if (phase) return { phase, phaseDayId }
+    }
+    if (currentPhase?.phase) {
+      return {
+        phase: currentPhase.phase,
+        phaseDayId: currentPhase.phase_day_id || currentPhase.id || null
       }
     }
-    
-    updateTodayPhase()
-  }, [phaseMap, currentPhase])
-  
+    return null
+  })()
+
   // Check if user has last_period_date
   const hasLastPeriodDate = user?.last_period_date
 
@@ -228,44 +212,50 @@ const Dashboard = () => {
     }
   }, [periodLogs, currentPhase])
 
-  // Track user data to avoid unnecessary updates
+  // Stable key for cycleStats effect: only re-run when these essentials change
+  const lastDataKeyRef = useRef('')
   const userDataRef = useRef(null)
   const isCalculatingRef = useRef(false)
-  
+  const lastCycleStatsKeyRef = useRef('')
+
   useEffect(() => {
-    // Prevent concurrent calculations
+    // 1. Build a stable dataKey from essential dependencies only (no object refs)
+    const dataKey = JSON.stringify([
+      user?.last_period_date ?? '',
+      user?.cycle_length ?? 28,
+      periodLogs?.length ?? 0
+    ])
+    if (dataKey === lastDataKeyRef.current) {
+      return
+    }
+    lastDataKeyRef.current = dataKey
+
     if (isCalculatingRef.current) {
       return
     }
-    
+
     try {
       const userData = localStorage.getItem('user')
       if (userData) {
         const parsedUser = JSON.parse(userData)
-        // Only update user if data actually changed
-        const userKey = JSON.stringify({ 
-          id: parsedUser?.id, 
-          last_period_date: parsedUser?.last_period_date, 
-          cycle_length: parsedUser?.cycle_length 
+        const userKey = JSON.stringify({
+          id: parsedUser?.id,
+          last_period_date: parsedUser?.last_period_date,
+          cycle_length: parsedUser?.cycle_length
         })
         if (userDataRef.current !== userKey) {
-          setUser(parsedUser)
           userDataRef.current = userKey
+          setUser(parsedUser)
         }
-        
-        // Calculate enhanced cycle stats from user data and period logs
+
         if (parsedUser?.last_period_date) {
-          // Create a unique key for this calculation to prevent duplicate calculations
-          // Include dataVersion to trigger recalculation when periodLogs/currentPhase change
           const logsLength = periodLogsRef.current?.length || 0
           const phaseName = currentPhaseRef.current?.phase || 'none'
           const calculationKey = `${parsedUser.last_period_date}-${parsedUser.cycle_length || 28}-${logsLength}-${phaseName}-${dataVersionRef.current}`
-          
-          // Skip if we already calculated for this exact state
+
           if (lastCalculationRef.current === calculationKey) {
             return
           }
-          
           lastCalculationRef.current = calculationKey
           isCalculatingRef.current = true
           try {
@@ -427,11 +417,10 @@ const Dashboard = () => {
               }
             }
             
-            // Set cycle stats after all calculations
-            setCycleStats({
+            const newStats = {
               cycleLength,
-              daysSince: daysSince, // Days since last period start date (always >= 0)
-              daysUntil: daysUntil, // Days until next period start date (always positive)
+              daysSince: daysSince,
+              daysUntil: daysUntil,
               avgPeriodLength,
               cyclesTracked,
               cycleRegularity,
@@ -439,7 +428,12 @@ const Dashboard = () => {
               lutealEstimate,
               currentPhase: phaseToUse?.phase || null,
               phaseDayId: phaseToUse?.phase_day_id || null
-            })
+            }
+            const statsKey = JSON.stringify([cycleLength, daysSince, daysUntil, avgPeriodLength, cyclesTracked, cycleRegularity, phaseToUse?.phase ?? '', phaseToUse?.phase_day_id ?? ''])
+            if (statsKey !== lastCycleStatsKeyRef.current) {
+              lastCycleStatsKeyRef.current = statsKey
+              setCycleStats(newStats)
+            }
           } catch (statsError) {
             console.error('Error calculating cycle stats:', statsError)
             // Set basic stats even if calculation fails
@@ -467,7 +461,7 @@ const Dashboard = () => {
                 }
               }
               
-              setCycleStats({
+              const fallbackStats = {
                 cycleLength: fallbackCycleLength,
                 daysSince: fallbackDaysSince,
                 daysUntil: fallbackDaysUntil,
@@ -478,7 +472,12 @@ const Dashboard = () => {
                 lutealEstimate: 14,
                 currentPhase: phaseToUse?.phase || null,
                 phaseDayId: phaseToUse?.phase_day_id || null
-              })
+              }
+              const fallbackStatsKey = JSON.stringify([fallbackCycleLength, fallbackDaysSince, fallbackDaysUntil, 5, 0, 'Regular', phaseToUse?.phase ?? '', phaseToUse?.phase_day_id ?? ''])
+              if (fallbackStatsKey !== lastCycleStatsKeyRef.current) {
+                lastCycleStatsKeyRef.current = fallbackStatsKey
+                setCycleStats(fallbackStats)
+              }
             } catch (fallbackError) {
               console.error('Error setting fallback stats:', fallbackError)
             }
@@ -493,9 +492,8 @@ const Dashboard = () => {
       isCalculatingRef.current = false
       // Don't crash the app, just log the error
     }
-    // Only depend on navigate - use refs for periodLogs and currentPhase to prevent loops
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigate])
+    // Stable key: only re-run when user identity, last period date, or log count changes
+  }, [user?.id, user?.last_period_date, periodLogs?.length])
 
   // Throttle: don't fire fetch more than once every 2 seconds (stops API spam)
   const lastFetchRef = useRef(0)
@@ -587,20 +585,14 @@ const Dashboard = () => {
         })
       }
       
-      // Dispatch event to clear cache and refresh all data
       window.dispatchEvent(new CustomEvent('periodLogged'))
       window.dispatchEvent(new CustomEvent('calendarUpdated'))
-      
-      // Refresh period episodes
       try {
         const episodes = await getPeriodEpisodes()
         setPeriodEpisodes(episodes || [])
       } catch (error) {
         console.error('Failed to refresh period episodes:', error)
       }
-      
-      // Clear calendar phase map so entire timeline refreshes (PeriodCalendar refetches on periodLogged)
-      updatePhaseMap({})
       setIsModalOpen(false)
     } catch (error) {
       console.error('Failed to log period:', error)
@@ -634,16 +626,19 @@ const Dashboard = () => {
     setIsModalOpen(true)
   }
 
-  // Get phase color for circle - using vibrant, visible colors
+  // Phase colors - backend sends exactly 'Period', 'Follicular', 'Ovulation', 'Luteal' (match logs)
   const getPhaseCircleColor = (phase) => {
+    const raw = phase == null ? '' : (typeof phase === 'string' ? phase : (phase?.phase ?? ''))
+    const phaseStr = (typeof raw === 'string' ? raw : '').trim()
+    if (!phaseStr) return '#D1D5DB'
     const colors = {
-      'Period': '#F8BBD9',      // Pink
-      'Menstrual': '#F8BBD9',   // Pink
-      'Follicular': '#4ECDC4',  // Brighter Teal
-      'Ovulation': '#FFB74D',   // Brighter Orange/Yellow
-      'Luteal': '#BA68C8'       // Brighter Purple
+      Period: '#F8BBD9',
+      Menstrual: '#F8BBD9',
+      Follicular: '#4ECDC4',
+      Ovulation: '#FFB74D',
+      Luteal: '#BA68C8'
     }
-    return colors[phase] || '#D1D5DB' // Grey for unknown
+    return colors[phaseStr] || '#D1D5DB'
   }
 
   const tileClassName = ({ date, view }) => {
@@ -675,64 +670,39 @@ const Dashboard = () => {
 
   const tileContent = ({ date, view }) => {
     if (view === 'month') {
-      const dateStr = format(date, 'yyyy-MM-dd')
-      let phaseData = phaseMap[dateStr]
+      const dateStr = format(date, "yyyy-MM-dd")
+      const dayData = phaseMap[dateStr]
+      console.log(`Lookup ${dateStr}:`, dayData?.phase)
       const dayNumber = date.getDate()
       const today = new Date()
       const isToday = format(date, 'yyyy-MM-dd') === format(today, 'yyyy-MM-dd')
       
-      // Check if date is in predicted bleeding range
       const isBleeding = isInBleedingRange(dateStr)
-      
-      // Check if this date is already logged as a period start
       const isLoggedPeriod = periodLogs.some(log => log.date === dateStr)
       
-      // If this is a logged period but no phase data, create phase data for it
-      if (isLoggedPeriod && !phaseData) {
-        phaseData = {
-          phase: 'Period',
-          phase_day_id: 'p1',
-          is_logged: true
+      // resolvedPhase defaults to null if dayData is missing (NOT 'f1')
+      let resolvedPhase = null
+      if (dayData) {
+        resolvedPhase = (typeof dayData.phase === 'string' && dayData.phase.trim()) ? dayData.phase.trim() : null
+        if (!resolvedPhase && dayData.phase_day_id) {
+          const pid = (dayData.phase_day_id || '').toString().toLowerCase()
+          const first = pid.charAt(0)
+          if (first === 'p') resolvedPhase = 'Period'
+          else if (first === 'f') resolvedPhase = 'Follicular'
+          else if (first === 'o') resolvedPhase = 'Ovulation'
+          else if (first === 'l') resolvedPhase = 'Luteal'
         }
       }
+      if (isLoggedPeriod && !resolvedPhase) resolvedPhase = 'Period'
+      if (!resolvedPhase && isBleeding) resolvedPhase = 'Period'
+
+      const circleColor = resolvedPhase ? getPhaseCircleColor(resolvedPhase) : '#D1D5DB'
       
-      // If phaseData exists but no phase field, derive it from phase_day_id
-      if (phaseData && !phaseData.phase && phaseData.phase_day_id) {
-        const phaseDayId = phaseData.phase_day_id.toLowerCase()
-        const firstChar = phaseDayId.charAt(0)
-        if (firstChar === 'p') {
-          phaseData.phase = 'Period'
-        } else if (firstChar === 'f') {
-          phaseData.phase = 'Follicular'
-        } else if (firstChar === 'o') {
-          phaseData.phase = 'Ovulation'
-        } else if (firstChar === 'l') {
-          phaseData.phase = 'Luteal'
-        }
-      }
-      
-      // Determine circle color - prioritize phase data, then logged periods, then bleeding range
-      let circleColor = '#D1D5DB' // Default grey
-      if (phaseData && phaseData.phase) {
-        // Use phase data if available (this includes predictions)
-        circleColor = getPhaseCircleColor(phaseData.phase)
-      } else if (isLoggedPeriod) {
-        // Fallback: show Period color for logged periods
-        circleColor = getPhaseCircleColor('Period')
-      } else if (isBleeding) {
-        // If in bleeding range but no phase data, show Period color
-        circleColor = getPhaseCircleColor('Period')
-      }
-      
-      // Debug logging for current month dates (only log first few to avoid spam)
-      // Reuse currentMonth and currentYear declared earlier
       if (isToday || (dayNumber <= 3 && date.getMonth() === currentMonth && date.getFullYear() === currentYear)) {
-        console.log(`📅 Date ${dateStr}: phaseData=${phaseData ? 'yes' : 'no'}, phase=${phaseData?.phase || 'none'}, phase_day_id=${phaseData?.phase_day_id || 'none'}, color=${circleColor}, isLogged=${isLoggedPeriod}, isBleeding=${isBleeding}, phaseMap has ${Object.keys(phaseMap).length} dates`)
+        console.log(`📅 Date ${dateStr}: dayData=${dayData ? 'yes' : 'no'}, phase=${resolvedPhase ?? 'null'}, color=${circleColor}`)
       }
       
-      // Use filled circle with white border for better visibility
-      // Force inline styles to ensure colors are applied
-      // Mobile-optimized: smaller circles on mobile
+      // Circle: highest z-index so it sits on top; backgroundColor explicitly from resolvedPhase
       const circleSize = (isMobile === true) ? '2rem' : '2.75rem'
       const borderWidth = (isMobile === true) ? '2px' : '3px'
       const circleStyle = {
@@ -741,13 +711,13 @@ const Dashboard = () => {
         height: circleSize,
         minHeight: circleSize,
         borderRadius: '50%',
-        backgroundColor: circleColor,
+        backgroundColor: getPhaseCircleColor(resolvedPhase || ''),
         border: `${borderWidth} solid white`,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        zIndex: 1000,
+        zIndex: 1001,
         pointerEvents: 'none',
         boxShadow: isToday ? `0 0 0 ${borderWidth} ${circleColor}80` : '0 2px 4px rgba(0,0,0,0.15)',
         padding: (isMobile === true) ? '0.15rem' : '0.25rem',
@@ -756,14 +726,15 @@ const Dashboard = () => {
         flexShrink: 0
       }
       
-      const phaseDayId = phaseData?.phase_day_id || ''
+      // Only show phase_day_id when we have dayData (no default to 'f1')
+      const phaseDayId = dayData ? (dayData.phase_day_id || '') : ''
       
       // ⚠️ MEDICAL ACCURACY: Show fertile window indicator even in Follicular phase
       // Fertile window is 5-6 days (sperm survival + ovulation + egg viability)
       // Days with high fertility_prob should be visually marked even if phase is "Follicular"
-      const fertilityProb = phaseData?.fertility_prob
+      const fertilityProb = dayData?.fertility_prob
       const isFertileDay = fertilityProb != null && fertilityProb >= 0.3  // Threshold for visual indicator
-      const showFertileIndicator = Boolean(isFertileDay && phaseData?.phase !== 'Ovulation' && phaseData?.phase !== 'Period')
+      const showFertileIndicator = Boolean(isFertileDay && resolvedPhase !== 'Ovulation' && resolvedPhase !== 'Period')
       
       return (
         <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start' }}>

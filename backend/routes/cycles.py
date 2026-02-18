@@ -103,9 +103,11 @@ async def get_current_phase(
         if not user_response.data or not user_response.data[0]:
             return {"phase": None, "phase_day_id": None, "id": None, "message": "User data not found."}
         user = user_response.data[0]
-        last_period_date = user.get("last_period_date") or datetime.now().strftime("%Y-%m-%d")
+        last_period_date = user.get("last_period_date")
         if hasattr(last_period_date, "strftime"):
-            last_period_date = last_period_date.strftime("%Y-%m-%d")
+            last_period_date = last_period_date.strftime("%Y-%m-%d") if last_period_date else None
+        elif last_period_date is not None and not isinstance(last_period_date, str):
+            last_period_date = str(last_period_date)
         cycle_length = int(user.get("cycle_length", 28))
 
         logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
@@ -122,6 +124,15 @@ async def get_current_phase(
                 "phase_day_id": period_day_id,
                 "date": check_date,
                 "is_actual": True,
+            }
+
+        # Log to See Data: no last_period_date -> no phase (do not default to today)
+        if not last_period_date:
+            return {
+                "phase": None,
+                "phase_day_id": None,
+                "id": None,
+                "message": "No phase data. Please set your last period date or log a period."
             }
 
         # 3) Use same math as calendar: single-day calculate_phase_for_date_range
@@ -201,8 +212,9 @@ async def get_phase_map(
         last_period_date = user.get("last_period_date")
         cycle_length = user.get("cycle_length", 28)
         
+        # Log to See Data: no last_period_date -> empty phase map (onboarding collects it)
         if not last_period_date:
-            last_period_date = datetime.now().strftime("%Y-%m-%d")
+            return {"phase_map": []}
         
         # Normalize last_period_date to string
         if hasattr(last_period_date, "strftime"):

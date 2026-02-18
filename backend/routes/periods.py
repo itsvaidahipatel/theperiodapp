@@ -29,6 +29,7 @@ router = APIRouter()
 class PeriodLogRequest(BaseModel):
     date: str  # Period start date (REQUIRED - source of truth)
     end_date: Optional[str] = None  # Period end date (OPTIONAL - can be logged later)
+    bleeding_days: Optional[int] = None  # If set, end_date = start + (bleeding_days - 1); matches profile buttons [2-8]
     flow: Optional[str] = None
     notes: Optional[str] = None
 
@@ -114,13 +115,15 @@ async def log_period(
                     detail=f"This date falls within an existing period (started {start_date_str}). Please log only the period start date."
                 )
 
-        # Step 1: Auto-assign end_date from user's typical bleeding length (avg_bleeding_days)
-        avg_bleeding_days = int(current_user.get("avg_bleeding_days") or 5)
-        avg_bleeding_days = max(2, min(8, avg_bleeding_days))
-        estimated_end_date = date_obj + timedelta(days=avg_bleeding_days - 1)
+        # Step 1: Assign end_date from request bleeding_days (if provided) or user's avg_bleeding_days
+        if log_data.bleeding_days is not None:
+            bleeding_days = max(2, min(8, int(log_data.bleeding_days)))
+        else:
+            bleeding_days = max(2, min(8, int(current_user.get("avg_bleeding_days") or 5)))
+        estimated_end_date = date_obj + timedelta(days=bleeding_days - 1)
         end_date_value = estimated_end_date.strftime("%Y-%m-%d")
-        is_manual_end_value = False  # Auto-generated from avg_bleeding_days
-        print(f"📊 Auto-assigned end_date: {end_date_value} (avg_bleeding_days={avg_bleeding_days})")
+        is_manual_end_value = log_data.bleeding_days is not None  # Explicit from UI
+        print(f"📊 end_date: {end_date_value} (bleeding_days={bleeding_days})")
 
         # Overlap protection: if the previous period (by start date) has auto end_date >= new start, trim it
         prev_logs = supabase.table("period_logs").select("id", "date", "end_date", "is_manual_end").eq("user_id", user_id).lt("date", log_data.date).order("date", desc=True).limit(1).execute()
