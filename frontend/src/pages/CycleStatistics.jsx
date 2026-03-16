@@ -1,17 +1,29 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Calendar, Activity, TrendingUp, AlertCircle, CheckCircle2, History } from 'lucide-react'
+import { ArrowLeft, Calendar, Activity, AlertCircle, History, Info } from 'lucide-react'
 import Navbar from '../components/Navbar'
 import { getCycleStats } from '../utils/api'
 import { format, parseISO } from 'date-fns'
 
-// Pastel color scheme matching app theme
+// Pastel color scheme matching app theme (4-phase system)
 const PHASE_COLORS = {
-  Period: '#F8BBD9',      // Soft pastel pink
-  Follicular: '#FEF3C7',  // Soft pastel yellow/cream
-  Ovulation: '#B8E6E6',   // Soft pastel teal/cyan
-  Luteal: '#E1BEE7',      // Soft pastel lavender
+  Period: '#F8BBD9',
+  Follicular: '#FEF3C7',
+  Ovulation: '#B8E6E6',
+  Luteal: '#E1BEE7',
 }
+
+const phaseDayIdToPhase = (phaseDayId) => {
+  if (!phaseDayId || typeof phaseDayId !== 'string') return 'Follicular'
+  const first = (phaseDayId[0] || '').toLowerCase()
+  if (first === 'p') return 'Period'
+  if (first === 'f') return 'Follicular'
+  if (first === 'o') return 'Ovulation'
+  if (first === 'l') return 'Luteal'
+  return 'Follicular'
+}
+
+const phaseToColor = (phase) => PHASE_COLORS[phase] || PHASE_COLORS.Follicular
 
 const CycleStatistics = () => {
   const navigate = useNavigate()
@@ -62,99 +74,110 @@ const CycleStatistics = () => {
     }
   }, [])
 
-  const getConfidenceColor = (level) => {
-    switch (level) {
-      case 'High':
-        return 'bg-green-100 text-green-800 border-green-300'
-      case 'Medium':
-        return 'bg-yellow-100 text-yellow-800 border-yellow-300'
-      case 'Low':
-        return 'bg-red-100 text-red-800 border-red-300'
-      default:
-        return 'bg-gray-100 text-gray-800 border-gray-300'
-    }
-  }
-
-  const getRegularityLabel = (regularity) => {
-    const labels = {
-      very_regular: 'Very Regular',
-      regular: 'Regular',
-      somewhat_irregular: 'Somewhat Irregular',
-      irregular: 'Irregular',
-      unknown: 'Unknown'
-    }
-    return labels[regularity] || regularity
-  }
-
-  const getRegularityColor = (regularity) => {
-    switch (regularity) {
-      case 'very_regular':
-        return 'text-green-600'
-      case 'regular':
-        return 'text-green-500'
-      case 'somewhat_irregular':
-        return 'text-yellow-600'
-      case 'irregular':
-        return 'text-red-600'
-      default:
-        return 'text-gray-600'
-    }
-  }
-
-  const calculatePhaseForDay = (dayInCycle, cycleLength, periodLength) => {
-    if (dayInCycle <= periodLength) {
-      return { phase: 'Period', color: PHASE_COLORS.Period }
-    }
-    
-    const ovulationDay = Math.max(8, cycleLength - 14)
-    const fertileStart = ovulationDay - 5
-    const fertileEnd = ovulationDay
-    
-    if (dayInCycle >= fertileStart && dayInCycle <= fertileEnd) {
-      return { phase: 'Ovulation', color: PHASE_COLORS.Ovulation }
-    }
-    
-    if (dayInCycle > ovulationDay) {
-      return { phase: 'Luteal', color: PHASE_COLORS.Luteal }
-    }
-    
-    return { phase: 'Follicular', color: PHASE_COLORS.Follicular }
-  }
-
   const renderCycleDots = (cycle) => {
-    const cycleLength = cycle.length
-    const periodLength = Math.min(Math.round(stats?.averagePeriodLength || 5), Math.max(2, cycleLength - 10))
-    const dots = []
-    
-    const maxDays = cycle.isCurrent 
-      ? Math.min(cycleLength + 7, Math.max(cycleLength, 28))
-      : cycleLength
-    
-    const ovulationDay = Math.max(8, cycleLength - 14)
-    
-    for (let day = 1; day <= maxDays; day++) {
-      const phaseInfo = calculatePhaseForDay(day, cycleLength, periodLength)
-      const isOvulationDay = day === ovulationDay
-      const isFutureDay = cycle.isCurrent && day > cycleLength
-      
-      dots.push(
+    const cycleData = cycle.cycleData || cycle.cycle_data_json
+    if (!cycleData || cycleData.length === 0) {
+      return Array.from({ length: Math.min(cycle.length || 28, 35) }, (_, i) => (
+        <div key={i} className="w-2.5 h-2.5 rounded-full bg-gray-200 opacity-60" title="Loading" />
+      ))
+    }
+    return cycleData.map((entry, idx) => {
+      const phase = entry.phase || phaseDayIdToPhase(entry.phase_day_id)
+      const color = phaseToColor(phase)
+      const isPredicted = entry.is_predicted === true
+      const isOvulation = (entry.phase_day_id || '').toLowerCase().startsWith('o')
+      return (
         <div
-          key={day}
-          className="w-2.5 h-2.5 rounded-full border border-white/50 shadow-sm transition-all hover:scale-125"
+          key={entry.date || idx}
+          className={`w-2.5 h-2.5 rounded-full transition-all hover:scale-125 ${isPredicted ? 'border border-dashed' : 'border border-white/50 shadow-sm'}`}
           style={{
-            backgroundColor: isFutureDay ? '#F3F4F6' : phaseInfo.color,
-            borderColor: isOvulationDay ? '#67E8F9' : 'rgba(255, 255, 255, 0.5)',
-            boxShadow: isOvulationDay ? '0 0 0 1px #67E8F9' : 'none',
-            opacity: isFutureDay ? 0.5 : 1
+            backgroundColor: color,
+            borderColor: isOvulation ? '#67E8F9' : 'rgba(255, 255, 255, 0.5)',
+            boxShadow: isOvulation ? '0 0 0 1px #67E8F9' : 'none',
+            opacity: isPredicted ? 0.7 : 1,
           }}
-          title={isFutureDay 
-            ? `Day ${day}: Future (estimated)` 
-            : `Day ${day}: ${phaseInfo.phase}${isOvulationDay ? ' (Ovulation)' : ''}`}
+          title={`${entry.date || ''}: ${phase}${isPredicted ? ' (Predicted)' : ' (Actual)'}`}
         />
       )
+    })
+  }
+
+  const getPhaseDates = (cycle) => {
+    const cycleData = cycle.cycleData || cycle.cycle_data_json
+    if (!cycleData || cycleData.length === 0) return []
+
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+
+    const firstByPhase = {}
+    for (const entry of cycleData) {
+      const phase = entry.phase || phaseDayIdToPhase(entry.phase_day_id)
+      if (!firstByPhase[phase]) {
+        const d = entry.date ? (typeof entry.date === 'string' ? parseISO(entry.date) : new Date(entry.date)) : null
+        if (d) firstByPhase[phase] = { date: d, predicted: entry.is_predicted === true || d > today }
+      }
     }
-    
-    return dots
+
+    return [
+      { label: 'Period', date: firstByPhase.Period?.date, predicted: firstByPhase.Period?.predicted ?? false },
+      { label: 'Follicular', date: firstByPhase.Follicular?.date, predicted: firstByPhase.Follicular?.predicted ?? false },
+      { label: 'Ovulation', date: firstByPhase.Ovulation?.date, predicted: firstByPhase.Ovulation?.predicted ?? false },
+      { label: 'Luteal', date: firstByPhase.Luteal?.date, predicted: firstByPhase.Luteal?.predicted ?? false },
+    ].filter((p) => p.date)
+  }
+
+  const currentCycle = cycles.find((c) => c.isCurrent)
+  const todayStr = new Date().toISOString().slice(0, 10)
+  const todayEntry = currentCycle?.cycleData?.find((e) => (e.date || '').slice(0, 10) === todayStr)
+  const dayInCycle = stats?.daysSinceLastPeriod != null ? stats.daysSinceLastPeriod + 1 : null
+  const currentPhase = todayEntry ? (todayEntry.phase || phaseDayIdToPhase(todayEntry.phase_day_id)) : null
+
+  const getRegularityLabel = (r) => ({ very_regular: 'Very Regular', regular: 'Regular', somewhat_irregular: 'Somewhat Irregular', irregular: 'Irregular', unknown: 'Unknown' }[r] || r)
+
+  const RegularityBar = ({ regularity }) => {
+    const levels = ['very_regular', 'regular', 'somewhat_irregular', 'irregular']
+    const idx = levels.indexOf(regularity)
+    const colors = ['bg-emerald-500', 'bg-green-400', 'bg-amber-500', 'bg-red-500']
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex justify-between text-xs text-gray-600 mb-0.5">
+          <span>Regularity</span>
+          <span className="font-medium">{getRegularityLabel(regularity)}</span>
+        </div>
+        <div className="flex h-2 rounded-full overflow-hidden bg-gray-200">
+          {levels.map((level, i) => (
+            <div
+              key={level}
+              className={`flex-1 transition-colors ${colors[i]} ${idx === i ? 'ring-2 ring-gray-800 ring-offset-1' : 'opacity-50'}`}
+              title={getRegularityLabel(level)}
+            />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const ConfidenceSignal = ({ conf }) => {
+    if (!conf) return null
+    const level = (conf.level || '').toLowerCase()
+    const bars = level === 'high' ? 3 : level === 'medium' ? 2 : 1
+    const tooltip = `${conf.percentage}% – ${conf.level} Confidence. ${conf.reason || ''}`
+    return (
+      <div className="group relative inline-flex items-end gap-0.5 h-5" title={tooltip}>
+        {[1, 2, 3].map((i) => (
+          <div
+            key={i}
+            className={`w-1.5 rounded-sm transition-all ${
+              i <= bars ? (bars === 3 ? 'bg-green-500' : bars === 2 ? 'bg-amber-500' : 'bg-red-500') : 'bg-gray-200'
+            }`}
+            style={{ height: `${i * 5}px` }}
+          />
+        ))}
+        <div className="absolute -top-10 left-1/2 -translate-x-1/2 px-2 py-1.5 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap max-w-xs text-center z-10">
+          {tooltip}
+        </div>
+      </div>
+    )
   }
 
   const formatDateRange = (startDate, endDate, isCurrent) => {
@@ -162,14 +185,14 @@ const CycleStatistics = () => {
       const start = typeof startDate === 'string' ? parseISO(startDate) : new Date(startDate)
       const end = endDate ? (typeof endDate === 'string' ? parseISO(endDate) : new Date(endDate)) : null
       
-      const startFormatted = format(start, 'MMM d')
+      const startFormatted = format(start, 'MMM d, yyyy')
       
       if (isCurrent) {
         return `Started ${startFormatted}`
       }
       
       if (end) {
-        const endFormatted = format(end, 'MMM d')
+        const endFormatted = format(end, 'MMM d, yyyy')
         return `${startFormatted} – ${endFormatted}`
       }
       
@@ -237,100 +260,44 @@ const CycleStatistics = () => {
           </p>
         </div>
 
-        {/* Confidence Badge */}
-        {stats.confidence && (
-          <div className={`mb-6 p-4 rounded-lg border-2 ${getConfidenceColor(stats.confidence.level)}`}>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium mb-1">Prediction Confidence</div>
-                <div className="text-2xl font-bold">{stats.confidence.percentage}%</div>
-                <div className="text-sm mt-1">{stats.confidence.level} Confidence</div>
-              </div>
-              <div className="text-right">
-                <div className="text-xs opacity-75">{stats.confidence.reason}</div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Key Metrics Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-          {/* Average Cycle Length */}
-          <div className="bg-white rounded-lg shadow-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Calendar className="h-5 w-5 text-period-pink" />
-              <h3 className="font-semibold text-gray-700">Average Cycle Length</h3>
-            </div>
-            <div className="text-3xl font-bold text-period-pink mb-1">
-              {stats.averageCycleLength?.toFixed(1) || 'N/A'} days
-            </div>
-            {stats.shortestCycle && stats.longestCycle && (
-              <div className="text-sm text-gray-600">
-                Range: {stats.shortestCycle} - {stats.longestCycle} days
-              </div>
-            )}
-          </div>
-
-          {/* Average Period Length */}
-          <div className="bg-white rounded-lg shadow-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp className="h-5 w-5 text-period-pink" />
-              <h3 className="font-semibold text-gray-700">Average Period Length</h3>
-            </div>
-            <div className="text-3xl font-bold text-period-pink mb-1">
-              {stats.averagePeriodLength?.toFixed(1) || 'N/A'} days
-              {stats.isPeriodLengthOutsideRange && (
-                <span className="text-sm text-yellow-600 ml-2" title="Outside typical range (3-8 days)">
-                  ⚠️
-                </span>
+        {/* Hero: 3 Info Cards + Confidence Signal */}
+        <div className="mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+            <div className="bg-white rounded-xl border-2 border-gray-100 p-5 shadow-md">
+              <p className="text-sm font-medium text-gray-500 mb-1">Current Status</p>
+              {(dayInCycle != null || currentPhase) ? (
+                <>
+                  {dayInCycle != null && <p className="text-3xl sm:text-4xl font-bold text-period-pink">Day {dayInCycle}</p>}
+                  {currentPhase && <p className="text-lg font-semibold text-gray-700">{currentPhase}</p>}
+                </>
+              ) : (
+                <p className="text-lg text-gray-500">No period logged</p>
               )}
             </div>
-            {stats.shortestPeriod && stats.longestPeriod && (
-              <div className="text-sm text-gray-600">
-                Range: {stats.shortestPeriod} - {stats.longestPeriod} days
-              </div>
-            )}
-            {stats.isPeriodLengthOutsideRange && (
-              <div className="text-xs text-yellow-700 mt-1 italic">
-                Your actual pattern ({stats.averagePeriodLength?.toFixed(1)} days) is outside the typical range (3-8 days). 
-                Phase calculations use normalized value ({stats.averagePeriodLengthNormalized?.toFixed(1)} days) for medical accuracy.
-              </div>
-            )}
-          </div>
-
-          {/* Cycle Regularity */}
-          <div className="bg-white rounded-lg shadow-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Activity className="h-5 w-5 text-period-pink" />
-              <h3 className="font-semibold text-gray-700">Cycle Regularity</h3>
+            <div className="bg-white rounded-xl border-2 border-gray-100 p-5 shadow-md">
+              <p className="text-sm font-medium text-gray-500 mb-1">Average Cycle</p>
+              <p className="text-3xl sm:text-4xl font-bold text-period-pink">
+                {stats.averageCycleLength?.toFixed(0) || 'N/A'} days
+              </p>
             </div>
-            <div className={`text-2xl font-bold mb-1 ${getRegularityColor(stats.cycleRegularity)}`}>
-              {getRegularityLabel(stats.cycleRegularity)}
-            </div>
-            <div className="text-sm text-gray-600">
-              {stats.totalCycles} valid cycle{stats.totalCycles !== 1 ? 's' : ''} (21-45 days) used for statistics
+            <div className="bg-white rounded-xl border-2 border-gray-100 p-5 shadow-md">
+              <p className="text-sm font-medium text-gray-500 mb-1">Average Period</p>
+              <p className="text-3xl sm:text-4xl font-bold text-period-pink">
+                {stats.averagePeriodLength?.toFixed(0) || 'N/A'} days
+              </p>
             </div>
           </div>
-
-          {/* Last Period */}
-          <div className="bg-white rounded-lg shadow-lg p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Calendar className="h-5 w-5 text-period-pink" />
-              <h3 className="font-semibold text-gray-700">Last Period</h3>
-            </div>
-            {stats.lastPeriodDate ? (
-              <>
-                <div className="text-lg font-bold text-gray-800 mb-1">
-                  {new Date(stats.lastPeriodDate).toLocaleDateString()}
-                </div>
-                {stats.daysSinceLastPeriod !== null && (
-                  <div className="text-sm text-gray-600">
-                    {stats.daysSinceLastPeriod} day{stats.daysSinceLastPeriod !== 1 ? 's' : ''} ago
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="text-gray-500">No period logged</div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6">
+            {stats.confidence && (
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <span>Confidence</span>
+                <ConfidenceSignal conf={stats.confidence} />
+              </div>
+            )}
+            {stats.cycleRegularity && stats.cycleRegularity !== 'unknown' && (
+              <div className="flex-1 min-w-0 max-w-xs">
+                <RegularityBar regularity={stats.cycleRegularity} />
+              </div>
             )}
           </div>
         </div>
@@ -366,21 +333,18 @@ const CycleStatistics = () => {
           </div>
         )}
 
-        {/* Insights */}
+        {/* Quick Tips (Insights) */}
         {stats.insights && stats.insights.length > 0 && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5 text-period-pink" />
-              Insights
-            </h3>
-            <ul className="space-y-2">
-              {stats.insights.map((insight, index) => (
-                <li key={index} className="flex items-start gap-2 text-sm text-gray-700">
-                  <span className="text-period-pink mt-1">•</span>
-                  <span>{insight}</span>
-                </li>
-              ))}
-            </ul>
+          <div className="mb-6 p-4 sm:p-5 bg-blue-50 rounded-xl border border-blue-100 flex gap-3">
+            <Info className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-blue-900 mb-2">Quick Tips</p>
+              <ul className="space-y-1 text-sm text-blue-800">
+                {stats.insights.map((insight, i) => (
+                  <li key={i}>{insight}</li>
+                ))}
+              </ul>
+            </div>
           </div>
         )}
 
@@ -396,131 +360,93 @@ const CycleStatistics = () => {
           </div>
         )}
 
-        {/* Cycle History Section */}
-        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-          <div className="flex items-center gap-3 mb-6">
-            <History className="h-6 w-6 text-period-pink" />
-            <h2 className="text-2xl font-bold text-gray-800">Cycle History</h2>
-          </div>
-
-          {/* Legend */}
-          <div className="mb-6 p-4 bg-gradient-to-br from-pink-50 to-purple-50 rounded-xl border border-pink-100">
-            <p className="text-sm font-semibold text-gray-700 mb-3">Phase Legend</p>
-            <div className="flex flex-wrap gap-4 sm:gap-6">
+        {/* Legend: 4-phase system + Actual vs Predicted */}
+        {cycles.length > 0 && (
+          <div className="mb-6 p-4 bg-white rounded-xl border border-gray-100 shadow-sm">
+            <p className="text-sm font-semibold text-gray-700 mb-3">Legend</p>
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
               <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full border border-white shadow-sm" style={{ backgroundColor: PHASE_COLORS.Period }} />
-                <span className="text-sm text-gray-700">Period</span>
+                <div className="w-3 h-3 rounded-full border border-white/50 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Period }} />
+                <span className="text-sm text-gray-600">Period</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full border border-white shadow-sm" style={{ backgroundColor: PHASE_COLORS.Follicular }} />
-                <span className="text-sm text-gray-700">Follicular</span>
+                <div className="w-3 h-3 rounded-full border border-white/50 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Follicular }} />
+                <span className="text-sm text-gray-600">Follicular</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full border border-cyan-400 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Ovulation }} />
-                <span className="text-sm text-gray-700">Ovulation</span>
+                <div className="w-3 h-3 rounded-full border border-white/50 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Ovulation }} />
+                <span className="text-sm text-gray-600">Ovulation</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full border border-white shadow-sm" style={{ backgroundColor: PHASE_COLORS.Luteal }} />
-                <span className="text-sm text-gray-700">Luteal</span>
+                <div className="w-3 h-3 rounded-full border border-white/50 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Luteal }} />
+                <span className="text-sm text-gray-600">Luteal</span>
+              </div>
+              <span className="text-gray-300">|</span>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full border border-white/50 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Period }} />
+                <span className="text-sm text-gray-600">Actual</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full border-2 border-dashed border-gray-400" style={{ backgroundColor: PHASE_COLORS.Period, opacity: 0.7 }} />
+                <span className="text-sm text-gray-600">Predicted</span>
               </div>
             </div>
           </div>
+        )}
 
-          {/* Cycles List */}
+        {/* Cycle History */}
+        <div className="bg-white rounded-xl shadow-lg p-6 mb-6 border-2 border-gray-100">
+          <div className="flex items-center gap-3 mb-4">
+            <History className="h-6 w-6 text-period-pink" />
+            <h2 className="text-xl font-bold text-gray-800">Cycle History</h2>
+          </div>
+
           {cycles.length === 0 ? (
-            <div className="text-center py-16">
-              <Calendar className="h-16 w-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-600 text-lg font-semibold mb-2">No cycle history available</p>
+            <div className="text-center py-12">
+              <Calendar className="h-14 w-14 text-gray-300 mx-auto mb-3" />
+              <p className="text-gray-600 font-semibold mb-1">No cycle history available</p>
               <p className="text-gray-500 text-sm">Log at least 2 periods to see cycle history</p>
             </div>
           ) : (
-            <div className="space-y-4 sm:space-y-6">
+            <div className="space-y-4">
               {cycles.map((cycle, index) => (
                 <div
                   key={index}
-                  className="border-2 border-gray-100 p-5 sm:p-6 hover:border-period-pink/30 transition-all rounded-lg"
+                  className={`rounded-xl p-4 sm:p-5 transition-all shadow-md ${
+                    cycle.isCurrent
+                      ? 'bg-gradient-to-br from-pink-50 to-purple-50 border-2 border-period-pink/40 ring-2 ring-period-pink/20'
+                      : 'border-2 border-gray-100 hover:border-period-pink/30 hover:shadow-lg'
+                  }`}
                 >
-                  {/* Cycle Header */}
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-                    <div>
-                      {cycle.isCurrent ? (
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xl sm:text-2xl font-bold text-period-pink">Current cycle</span>
-                          <span className="px-3 py-1 bg-period-pink/10 text-period-pink text-sm font-semibold rounded-full">
-                            {cycle.length} days
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xl sm:text-2xl font-bold text-gray-800">{cycle.length} days</span>
-                        </div>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+                    <p className="text-base sm:text-lg font-semibold text-gray-800">
+                      {formatDateRange(cycle.startDate, cycle.endDate, cycle.isCurrent)}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {cycle.status === 'late' && (
+                        <span className="px-2.5 py-1 bg-amber-500/90 text-white text-xs font-semibold rounded-lg">
+                          Late {cycle.daysLate != null ? `${cycle.daysLate}d` : ''}
+                        </span>
                       )}
-                      <p className="text-sm sm:text-base text-gray-600 mt-1">
-                        {formatDateRange(cycle.startDate, cycle.endDate, cycle.isCurrent)}
-                      </p>
+                      {cycle.isAnomaly && (
+                        <span className="px-2.5 py-1 text-white text-xs font-semibold rounded-lg" style={{ backgroundColor: 'rgb(255, 127, 80)' }}>
+                          Irregular
+                        </span>
+                      )}
                     </div>
-                    {cycle.isAnomaly && (
-                      <span className="px-3 py-1 bg-yellow-100 text-yellow-800 text-xs font-semibold rounded-full self-start sm:self-auto">
-                        Anomaly
-                      </span>
-                    )}
                   </div>
-
-                  {/* Cycle Dots Visualization */}
-                  <div className="flex flex-wrap gap-1.5 items-center mb-4 p-3 bg-gray-50 rounded-lg">
+                  <div className="flex flex-wrap gap-1.5 items-center p-3 bg-gray-50 rounded-lg">
                     {renderCycleDots(cycle)}
                   </div>
-
-                  {/* Phase Info */}
-                  <div className="pt-4 border-t border-gray-100">
-                    <div className="flex flex-wrap gap-4 text-xs sm:text-sm">
-                      <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: PHASE_COLORS.Period }} />
-                        <span className="text-gray-600">Period</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: PHASE_COLORS.Follicular }} />
-                        <span className="text-gray-600">Follicular</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full border border-cyan-400" style={{ backgroundColor: PHASE_COLORS.Ovulation }} />
-                        <span className="text-gray-600">Ovulation</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: PHASE_COLORS.Luteal }} />
-                        <span className="text-gray-600">Luteal</span>
-                      </div>
-                    </div>
+                  <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-600">
+                    {getPhaseDates(cycle).map(({ label, date, predicted }) => (
+                      <span key={label}>
+                        <span className="font-semibold text-gray-700">{label}:</span> {predicted ? '–' : (date ? format(date, 'MMM d') : '–')}
+                      </span>
+                    ))}
                   </div>
                 </div>
               ))}
-            </div>
-          )}
-
-          {/* Summary Stats */}
-          {cycles.length > 0 && (
-            <div className="mt-8 p-5 sm:p-6 bg-gradient-to-br from-pink-50 to-purple-50 rounded-xl border border-pink-100">
-              <h3 className="text-lg font-bold text-gray-800 mb-4">Summary</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                <div>
-                  <p className="text-sm text-gray-600">Total Cycles</p>
-                  <p className="text-2xl font-bold text-period-pink">{cycles.filter(c => !c.isCurrent).length}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Average Length</p>
-                  <p className="text-2xl font-bold text-period-pink">{stats.averageCycleLength?.toFixed(1) || 'N/A'} days</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Average Period</p>
-                  <p className="text-2xl font-bold text-period-pink">{stats.averagePeriodLength?.toFixed(1) || 'N/A'} days</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Anomalies</p>
-                  <p className="text-2xl font-bold text-yellow-600">
-                    {cycles.filter(c => c.isAnomaly).length}
-                  </p>
-                </div>
-              </div>
             </div>
           )}
         </div>

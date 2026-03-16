@@ -11,15 +11,14 @@ from database import supabase
 
 # Deprecated RapidAPI stubs moved to legacy_utils.py. All cycle predictions use calculate_phase_for_date_range().
 
+# Max day-in-phase bounds for phase_day_id (wellness agents expect these ranges)
+PHASE_DAY_CAPS = {"Period": 10, "Menstrual": 10, "Follicular": 14, "Ovulation": 3, "Luteal": 14}
+
+
 def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
     """
     Generate phase-day ID based on phase and day.
-    
-    Phase IDs:
-    - Period: p1-p12
-    - Follicular: f1-f30
-    - Ovulation: o1-o8
-    - Luteal: l1-l25
+    Capped to match wellness DB (p1-p10, f1-f14, o1-o3, l1-l14).
     """
     phase_prefix = {
         "Period": "p",
@@ -28,8 +27,9 @@ def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
         "Ovulation": "o",
         "Luteal": "l"
     }
-    
     prefix = phase_prefix.get(phase, "p")
+    cap = PHASE_DAY_CAPS.get(phase, 14)
+    day_in_phase = max(1, min(int(day_in_phase), cap))
     return f"{prefix}{day_in_phase}"
 
 def normal_pdf(x: float, mean: float, sd: float) -> float:
@@ -282,14 +282,12 @@ def ovulation_probability(offset_from_ovulation: float, ovulation_sd: float) -> 
 
 def select_ovulation_days(ovulation_sd: float, max_days: int = 3) -> set:
     """
-    Select top-N days by fertility probability for a cycle.
-    Uses fertility_probability (biologically meaningful) instead of ovulation_probability (mathematical PDF).
-    This ensures the "Ovulation" phase aligns with the actual fertile window.
+    Select the Ovulation-phase day offsets (relative to predicted ovulation day 0).
+    This should represent the ovulation event timing uncertainty (NOT the broader fertile window).
     
     Strategy:
-    1. Calculate fertility probabilities for days around ovulation (±5 days)
-    2. Sort by probability (descending)
-    3. Select top max_days days, ensuring they form a contiguous block centered on day 0
+    1. Always include day 0 (predicted ovulation date)
+    2. Add adjacent days based on ovulation_probability as uncertainty increases
     
     Args:
         ovulation_sd: Standard deviation of ovulation prediction
@@ -299,63 +297,40 @@ def select_ovulation_days(ovulation_sd: float, max_days: int = 3) -> set:
         Set of day offsets from ovulation_date that are in ovulation phase
         e.g., {-1, 0, 1} means days -1, 0, +1 from ovulation
     """
-    # Calculate fertility probabilities for days around ovulation (check ±5 days)
-    # Use fertility_probability (biologically meaningful) instead of ovulation_probability (mathematical PDF)
-    day_probabilities = []
-    for offset in range(-5, 6):
-        prob = fertility_probability(offset, ovulation_sd)
-        day_probabilities.append((offset, prob))
-    
-    # Sort by probability (descending), then by distance from 0 (ascending) as tiebreaker
-    day_probabilities.sort(key=lambda x: (-x[1], abs(x[0])))
-    
-    # Strategy: Build contiguous window centered on day 0 (highest probability)
-    # Start with day 0, then add adjacent days in order of probability
-    selected_offsets = {0}  # Always include day 0 (ovulation day)
-    
-    if max_days <= 1:
+    # Allow 3–5 days: regular cycles use narrower window, irregular use wider
+    max_days = max(1, min(5, int(max_days)))
+
+    selected_offsets = {0}
+    if max_days == 1:
         return selected_offsets
-    
-    # Add adjacent days, prioritizing by probability
-    # We want a contiguous block, so we'll add days -1, +1, -2, +2, etc.
-    remaining_slots = max_days - 1
-    
-    # Get probabilities for adjacent days, sorted by probability
-    adjacent_days = [(offset, prob) for offset, prob in day_probabilities 
-                     if offset != 0 and abs(offset) <= 3]  # Only consider ±3 days
-    adjacent_days.sort(key=lambda x: (-x[1], abs(x[0])))  # Sort by prob desc, then distance
-    
-    # Build contiguous window: add days that maintain contiguity
-    for offset, prob in adjacent_days:
-        if remaining_slots <= 0:
+
+    # Consider only near-ovulation event timing uncertainty
+    candidates = []
+    for offset in range(-2, 3):
+        if offset == 0:
+            continue
+        candidates.append((offset, ovulation_probability(offset, ovulation_sd)))
+
+    # Prefer high probability, then closer to 0
+    candidates.sort(key=lambda x: (-x[1], abs(x[0])))
+
+    for offset, _ in candidates:
+        if len(selected_offsets) >= max_days:
             break
-        
-        # Check if adding this day maintains contiguity
         test_set = selected_offsets | {offset}
         min_offset = min(test_set)
         max_offset = max(test_set)
-        
-        # Is it contiguous? (all integers between min and max are in the set)
-        is_contiguous = all(i in test_set for i in range(min_offset, max_offset + 1))
-        
-        if is_contiguous and len(test_set) <= max_days:
+        if all(i in test_set for i in range(min_offset, max_offset + 1)):
             selected_offsets.add(offset)
-            remaining_slots -= 1
-    
-    # Final check: ensure we have a contiguous block
-    if len(selected_offsets) > 1:
-        min_offset = min(selected_offsets)
-        max_offset = max(selected_offsets)
-        contiguous_offsets = set(range(min_offset, max_offset + 1))
-        
-        # If we have more than max_days, keep the ones closest to 0
-        if len(contiguous_offsets) > max_days:
-            sorted_by_distance = sorted(contiguous_offsets, key=lambda x: abs(x))
-            selected_offsets = set(sorted_by_distance[:max_days])
-        else:
-            selected_offsets = contiguous_offsets
-    
-    return selected_offsets
+
+    # Enforce contiguity around 0 (e.g., {-1,0,1})
+    min_offset = min(selected_offsets)
+    max_offset = max(selected_offsets)
+    contiguous = set(range(min_offset, max_offset + 1))
+    if len(contiguous) > max_days:
+        contiguous = set(sorted(contiguous, key=lambda x: abs(x))[:max_days])
+
+    return contiguous
 
 def get_ovulation_fertility_threshold(ovulation_sd: float) -> float:
     """
@@ -428,66 +403,61 @@ def fertility_probability(offset_from_ovulation: float, ovulation_sd: float) -> 
     if abs(offset_from_ovulation) > 10:  # More than 10 days away
         return 0.0
     
-    # Normal distribution component (ovulation probability)
-    p_ov = normal_pdf(offset_from_ovulation, 0.0, ovulation_sd)
-    
-    # Sperm survival kernel with decay curve (biologically accurate)
-    # Sperm survival decays over time, with higher viability closer to ovulation
-    # Peak fertility is typically day -1 or -2, not day 0
-    # ⚠️ MEDICAL NOTE: Biological studies show sperm survival is roughly linear or slightly
-    # exponential, decaying faster after day -3. This simplified exponential model may
-    # slightly overestimate day -5 viability, but provides reasonable approximation for UX.
-    # For medical credibility, consider refining based on latest research (e.g., steeper
-    # decay after day -3, more linear decay in days -5 to -3).
-    if -5.0 <= offset_from_ovulation <= 0.0:
-        # Decay curve: exp(offset / decay_factor)
-        # This creates a smooth decay where:
-        # - Day -5: exp(-5/2.0) ≈ 0.082 (low) - may slightly overestimate viability
-        # - Day -3: exp(-3/2.0) ≈ 0.223 (moderate)
-        # - Day -2: exp(-2/2.0) ≈ 0.368 (moderate)
-        # - Day -1: exp(-1/2.0) ≈ 0.607 (high)
-        # - Day 0: exp(0/2.0) = 1.0 (peak)
-        # But we want day -1 or -2 to be peak, so we shift the curve
-        decay_factor = 2.0  # Empirically chosen decay rate
-        p_sperm_raw = math.exp(offset_from_ovulation / decay_factor)
-        
-        # Shift curve so peak is at day -1 (reflects medical data)
-        # Scale to make day -1 have value ≈ 1.0
-        # Day -1: exp(-1/2) ≈ 0.607, so scale factor ≈ 1.65
-        # This makes day -1 ≈ 1.0, day 0 ≈ 0.82, day -2 ≈ 0.61
-        # ⚠️ NOTE: Scale factor 1.65 is empirically chosen for UX purposes
-        # Biological studies show sperm survival decays faster after day -3, but this
-        # simplified model provides reasonable approximation for fertility tracking
-        # For medical accuracy, consider refining decay curve based on latest research
-        scale_factor = 1.65  # Empirically chosen, not evidence-based
-        p_sperm = min(1.0, p_sperm_raw * scale_factor)
-    else:
-        p_sperm = 0.0
-    
-    # Weighted combination (adjusted to reflect biological reality)
-    # Reduced ovulation-day dominance, increased pre-ovulation importance
-    # 50/50 split gives more balanced representation
-    raw_prob = 0.5 * p_ov + 0.5 * p_sperm
-    
-    # Normalization factor (peak fertility at day -1, not day 0)
-    # Calculate peak value (should be at day -1 based on medical data)
-    peak_day = -1.0
-    peak_p_ov = normal_pdf(peak_day, 0.0, ovulation_sd)
-    # Day -1 has peak sperm survival (after scaling)
-    peak_p_sperm = min(1.0, math.exp(peak_day / 2.0) * 1.65)
-    norm_factor = 0.5 * peak_p_ov + 0.5 * peak_p_sperm
-    
-    # Fallback: if normalization fails, use day 0
-    if norm_factor <= 0:
-        norm_factor = 0.5 * normal_pdf(0.0, 0.0, ovulation_sd) + 0.5 * min(1.0, math.exp(0.0 / 2.0) * 1.65)
-    
-    if norm_factor <= 0:
-        return 0.0
-    
-    normalized_prob = raw_prob / norm_factor
-    
-    # Clamp to [0, 1]
-    return max(0.0, min(1.0, normalized_prob))
+    # Fertility is driven by sperm viability in the days BEFORE ovulation plus uncertainty in ovulation timing.
+    # Medical intent:
+    # - Day -2 and Day -1 should be highest probability days
+    # - Steeper decay after Day -3 (older sperm viability drops quickly)
+    # - Rapid drop after Day 0
+
+    def _interp_weight(day: float) -> float:
+        # Discrete conception-weight curve (normalized peak at -2/-1), linearly interpolated for floats.
+        # Values are unitless and shaped for medically reasonable relative weighting.
+        anchors = {
+            -5.0: 0.05,
+            -4.0: 0.15,
+            -3.0: 0.40,
+            -2.0: 1.00,
+            -1.0: 1.00,
+            0.0: 0.60,
+            1.0: 0.05,
+        }
+        if day <= -5.0:
+            return 0.0
+        if day >= 1.0:
+            return 0.0
+        lo = math.floor(day)
+        hi = math.ceil(day)
+        lo = max(-5, min(1, int(lo)))
+        hi = max(-5, min(1, int(hi)))
+        if float(lo) not in anchors or float(hi) not in anchors:
+            return 0.0
+        if lo == hi:
+            return anchors[float(lo)]
+        t = (day - lo) / (hi - lo)
+        return anchors[float(lo)] * (1 - t) + anchors[float(hi)] * t
+
+    # "Ovulation ahead" factor: fertility on day d depends on ovulation occurring in the next 1-2 days.
+    p_ov_ahead = max(
+        ovulation_probability(offset_from_ovulation + 1.0, ovulation_sd),
+        ovulation_probability(offset_from_ovulation + 2.0, ovulation_sd),
+    )
+
+    w = _interp_weight(offset_from_ovulation)
+    raw = w * (0.5 + 0.5 * p_ov_ahead)
+
+    # Normalize so that peak days (-2/-1) are 1.0 (before any confidence gating)
+    peak = max(
+        _interp_weight(-2.0) * (0.5 + 0.5 * max(ovulation_probability(-1.0, ovulation_sd), ovulation_probability(0.0, ovulation_sd))),
+        _interp_weight(-1.0) * (0.5 + 0.5 * max(ovulation_probability(0.0, ovulation_sd), ovulation_probability(1.0, ovulation_sd))),
+        1e-9,
+    )
+    prob = raw / peak
+
+    # Confidence gate: extreme irregularity should reduce certainty
+    if ovulation_sd > 4.0:
+        prob = min(prob * 0.6, 0.35)
+
+    return max(0.0, min(1.0, prob))
 
 def estimate_cycle_start_sd(user_id: str, cycle_length_estimate: float) -> float:
     """
@@ -711,7 +681,7 @@ def update_cycle_length_bayesian(user_id: str, new_cycle_length: int) -> int:
         # Try to get number of cycle observations (approximate from past cycles)
         # For simplicity, we'll use a fixed k, but in practice you'd count actual observations
         # This is a single update, so we treat it as adding 1 observation
-        k = 5  # Prior strength constant (equivalent to having 5 prior observations)
+        k = 3  # Prior strength constant (adapt faster to new normal)
         n = 1  # This is 1 new observation
         
         if user_response.data and user_response.data[0].get("cycle_length"):
@@ -1364,21 +1334,35 @@ def calculate_phase_for_date_range(
         # ZERO-DATA: No period_logs and no last_period_date -> empty calendar (Log to See Data)
         has_logs = bool(period_logs and len(period_logs) > 0)
         has_last_period = bool(last_period_date and (isinstance(last_period_date, str) and last_period_date.strip()))
+        print(f"DEBUG: Calculating phases for User {user_id} (has_logs={has_logs}, has_last_period={has_last_period}), last_period_date={last_period_date}")
         if not has_logs and not has_last_period:
             print("📭 Zero data: no period_logs and no last_period_date - returning empty phase map")
             return []
 
         # Default date range: 3 months around today
+        # Ensure start/end are always datetime for consistent comparison in the loop
         today = datetime.now()
         if not start_date:
             start_date_obj = datetime(today.year, today.month - 1, 1)
         else:
-            start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-        
+            if isinstance(start_date, str):
+                start_date_obj = datetime.strptime(start_date[:10], "%Y-%m-%d")
+            elif hasattr(start_date, "year") and hasattr(start_date, "month"):
+                d = start_date.date() if hasattr(start_date, "date") else start_date
+                start_date_obj = datetime(d.year, d.month, d.day)
+            else:
+                start_date_obj = datetime.strptime(str(start_date)[:10], "%Y-%m-%d")
+
         if not end_date:
             end_date_obj = datetime(today.year, today.month + 2, 0)
         else:
-            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+            if isinstance(end_date, str):
+                end_date_obj = datetime.strptime(end_date[:10], "%Y-%m-%d")
+            elif hasattr(end_date, "year") and hasattr(end_date, "month"):
+                d = end_date.date() if hasattr(end_date, "date") else end_date
+                end_date_obj = datetime(d.year, d.month, d.day)
+            else:
+                end_date_obj = datetime.strptime(str(end_date)[:10], "%Y-%m-%d")
         
         # Hoist statistics: compute once at start, pass into loops (no per-day recalculation)
         luteal_mean, luteal_sd = estimate_luteal(user_id)
@@ -1502,8 +1486,16 @@ def calculate_phase_for_date_range(
         for cs in validated_period_starts:
             cycle_starts_raw.append(cs)
             cycle_sources[cs] = "real"
+
+        # COLD START: If period_logs is empty but user.last_period_date exists, use as Real anchor
+        # Treat as 'Real' for forward predictions (Persist Fallback)
+        if not validated_period_starts and has_last_period:
+            anchor_date = datetime.strptime(str(last_period_date).strip()[:10], "%Y-%m-%d")
+            cycle_starts_raw.append(anchor_date)
+            cycle_sources[anchor_date] = "real"
+            print(f"📌 Cold start: using last_period_date {last_period_date} as Real anchor for projections")
         
-        # Set last_period for backward-reference paths (only used when we have logs; fallback path returns [] before using it)
+        # Set last_period for backward-reference paths
         if has_last_period:
             last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
         elif validated_period_starts:
@@ -1526,20 +1518,20 @@ def calculate_phase_for_date_range(
                     fill_start += timedelta(days=cycle_days_fill)
                 print(f"📅 GAP FILL: inserted {(later - earlier).days // cycle_days_fill} predicted cycle(s) between {earlier.strftime('%Y-%m-%d')} and {later.strftime('%Y-%m-%d')} (gap={gap_days}d)")
         
-        # Predict future cycles from the most recent period start
-        if validated_period_starts:
-            most_recent_period = validated_period_starts[-1]
+        # Predict future cycles from the most recent anchor (real log, fallback, or validated start)
+        # Continuous projection until end_date (e.g. July 2026)
+        if cycle_starts_raw:
+            most_recent_period = cycle_starts_raw[-1]
             current_start = most_recent_period
-            cycles_predicted = 0
-            max_cycles = 12
-            
-            # Predict forward until we cover end_date
-            while current_start <= end_date_obj and cycles_predicted < max_cycles:
-                next_start = current_start + timedelta(days=int(cycle_length))
+            cycle_days_step = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length)))
+
+            while current_start <= end_date_obj:
+                next_start = current_start + timedelta(days=cycle_days_step)
+                if next_start > end_date_obj:
+                    break
                 if next_start not in cycle_starts_raw:
                     cycle_starts_raw.append(next_start)
                     cycle_sources[next_start] = "predicted"
-                    cycles_predicted += 1
                 current_start = next_start
         
         # No real/predicted cycles -> return empty list (Log to See Data; no virtual/fallback cycles)
@@ -1599,7 +1591,8 @@ def calculate_phase_for_date_range(
         fallback_count = sum(1 for cs in cycle_starts if cycle_metadata.get(cs, {}).get("is_fallback"))
         print(f"✅ Cycle normalization complete: {len(cycle_starts)} cycles (real={real_count}, predicted={predicted_count}, fallback={fallback_count})")
         
-        # Backward extension: add predicted cycles until start_date is covered (earliest cycle start <= start_date_obj)
+        # VIRTUAL BACKWARD FILL (Option B): Project cycles backward before first log to populate calendar
+        # This ensures the calendar and history are fully populated even before the first log
         if cycle_starts and start_date_obj < cycle_starts[0]:
             first_cycle = cycle_starts[0]
             cycle_days = max(int(cycle_length), MIN_CYCLE_DAYS)
@@ -1607,9 +1600,10 @@ def calculate_phase_for_date_range(
             cycles_added = 0
             max_backward_cycles = 24  # Safety cap
             # Keep adding backward until we have a cycle start on or before start_date_obj
-            while cycles_added < max_backward_cycles:
+            while cycles_added < max_backward_cycles and extended_cycle >= start_date_obj:
                 cycle_starts.append(extended_cycle)
-                cycle_metadata[extended_cycle] = {"source": "predicted", "is_fallback": False}
+                # Mark backward-projected cycles as virtual
+                cycle_metadata[extended_cycle] = {"source": "virtual", "is_fallback": False, "is_virtual": True}
                 cycles_added += 1
                 if extended_cycle <= start_date_obj:
                     break
@@ -1617,7 +1611,15 @@ def calculate_phase_for_date_range(
 
             # Re-normalize after extension: sort and enforce min spacing
             cycle_starts = _normalize_cycle_starts_in_place(cycle_starts, cycle_metadata, min_cycle_days=MIN_CYCLE_DAYS)
-            print(f"DEBUG: Extended {cycles_added} cycles backwards to cover start_date (post-normalization cycles={len(cycle_starts)})")
+            print(f"✅ VIRTUAL BACKWARD FILL: Extended {cycles_added} virtual cycles backwards to cover start_date (post-normalization cycles={len(cycle_starts)})")
+
+        # Initial anchor: ensure at least one cycle start is on or before start_date_obj so the daily loop never sees None
+        if cycle_starts and cycle_starts[0] > start_date_obj:
+            anchor_start = cycle_starts[0] - timedelta(days=max(int(cycle_length), MIN_CYCLE_DAYS))
+            cycle_starts.insert(0, anchor_start)
+            cycle_metadata[anchor_start] = {"source": "virtual", "is_fallback": False, "is_virtual": True}
+            cycle_starts.sort()
+            print(f"✅ Initial anchor: added virtual cycle start {anchor_start.strftime('%Y-%m-%d')} so range is covered")
         
         # ====================================================================
         # B) LUTEAL ANCHORING (PER-CYCLE, NOT PER-DAY)
@@ -1684,7 +1686,9 @@ def calculate_phase_for_date_range(
                 user_id=user_id
             )
             
-            ovulation_days = select_ovulation_days(ovulation_sd, max_days=3)
+            # Adaptive window: 3 days for regular cycles, up to 5 for irregular (ovulation_sd)
+            max_ov_days = 5 if ovulation_sd >= 2.5 else 3
+            ovulation_days = select_ovulation_days(ovulation_sd, max_days=max_ov_days)
             
             # Cache all cycle-level metadata
             cycle_metadata_cache[cycle_start_str] = {
@@ -1733,55 +1737,30 @@ def calculate_phase_for_date_range(
                     break
             
             anchor_source_for_diagnostic = None
-            use_backward_virtual_cycle = False  # When True, day_in_cycle comes from modulo formula (no default F1)
-            if current_cycle_start is None and earliest_real_dt is not None and current_date < earliest_real_dt:
-                # BEFORE FIRST LOG: use day_in_virtual_cycle formula so every date follows the cycle wave (Period -> F -> O -> L)
-                first_log_date = earliest_real_dt
-                days_until_first_log = (first_log_date - current_date).days
-                day_in_virtual_cycle = (cycle_days_int - (days_until_first_log % cycle_days_int)) % cycle_days_int
-                # 1-indexed: 0 -> day 1 (cycle start), 1..cycle_days_int-1 -> day 2..cycle_days_int
-                day_in_cycle_backward = (day_in_virtual_cycle % cycle_days_int) + 1
-                use_backward_virtual_cycle = True
-                # Anchor for metadata/counters: virtual cycle start so rest of pipeline works
-                k = max(1, (days_until_first_log + cycle_days_int - 1) // cycle_days_int)
-                current_cycle_start = first_log_date - timedelta(days=k * cycle_days_int)
-                use_metadata_from_cycle_str = first_log_date.strftime("%Y-%m-%d")
-                anchor_source_for_diagnostic = "Predicted-Backward"
-                print(f"[DEBUG] Backward: date={current_date.strftime('%Y-%m-%d')} < first_log={first_log_date.strftime('%Y-%m-%d')}, cycle_length={cycle_days_int}, days_until_first={days_until_first_log}, day_in_virtual_cycle={day_in_virtual_cycle}, day_in_cycle={day_in_cycle_backward}")
-            elif current_cycle_start is None and first_cycle_start_dt is not None and current_date < first_cycle_start_dt:
-                anchor_candidate = first_cycle_start_dt
-                while anchor_candidate > current_date:
-                    anchor_candidate -= timedelta(days=cycle_days_int)
-                while anchor_candidate + timedelta(days=cycle_days_int) <= current_date:
-                    anchor_candidate += timedelta(days=cycle_days_int)
-                current_cycle_start = anchor_candidate
-                use_metadata_from_cycle_str = first_cycle_start_dt.strftime("%Y-%m-%d")
-                anchor_source_for_diagnostic = "Predicted-Backward"
+            is_virtual_date = False  # Track if this date is from virtual backward projection
             
+            # VIRTUAL BACKWARD FILL: Use backward-projected cycle starts if available
+            if current_cycle_start is None and cycle_starts:
+                # Find the nearest cycle start (including virtual ones)
+                for cs in reversed(cycle_starts):
+                    if cs <= current_date:
+                        current_cycle_start = cs
+                        cycle_meta_info = cycle_metadata.get(cs, {})
+                        if cycle_meta_info.get("is_virtual") or cycle_meta_info.get("source") == "virtual":
+                            is_virtual_date = True
+                            anchor_source_for_diagnostic = "Virtual-Backward"
+                        break
+            
+            # Date validation: skip this date if we have no cycle anchor (graceful fallback)
             if current_cycle_start is None:
-                reference_dt = earliest_real_dt if earliest_real_dt else (last_period if last_period else None)
-                if not reference_dt:
-                    current_date += timedelta(days=1)
-                    continue
-                anchor_candidate = reference_dt
-                while anchor_candidate > current_date:
-                    anchor_candidate -= timedelta(days=cycle_days_int)
-                while anchor_candidate + timedelta(days=cycle_days_int) <= current_date:
-                    anchor_candidate += timedelta(days=cycle_days_int)
-                current_cycle_start = anchor_candidate
-                use_metadata_from_cycle_str = (earliest_real_dt.strftime("%Y-%m-%d") if earliest_real_dt else last_period.strftime("%Y-%m-%d")) if reference_dt else None
-                anchor_source_for_diagnostic = "Predicted-Backward"
-            
-            # Log to See Data: do not assign phases to dates before the first logged period (no Predicted-Backward fill)
-            if anchor_source_for_diagnostic == "Predicted-Backward":
                 current_date += timedelta(days=1)
                 continue
-            
+
             # Calculate day_in_cycle (1-indexed); ensure never negative or None
-            if use_backward_virtual_cycle:
-                days_in_current_cycle = day_in_cycle_backward
-            else:
+            if current_cycle_start:
                 days_in_current_cycle = (current_date - current_cycle_start).days + 1
+            else:
+                days_in_current_cycle = 1
             if days_in_current_cycle is None or days_in_current_cycle < 1:
                 days_in_current_cycle = 1
             
@@ -1797,8 +1776,17 @@ def calculate_phase_for_date_range(
                     "Period": 0, "Follicular": 0, "Ovulation": 0, "Luteal": 0
                 }
             
-            # Get cached cycle metadata (when projecting backward, use first cycle's metadata)
+            # Get cached cycle metadata (when projecting backward/virtual, use nearest real cycle's metadata if available)
             cycle_meta = cycle_metadata_cache.get(metadata_key)
+            # If virtual cycle has no metadata, use first real cycle's metadata as fallback
+            if not cycle_meta and is_virtual_date and cycle_starts:
+                for cs in cycle_starts:
+                    cs_meta = cycle_metadata.get(cs, {})
+                    if cs_meta.get("source") == "real":
+                        real_meta_key = cs.strftime("%Y-%m-%d")
+                        cycle_meta = cycle_metadata_cache.get(real_meta_key)
+                        if cycle_meta:
+                            break
             if not cycle_meta:
                 # Should not happen - all cycles should have metadata
                 print(f"⚠️ WARNING: No metadata for cycle {cycle_start_str}, using fallback")
@@ -1809,7 +1797,7 @@ def calculate_phase_for_date_range(
                     "fertile_window_end": min(int(cycle_length), cycle_length - 14),
                     "ovulation_date_str": (current_cycle_start + timedelta(days=int(cycle_length - 14))).strftime("%Y-%m-%d"),
                     "ovulation_sd": 2.0,
-                    "ovulation_days": [-1, 0, 1],
+                    "ovulation_days": {-1, 0, 1},
                     "luteal_mean": 14.0
                 }
             
@@ -1832,6 +1820,9 @@ def calculate_phase_for_date_range(
             
             # Also calculate fertility probability for tracking purposes
             fert_prob = fertility_probability(offset_from_ov, ovulation_sd)
+            # Confidence gate: extreme irregularity should reduce fertility certainty
+            if ovulation_sd > 4.0:
+                fert_prob *= 0.7
             
             # Get phase counters for this cycle
             phase_counters = phase_counters_by_cycle[cycle_start_str]
@@ -1854,18 +1845,24 @@ def calculate_phase_for_date_range(
             # VALIDATION: Ensure day_in_cycle is reasonable (never negative or None)
             if day_in_cycle < 1:
                 day_in_cycle = 1
-            if day_in_cycle > 60:
-                # Try to find a better cycle start
+            # Phase ID overflow guard: if day_in_cycle exceeds cycle_length, switch to next predicted cycle (L14 -> P1)
+            cycle_len_threshold = int(actual_cycle_length) + 3 if actual_cycle_length else 60
+            if day_in_cycle > cycle_len_threshold:
                 for cs in cycle_starts:
-                    if cs <= current_date:
+                    if cs > current_cycle_start and cs <= current_date:
                         gap = (current_date - cs).days
-                        if gap < day_in_cycle:
+                        if gap < day_in_cycle and gap >= 0:
                             current_cycle_start = cs
                             day_in_cycle = gap + 1
                             cycle_start_str = current_cycle_start.strftime("%Y-%m-%d")
                             cycle_meta = cycle_metadata_cache.get(cycle_start_str)
-                            if not cycle_meta:
-                                cycle_meta = cycle_metadata_cache.get(list(cycle_metadata_cache.keys())[0]) if cycle_metadata_cache else None
+                            if not cycle_meta and cycle_metadata_cache:
+                                cycle_meta = cycle_metadata_cache.get(list(cycle_metadata_cache.keys())[0])
+                            if cycle_meta:
+                                ovulation_date_str = cycle_meta["ovulation_date_str"]
+                                ovulation_date = datetime.strptime(ovulation_date_str, "%Y-%m-%d")
+                                offset_from_ov = (current_date - ovulation_date).days
+                                ovulation_days = cycle_meta.get("ovulation_days", {-1, 0, 1})
                             break
             
             # MEDICAL FIX: Phase assignment with clear priority (medically accurate)
@@ -1880,34 +1877,27 @@ def calculate_phase_for_date_range(
             # MEDICAL RULE: Only days 1-period_days can be Period phase in a cycle
             if 1 <= day_in_cycle <= period_days:
                 phase = "Period"
-            # 2. Ovulation Phase: Fertile window (3-4 days, IDs: o1-o4)
-            elif day_in_cycle >= fertile_window_start and day_in_cycle <= fertile_window_end:
+            # 2. Ovulation Phase: strictly the days returned by select_ovulation_days (adaptive 3–5 day block)
+            elif offset_from_ov in ovulation_days:
                 phase = "Ovulation"
-            # 3. Follicular Phase: After period, before fertile window (IDs: f1-f40)
-            elif day_in_cycle > period_days and day_in_cycle < fertile_window_start:
+            # 3. Follicular Phase: After period, before ovulation block
+            elif day_in_cycle > period_days and (not ovulation_days or offset_from_ov < min(ovulation_days)):
                 phase = "Follicular"
-            # 4. Luteal Phase: After fertile window until next period (IDs: l1-l25)
-            elif day_in_cycle > fertile_window_end:
+            # 4. Luteal Phase: After ovulation block until next period
+            elif day_in_cycle > period_days and ovulation_days and offset_from_ov > max(ovulation_days):
                 phase = "Luteal"
             else:
-                # Fallback (shouldn't happen, but ensures no gaps)
-                # This could happen if fertile_window_end < period_days (invalid calculation)
-                print(f"⚠️ WARNING: Phase assignment fallback for date {current_date.strftime('%Y-%m-%d')}, day_in_cycle={day_in_cycle}, period_days={period_days}, fertile_window_start={fertile_window_start}, fertile_window_end={fertile_window_end}")
-                phase = "Follicular"
+                phase = "Follicular"  # Between period and ovulation start, or edge case
             
-            # MEDICAL VALIDATION: Double-check we're not assigning Period phase outside days 1-period_days
-            # This prevents duplicate period phases in one cycle
+            # MEDICAL VALIDATION: Period only on days 1–period_days
             if phase == "Period" and (day_in_cycle < 1 or day_in_cycle > period_days):
                 print(f"❌ ERROR: Attempted to assign Period phase to day {day_in_cycle} (valid range: 1-{period_days}). Fixing to correct phase.")
-                # Recalculate phase correctly
-                if day_in_cycle > period_days and day_in_cycle < fertile_window_start:
-                    phase = "Follicular"
-                elif day_in_cycle >= fertile_window_start and day_in_cycle <= fertile_window_end:
+                if offset_from_ov in ovulation_days:
                     phase = "Ovulation"
-                elif day_in_cycle > fertile_window_end:
+                elif ovulation_days and offset_from_ov > max(ovulation_days):
                     phase = "Luteal"
                 else:
-                    phase = "Follicular"  # Final fallback
+                    phase = "Follicular"
             
             # CRITICAL: Override phase if date is in a logged period (from provided period_logs)
             # This ensures logged periods ALWAYS show as Period phase, regardless of predictions
@@ -1944,9 +1934,9 @@ def calculate_phase_for_date_range(
                     break
             
             if is_in_logged_period:
-                # Date is in a logged period - override phase to Period
+                # Date is in a logged period - override phase to Period (cap for wellness DB)
                 phase = "Period"
-                phase_day_id = f"p{day_in_period}"
+                phase_day_id = f"p{min(day_in_period, PHASE_DAY_CAPS.get('Period', 10))}"
                 # Reset Period counter for this cycle to match logged period day
                 phase_counters["Period"] = day_in_period
                 day_in_phase = day_in_period
@@ -1973,9 +1963,10 @@ def calculate_phase_for_date_range(
                 phase_day_id = generate_phase_day_id(phase, day_in_phase)
                 print(f"⚠️ Catch-all: Generated phase_day_id {phase_day_id} for date {current_date.strftime('%Y-%m-%d')}")
             
-            # Low confidence when ovulation_sd very high (potentially anovulatory / highly irregular)
-            is_low_confidence = ovulation_sd > 4.0
-            prediction_confidence = 0.4 if is_low_confidence else 0.8
+            # Determine if this date is predicted/virtual
+            cycle_meta_info = cycle_metadata.get(current_cycle_start, {}) if current_cycle_start else {}
+            is_predicted_value = cycle_meta_info.get("source") != "real" or is_virtual_date
+            is_virtual_value = cycle_meta_info.get("is_virtual") or is_virtual_date or cycle_meta_info.get("source") == "virtual"
             
             # CRITICAL: Every date MUST result in a phase mapping
             phase_mappings.append({
@@ -1983,8 +1974,9 @@ def calculate_phase_for_date_range(
                 "phase": phase,
                 "phase_day_id": phase_day_id,
                 "source": "local",
-                "prediction_confidence": prediction_confidence,
-                "is_low_confidence": is_low_confidence,
+                "is_predicted": is_predicted_value,
+                "is_virtual": is_virtual_value,
+                "prediction_confidence": 0.6 if ovulation_sd > 4.0 else 0.8,
                 "fertility_prob": round(fert_prob, 3),
                 "predicted_ovulation_date": ovulation_date_str,
                 "luteal_estimate": round(luteal_mean, 2),
@@ -2011,34 +2003,34 @@ def calculate_phase_for_date_range(
                 })
             current_date += timedelta(days=1)
         
-        # Build final list: include only dates we have phase for; do not fill before first log (Log to See Data)
+        # Build final list: include all dates in range (including virtual backward fill)
         by_date = {m["date"]: m for m in phase_mappings}
         follicular_default = {
             "phase": "Follicular",
             "phase_day_id": "f1",
             "source": "local",
+            "is_predicted": True,
+            "is_virtual": True,
             "prediction_confidence": 0.5,
-            "is_low_confidence": False,
             "fertility_prob": 0.0,
             "predicted_ovulation_date": None,
             "luteal_estimate": 14.0,
             "luteal_sd": 2.0,
             "ovulation_sd": 2.0
         }
-        phase_mappings = []
+        final_phase_mappings = []
         d = start_date_obj
         while d <= end_date_obj:
             date_str = d.strftime("%Y-%m-%d")
             m = by_date.get(date_str)
             if m:
-                phase_mappings.append(m)
-            elif earliest_real_dt and d.date() >= earliest_real_dt.date():
-                # Fill gap only for dates on or after first logged period
-                phase_mappings.append({"date": date_str, **follicular_default})
-            # else: date is before first log - no phase (omit from list for clean calendar)
+                final_phase_mappings.append(m)
+            else:
+                # Fill gaps with predicted/virtual phases (including before first log)
+                final_phase_mappings.append({"date": date_str, **follicular_default})
             d += timedelta(days=1)
-        print(f"✅ Generated {len(phase_mappings)} phase mappings (dates on/after first log only, no backward virtual fill)")
-        return phase_mappings
+        print(f"✅ Generated {len(final_phase_mappings)} phase mappings (includes virtual backward fill before first log)")
+        return final_phase_mappings
     
     except Exception as e:
         print(f"Error calculating phase for date range: {str(e)}")

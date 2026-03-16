@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom'
 import ProtectedRoute from './components/ProtectedRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { DataProvider } from './context/DataContext'
+import { CycleProvider } from './context/CycleContext'
 import { ViewModeProvider } from './context/ViewModeContext'
 import { CalendarCacheProvider } from './context/CalendarCacheContext'
 import Home from './pages/Home'
@@ -25,6 +26,7 @@ function App() {
     <ErrorBoundary>
       <ViewModeProvider>
       <DataProvider>
+      <CycleProvider>
       <CalendarCacheProvider>
         <Routes>
         <Route path="/" element={<Home />} />
@@ -121,6 +123,7 @@ function App() {
         <Route path="*" element={<NotFound />} />
         </Routes>
       </CalendarCacheProvider>
+      </CycleProvider>
       </DataProvider>
       </ViewModeProvider>
     </ErrorBoundary>

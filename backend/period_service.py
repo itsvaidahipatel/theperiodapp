@@ -5,6 +5,7 @@ This module provides medically accurate period tracking, cycle prediction,
 and validation functions following ACOG guidelines.
 """
 
+import math
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Tuple
 from database import supabase
@@ -20,9 +21,15 @@ MIN_PERIOD_DAYS = 2
 MAX_PERIOD_DAYS = 8
 
 
+# Bayesian prior strength; align with cycle_utils.update_cycle_length_bayesian (k=3)
+_ROLLING_AVERAGE_K = 3
+
+
 def calculate_rolling_average(user_id: str) -> float:
     """
-    Calculate rolling average of cycle length from last 3 non-anomaly cycles.
+    Weighted rolling average of cycle length favoring the most recent cycle.
+    Uses last 3 valid cycles with weights 1, 2, 3 (oldest to newest) so the app
+    is more responsive to changes. Aligns with k=3 Bayesian logic in cycle_utils.
     Excludes cycles outside 21-45 day range.
     Falls back to profile default if insufficient data.
     
@@ -30,44 +37,39 @@ def calculate_rolling_average(user_id: str) -> float:
         user_id: User ID
     
     Returns:
-        Rolling average cycle length (float)
+        Weighted average cycle length (float)
     """
     try:
-        # Get cycles from period starts
         cycles = get_cycles_from_period_starts(user_id)
         
         if not cycles:
-            # Fallback to user's cycle_length from profile
             user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
             if user_response.data and user_response.data[0].get("cycle_length"):
                 return float(user_response.data[0]["cycle_length"])
             return float(DEFAULT_CYCLE_DAYS)
         
-        # Filter valid cycles (21-45 days, non-anomaly)
         valid_cycles = [
-            c for c in cycles 
-            if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS 
+            c for c in cycles
+            if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS
             and not c.get("is_anomaly", False)
         ]
         
         if not valid_cycles:
-            # No valid cycles, use profile default
             user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
             if user_response.data and user_response.data[0].get("cycle_length"):
                 return float(user_response.data[0]["cycle_length"])
             return float(DEFAULT_CYCLE_DAYS)
         
-        # Get last 3 valid cycles
         recent_cycles = valid_cycles[-3:]
-        cycle_lengths = [c["length"] for c in recent_cycles]
-        
-        # Calculate average
-        avg = sum(cycle_lengths) / len(cycle_lengths)
+        # Weights 1, 2, 3 (oldest to newest) so most recent cycle has highest influence
+        weights = list(range(1, len(recent_cycles) + 1))
+        total_w = sum(weights)
+        weighted_sum = sum(c["length"] * w for c, w in zip(recent_cycles, weights))
+        avg = weighted_sum / total_w
         return round(avg, 1)
     
     except Exception as e:
         print(f"Error calculating rolling average: {str(e)}")
-        # Fallback to default
         return float(DEFAULT_CYCLE_DAYS)
 
 
@@ -97,41 +99,29 @@ def calculate_rolling_period_length(user_id: str) -> float:
         return float(DEFAULT_PERIOD_DAYS)
 
 
-def calculate_ovulation_day(cycle_length: int) -> int:
+def calculate_ovulation_day(user_id: str, cycle_length: int) -> int:
     """
-    Medically accurate ovulation calculation.
-    Uses luteal phase consistency (12-16 days, usually 14).
-    Adjusts for cycle length:
-    - Short cycles (< MIN_CYCLE_DAYS): 12-day luteal phase (auto-marked as anomaly)
-    - Normal cycles (21-35 days): 14-day luteal phase
-    - Long cycles (>35 days): 16-day luteal phase
-    Ensures ovulation doesn't occur during period (minimum day 8).
-    
-    Note: Cycles < MIN_CYCLE_DAYS (21 days) are allowed but auto-marked as anomalies.
-    They are excluded from averages but can still be used for individual predictions.
+    Ovulation day using adaptive luteal phase estimation (cycle_utils.estimate_luteal).
+    Replaces fixed 12/14/16-day rule with user-specific luteal mean for consistency
+    with the calendar phase logic.
     
     Args:
+        user_id: User ID (for estimate_luteal)
         cycle_length: Cycle length in days
     
     Returns:
         Ovulation day (1-indexed, day 1 = period start)
     """
-    # Determine luteal phase length based on cycle length
-    # Note: Cycles < MIN_CYCLE_DAYS are allowed but marked as anomalies
-    if cycle_length < MIN_CYCLE_DAYS:
-        luteal_phase = 12
-    elif cycle_length > 35:
-        luteal_phase = 16
-    else:
-        luteal_phase = 14
+    try:
+        from cycle_utils import estimate_luteal
+        luteal_mean, _ = estimate_luteal(user_id)
+        ovulation_day = cycle_length - int(round(luteal_mean))
+    except Exception:
+        # Fallback if estimate_luteal unavailable
+        luteal_mean = 14.0
+        ovulation_day = cycle_length - int(round(luteal_mean))
     
-    # Ovulation day = cycle_length - luteal_phase
-    ovulation_day = cycle_length - luteal_phase
-    
-    # Ensure ovulation doesn't occur during period (minimum day 8)
-    # This is a safety check - in practice, ovulation should be well after period
-    ovulation_day = max(8, ovulation_day)
-    
+    ovulation_day = max(8, min(ovulation_day, cycle_length - 1))
     return ovulation_day
 
 
@@ -140,6 +130,7 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
     Calculate confidence level (High/Medium/Low) based on:
     - Number of logged cycles (more = higher confidence)
     - Cycle regularity (variance/standard deviation)
+    - Ovulation uncertainty (ovulation_sd): high SD lowers confidence and reason mentions cycle variance
     - Recency of data
     
     Args:
@@ -158,7 +149,6 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
                 "reason": "No cycle data available. Log at least 3 cycles for accurate predictions."
             }
         
-        # Filter valid cycles
         valid_cycles = [c for c in cycles if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS]
         
         if len(valid_cycles) < 2:
@@ -168,35 +158,45 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
                 "reason": "Insufficient data. Log at least 3 cycles for better predictions."
             }
         
-        # Calculate cycle length statistics
         cycle_lengths = [c["length"] for c in valid_cycles]
         mean = sum(cycle_lengths) / len(cycle_lengths)
         
         if len(cycle_lengths) > 1:
             variance = sum((x - mean) ** 2 for x in cycle_lengths) / (len(cycle_lengths) - 1)
-            std_dev = variance ** 0.5
+            std_dev = math.sqrt(variance)
         else:
             std_dev = 0.0
         
-        # Calculate coefficient of variation (CV)
         cv = (std_dev / mean) * 100 if mean > 0 else 100
         
-        # Base confidence from number of cycles
-        cycle_count_score = min(100, len(valid_cycles) * 15)  # 15 points per cycle, max 100
+        # Adaptive confidence: lower score when ovulation_sd is high (cycle variance)
+        try:
+            from cycle_utils import estimate_cycle_start_sd, estimate_luteal
+            cycle_start_sd = estimate_cycle_start_sd(user_id, float(mean))
+            _, luteal_sd = estimate_luteal(user_id)
+            ovulation_sd = math.sqrt(cycle_start_sd ** 2 + luteal_sd ** 2)
+        except Exception:
+            ovulation_sd = 2.0
         
-        # Regularity score (lower CV = higher score)
+        cycle_count_score = min(100, len(valid_cycles) * 15)
+        
         if cv < 8:
-            regularity_score = 30  # Very regular
+            regularity_score = 30
         elif cv < 15:
-            regularity_score = 25  # Regular
+            regularity_score = 25
         elif cv < 25:
-            regularity_score = 15  # Somewhat irregular
+            regularity_score = 15
         else:
-            regularity_score = 5   # Irregular
+            regularity_score = 5
         
-        # Recency score (check if last period is recent)
+        # Penalize high ovulation uncertainty (irregular cycles)
+        if ovulation_sd > 4.0:
+            regularity_score = max(0, regularity_score - 15)
+        elif ovulation_sd > 3.0:
+            regularity_score = max(0, regularity_score - 8)
+        
         period_starts = get_period_start_logs(user_id, confirmed_only=True)
-        recency_score = 20  # Default
+        recency_score = 20
         
         if period_starts:
             last_period_str = period_starts[-1]["start_date"]
@@ -204,20 +204,17 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
                 last_period = datetime.strptime(last_period_str, "%Y-%m-%d").date()
             else:
                 last_period = last_period_str
-            
             days_since = (datetime.now().date() - last_period).days
             if days_since <= 45:
-                recency_score = 20  # Recent
+                recency_score = 20
             elif days_since <= 90:
-                recency_score = 10  # Somewhat recent
+                recency_score = 10
             else:
-                recency_score = 5   # Not recent
+                recency_score = 5
         
-        # Total confidence score
         total_score = cycle_count_score + regularity_score + recency_score
         total_score = min(100, max(0, total_score))
         
-        # Determine level
         if total_score >= 70:
             level = "High"
         elif total_score >= 50:
@@ -225,9 +222,18 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
         else:
             level = "Low"
         
-        # Generate reason
         if len(valid_cycles) < 3:
             reason = f"Log at least 3 cycles for better predictions. Currently have {len(valid_cycles)} cycle(s)."
+        elif ovulation_sd > 4.0:
+            reason = (
+                f"High cycle variance (irregular cycles) reduces prediction confidence. "
+                f"Ovulation timing is less certain. More consistent logging will improve accuracy."
+            )
+        elif ovulation_sd > 3.0:
+            reason = (
+                f"Cycle variance is moderate; predictions are less certain. "
+                f"Based on {len(valid_cycles)} cycle(s)."
+            )
         elif cv >= 25:
             reason = f"Cycles are irregular (variance: {cv:.1f}%). More data will improve accuracy."
         elif cv >= 15:
@@ -300,37 +306,38 @@ def get_predictions(user_id: str, count: int = 6) -> List[Dict]:
         predictions = []
         current_start = last_period
         
+        # One-time imports for adaptive ovulation/fertile window
+        from cycle_utils import estimate_luteal, estimate_cycle_start_sd, select_ovulation_days
+        luteal_mean, luteal_sd = estimate_luteal(user_id)
+        cycle_start_sd = estimate_cycle_start_sd(user_id, avg_cycle_length)
+        ovulation_sd = math.sqrt(cycle_start_sd ** 2 + luteal_sd ** 2)
+        
         for i in range(count):
-            # Calculate next cycle start
             cycle_length = int(round(avg_cycle_length))
-            # Ensure cycle length is within valid range
             cycle_length = max(MIN_CYCLE_DAYS, min(cycle_length, MAX_CYCLE_DAYS))
-            
             next_start = current_start + timedelta(days=cycle_length)
             
-            # Calculate ovulation day for this cycle
-            ovulation_day = calculate_ovulation_day(cycle_length)
-            ovulation_date = current_start + timedelta(days=ovulation_day - 1)  # -1 because day 1 = current_start
+            # Ovulation day using adaptive luteal (same as calendar)
+            ovulation_day = calculate_ovulation_day(user_id, cycle_length)
+            ovulation_date = current_start + timedelta(days=ovulation_day - 1)
             
-            # Ensure ovulation doesn't occur before day 8 (safety check)
-            min_ovulation_date = current_start + timedelta(days=7)  # Day 8 minimum
+            min_ovulation_date = current_start + timedelta(days=7)
             if ovulation_date < min_ovulation_date:
                 ovulation_date = min_ovulation_date
                 ovulation_day = 8
-            
-            # Ensure ovulation doesn't occur after cycle end
             max_ovulation_date = next_start - timedelta(days=1)
             if ovulation_date > max_ovulation_date:
                 ovulation_date = max_ovulation_date
                 ovulation_day = cycle_length - 1
             
-            # Fertile window: 5 days before ovulation to ovulation day (medically accurate)
-            # Sperm can survive up to 5 days, egg viable for 24 hours after ovulation
-            # Total fertile window: 5 days before + ovulation day = 6 days total
-            fertile_start = ovulation_date - timedelta(days=5)
-            fertile_end = ovulation_date
-            
-            # Ensure fertile window doesn't start before period start
+            # Fertile window = Ovulation Phase window (3–5 days) from backend for API/UI consistency
+            max_ov_days = 5 if ovulation_sd >= 2.5 else 3
+            ovulation_days = select_ovulation_days(ovulation_sd, max_days=max_ov_days)
+            if ovulation_days:
+                fertile_start = ovulation_date + timedelta(days=min(ovulation_days))
+                fertile_end = ovulation_date + timedelta(days=max(ovulation_days))
+            else:
+                fertile_start = fertile_end = ovulation_date
             if fertile_start < current_start:
                 fertile_start = current_start
             
@@ -414,7 +421,7 @@ def can_log_period(user_id: str, date_to_check: date) -> Dict:
             if days_diff < MIN_DAYS_BETWEEN_PERIODS:
                 return {
                     "canLog": False,
-                    "reason": f"Periods must be at least {MIN_DAYS_BETWEEN_PERIODS} days apart. Last period was {days_diff} days ago."
+                    "reason": f"It is too soon to log another period start. Periods must be at least {MIN_DAYS_BETWEEN_PERIODS} days apart."
                 }
         
         return {"canLog": True}

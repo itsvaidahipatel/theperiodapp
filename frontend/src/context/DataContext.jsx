@@ -29,7 +29,10 @@ export const DataProvider = ({ children }) => {
   })
   const isFetchingRef = useRef(false)
   const lastFetchRef = useRef(0)
+  const lastPhaseMapFetchedAtRef = useRef(0)
   const FETCH_THROTTLE_MS = 2000
+
+  const PHASE_MAP_MAX_AGE_MS = 5 * 60 * 1000 // 5 minutes
 
   // Check if we need to refetch (date changed or cache invalid)
   const checkAndLoadData = useCallback(async (forceRefresh = false) => {
@@ -42,13 +45,18 @@ export const DataProvider = ({ children }) => {
       console.log('⏳ Dashboard data fetch throttled (2000ms), skipping')
       return
     }
+    // If phaseMap was fetched less than 5 minutes ago, don't fetch again on remount
+    if (!forceRefresh && lastPhaseMapFetchedAtRef.current > 0 && (now - lastPhaseMapFetchedAtRef.current) < PHASE_MAP_MAX_AGE_MS) {
+      setLoading(false)
+      return
+    }
     lastFetchRef.current = now
     isFetchingRef.current = true
     try {
       setLoading(true)
       setError(null)
 
-      // Load dashboard data first (always fetch, no cache)
+      // Load dashboard data first (always fetch unless phase map is fresh)
       // Add timeout to prevent hanging
       const dashboardPromise = loadDashboardData(forceRefresh)
       const timeoutPromise = new Promise((_, reject) => 
@@ -57,13 +65,21 @@ export const DataProvider = ({ children }) => {
       
       const dashboard = await Promise.race([dashboardPromise, timeoutPromise])
       const data = dashboard || {}
-      // Transform phase_map array (snake_case from /cycles/phase-map) into keyed object for phaseMap
+      // Phase map comes from CycleContext (single /cycles/phase-map call). Only key from phase_map if we have data; otherwise keep existing phaseMap
       const dataArray = data.phase_map || []
-      const keyedMap = {}
+      let keyedMap = {}
       dataArray.forEach(item => {
-        if (item.date) keyedMap[item.date] = item
+        const d = item?.date
+        if (!d) return
+        const dateKey = typeof d === 'string' ? d.slice(0, 10) : (d.toISOString?.()?.slice(0, 10) || String(d).slice(0, 10))
+        if (dateKey.length === 10) keyedMap[dateKey] = item
       })
-      setDashboardData(prev => ({ ...(prev || {}), ...data, phaseMap: keyedMap }))
+      if (keyedMap && Object.keys(keyedMap).length > 0) lastPhaseMapFetchedAtRef.current = Date.now()
+      setDashboardData(prev => {
+        const next = { ...(prev || {}), ...data, phaseMapFetchedAt: lastPhaseMapFetchedAtRef.current }
+        next.phaseMap = (keyedMap && Object.keys(keyedMap).length > 0) ? keyedMap : (prev?.phaseMap || {})
+        return next
+      })
       setLoading(false)
 
       // Get phase-day ID from dashboard
@@ -161,6 +177,12 @@ export const DataProvider = ({ children }) => {
       const token = localStorage.getItem('access_token')
       if (!token) {
         console.log('No auth token, skipping data load')
+        // Safety: clear any lingering session data when auth is missing/expired
+        try {
+          sessionStorage.clear()
+        } catch {
+          // ignore
+        }
         setLoading(false)
         return
       }
@@ -207,6 +229,17 @@ export const DataProvider = ({ children }) => {
   // Listen for auth success (login/register) - reset phase map so dashboard gets fresh data
   useEffect(() => {
     const handleAuthSuccess = () => {
+      let userId = null
+      try {
+        const raw = localStorage.getItem('user')
+        if (raw) {
+          const parsed = JSON.parse(raw)
+          userId = parsed?.id || null
+        }
+      } catch {
+        // ignore JSON errors
+      }
+      console.log(`DEBUG: Initializing DataContext for User ${userId || '(unknown)'}`)
       setDashboardData(prev => (prev ? { ...prev, phaseMap: {} } : null))
     }
     window.addEventListener('authSuccess', handleAuthSuccess)
@@ -280,9 +313,16 @@ export const DataProvider = ({ children }) => {
     checkAndLoadData(true)
   }, [checkAndLoadData])
 
-  // Allow PeriodCalendar (or any consumer) to update phase map so Dashboard can show todayPhase
+  // Allow CycleContext (or any consumer) to update phase map so Dashboard/CycleHistory can use it
   const updatePhaseMap = useCallback((phaseMap) => {
-    setDashboardData(prev => (prev ? { ...prev, phaseMap: phaseMap || {} } : { phaseMap: phaseMap || {} }))
+    lastPhaseMapFetchedAtRef.current = Date.now()
+    setDashboardData(prev => (prev ? { ...prev, phaseMap: phaseMap || {}, phaseMapFetchedAt: lastPhaseMapFetchedAtRef.current } : { phaseMap: phaseMap || {}, phaseMapFetchedAt: lastPhaseMapFetchedAtRef.current }))
+  }, [])
+
+  // Store allCycles from prefetch so CycleHistory can use cycle_data_json for past cycles without calling /periods/stats
+  const updateCycleHistoryData = useCallback((stats) => {
+    if (!stats?.allCycles) return
+    setDashboardData(prev => (prev ? { ...prev, allCycles: stats.allCycles, cycleStats: stats } : { allCycles: stats.allCycles, cycleStats: stats }))
   }, [])
 
   // Ensure calendar always gets a keyed phaseMap: use phaseMap when present, else derive from phase_map array.
@@ -295,7 +335,10 @@ export const DataProvider = ({ children }) => {
     if (Array.isArray(arr) && arr.length > 0) {
       const keyed = {}
       arr.forEach(item => {
-        if (item.date) keyed[item.date] = item
+        const d = item?.date
+        if (!d) return
+        const dateKey = typeof d === 'string' ? d.slice(0, 10) : (d.toISOString?.()?.slice(0, 10) || String(d).slice(0, 10))
+        if (dateKey.length === 10) keyed[dateKey] = item
       })
       return { ...dashboardData, phaseMap: keyed }
     }
@@ -309,7 +352,8 @@ export const DataProvider = ({ children }) => {
     loadingWellness,
     error,
     refreshData,
-    updatePhaseMap
+    updatePhaseMap,
+    updateCycleHistoryData
   }
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>

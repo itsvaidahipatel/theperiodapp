@@ -2,10 +2,11 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
 import { format, startOfMonth, endOfMonth, addMonths, subMonths, addYears, subYears, startOfDay, isSameDay, addDays, differenceInDays } from 'date-fns'
-import { logPeriod, getCurrentPhase, getHormonesData, getNutritionData, getExerciseData } from '../utils/api'
+import { logPeriod, getHormonesData, getNutritionData, getExerciseData } from '../utils/api'
 import { AlertCircle, Info, RefreshCw } from 'lucide-react'
 import { useCalendarCache } from '../context/CalendarCacheContext'
 import { useDataContext } from '../context/DataContext'
+import { useCycleData } from '../context/CycleContext'
 
 // Get user from localStorage (since we don't have context here)
 const getUser = () => {
@@ -48,11 +49,13 @@ const PREDICTED_PHASE_COLORS = {
 }
 
 const PeriodCalendar = ({ onPeriodLogged }) => {
-  // Single source of truth: phase map and period logs come from DataContext (fetched once on app load)
   const { dashboardData } = useDataContext()
-  const phaseMap = dashboardData?.phaseMap || {}
-  const periodLogs = dashboardData?.periodLogs || []
-  const contextLoading = dashboardData === undefined || dashboardData === null
+  const { masterPhaseMap, periodLogs = [], isDataReady } = useCycleData()
+  // Prefer phaseMap from DataContext when already populated (avoids loading loop); else use CycleContext
+  const phaseMap = (dashboardData?.phaseMap && Object.keys(dashboardData.phaseMap).length > 0)
+    ? dashboardData.phaseMap
+    : (masterPhaseMap || {})
+  const contextLoading = !isDataReady && !(dashboardData?.phaseMap && Object.keys(dashboardData?.phaseMap || {}).length > 0)
 
   const {
     cachedWellnessData,
@@ -63,6 +66,13 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
 
   const [selectedDate, setSelectedDate] = useState(null)
   const [loading, setLoading] = useState(contextLoading)
+
+  // Empty state: log phaseMap when empty for debugging
+  useEffect(() => {
+    if (!phaseMap || Object.keys(phaseMap).length === 0) {
+      console.log('PhaseMap Data:', phaseMap)
+    }
+  }, [phaseMap])
 
   // Sync context data to calendar cache so other consumers (Nutrition, Exercise, etc.) have it
   useEffect(() => {
@@ -82,15 +92,18 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
   const [error, setError] = useState(null)
   const [todayPhase, setTodayPhase] = useState(null)
   const isPrefetchingRef = useRef(false)
-  const lastGetCurrentPhaseDateRef = useRef(null) // Prevent infinite getCurrentPhase loop
 
-  // Build Map from dashboardData.phaseMap (keyed by date) for O(1) lookups; only when phaseMap changes
-  const phaseMapRef = dashboardData?.phaseMap
+  // Build Map from masterPhaseMap (keyed by date) for O(1) lookups; only when phaseMap changes
+  // Date keys normalized to YYYY-MM-DD to match backend (e.g. '2026-02-10')
+  const phaseMapRef = masterPhaseMap
+  // Build phase info from context; backend uses snake_case (is_predicted, is_virtual)
   const phaseInfoMap = useMemo(() => {
     const map = new Map()
     const source = phaseMapRef || {}
     Object.entries(source).forEach(([dateStr, phaseData]) => {
       if (!phaseData) return
+      const dateKey = (dateStr || '').slice(0, 10)
+      if (dateKey.length !== 10) return
       let phase = typeof phaseData === 'string' ? phaseData : (phaseData.phase && phaseData.phase.trim ? phaseData.phase.trim() : phaseData.phase)
       if (!phase && phaseData.phase_day_id) {
         const pid = String(phaseData.phase_day_id).toLowerCase()
@@ -101,43 +114,36 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
         else if (first === 'l') phase = 'Luteal'
       }
       if (phase) {
-        map.set(dateStr, {
+        const isPredictedRaw = typeof phaseData === 'object' ? (phaseData.is_predicted ?? phaseData.isPredicted) : true
+        const isPredicted = isPredictedRaw !== false
+        const isVirtualRaw = typeof phaseData === 'object' ? (phaseData.is_virtual ?? phaseData.isVirtual) : false
+        const isVirtual = isVirtualRaw === true
+        map.set(dateKey, {
           phase: phase,
           phaseDayId: typeof phaseData === 'object' ? (phaseData.phase_day_id || null) : null,
           fertilityProb: typeof phaseData === 'object' ? (phaseData.fertility_prob || 0) : 0,
-          isPredicted: typeof phaseData === 'object' ? (phaseData.is_predicted !== false) : true
+          isPredicted,
+          isVirtual
         })
       }
     })
     console.log(`📊 PhaseInfoMap updated: ${map.size} dates (from phaseMap keys: ${Object.keys(source).length})`)
-    // #region agent log
-    const sampleKey = map.size ? Array.from(map.keys())[0] : null
-    const sampleVal = sampleKey ? map.get(sampleKey) : null
-    fetch('http://127.0.0.1:7242/ingest/6e7c83a7-9704-42b4-bb73-f91cceedfc17',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PeriodCalendar.jsx:phaseInfoMap',message:'phaseInfoMap built',data:{size:map.size,sourceKeys:Object.keys(source).length,sampleKey,samplePhase:sampleVal?.phase},timestamp:Date.now(),hypothesisId:'A,C,E'})}).catch(()=>{});
-    // #endregion
     return map
   }, [phaseMapRef])
 
-  // Pre-calculate logged dates set for O(1) lookups
-  // Note: periodLogs now contains period START dates only
-  // The backend automatically creates period days in user_cycle_days, 
-  // so we check phaseMap for Period phase with is_predicted=false to identify logged periods
+  // Pre-calculate logged dates set for O(1) lookups (keys normalized to YYYY-MM-DD)
   const loggedDatesSet = useMemo(() => {
     const set = new Set()
-    // Add period start dates
     periodLogs.forEach(log => {
-      const dateStr = log.startDate || log.date
-      if (dateStr) {
-        set.add(dateStr)
-      }
+      const dateStr = (log.startDate || log.date || '').toString().slice(0, 10)
+      if (dateStr.length === 10) set.add(dateStr)
     })
-    // Also add dates from phaseMap that are Period phase and not predicted (logged)
-    Object.entries(phaseMap).forEach(([dateStr, phaseData]) => {
-      const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
-      const isPredicted = typeof phaseData === 'object' ? (phaseData.is_predicted !== false) : true
-      if (phase === 'Period' && !isPredicted) {
-        set.add(dateStr)
-      }
+    Object.entries(phaseMap || {}).forEach(([dateStr, phaseData]) => {
+      const key = (dateStr || '').slice(0, 10)
+      if (key.length !== 10) return
+      const phase = typeof phaseData === 'string' ? phaseData : phaseData?.phase
+      const isPredicted = typeof phaseData === 'object' ? (phaseData.is_predicted ?? phaseData.isPredicted) !== false : true
+      if (phase === 'Period' && !isPredicted) set.add(key)
     })
     return set
   }, [periodLogs, phaseMap])
@@ -167,42 +173,7 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
 
       try {
 
-        // PARALLEL TASK 1: Prefetch cycle stats
-        const prefetchCycleStats = async () => {
-          try {
-            const { getCycleStats } = await import('../utils/api')
-            const stats = await getCycleStats()
-            console.log('✅ Cycle stats prefetched:', { 
-              totalCycles: stats.totalCycles,
-              averageCycleLength: stats.averageCycleLength 
-            })
-            // Dispatch event with stats for components that need it
-            window.dispatchEvent(new CustomEvent('cycleStatsPrefetched', { detail: stats }))
-          } catch (err) {
-            console.error('Error prefetching cycle stats:', err)
-          }
-        }
-
-        // PARALLEL TASK 2: Prefetch cycle history
-        const prefetchCycleHistory = async () => {
-          try {
-            const { getCycleStats } = await import('../utils/api')
-            const stats = await getCycleStats()
-            if (stats?.allCycles) {
-              console.log(`✅ Cycle history prefetched: ${stats.allCycles.length} cycles ready`)
-              // Dispatch event to notify cycle history page
-              window.dispatchEvent(new CustomEvent('cycleHistoryPrefetched', { detail: stats }))
-            }
-          } catch (err) {
-            console.error('Error prefetching cycle history:', err)
-          }
-        }
-
-        // Run stats and history tasks in PARALLEL (no aggressive month prefetching)
-        await Promise.all([
-          prefetchCycleStats(),
-          prefetchCycleHistory()
-        ])
+        // Cycle stats and history are now loaded by CycleContext.loadAllData, no need to prefetch here
         
         console.log('✅ All parallel background tasks complete (stats + history)')
       } catch (err) {
@@ -290,62 +261,19 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
     return () => clearTimeout(timeoutId)
   }, [phaseMap, cachedWellnessData?.phaseDayId, updateWellnessCache])
 
-  // Get today's phase from phaseMap (already loaded) - avoid calling getCurrentPhase in a loop
+  // Derive today's phase from phaseMap only (no getCurrentPhase call)
   useEffect(() => {
     const today = format(new Date(), 'yyyy-MM-dd')
     const phaseInfo = getPhaseInfo(today)
+    setTodayPhase(phaseInfo?.phase ? { phase: phaseInfo.phase, phaseDayId: phaseInfo.phaseDayId || null } : null)
+  }, [phaseMapRef])
 
-    if (phaseInfo?.phase) {
-      lastGetCurrentPhaseDateRef.current = null // Reset so periodLogged can refetch if needed
-      setTodayPhase({
-        phase: phaseInfo.phase,
-        phaseDayId: phaseInfo.phaseDayId || null
-      })
-      return
-    }
-
-    // Fallback: call getCurrentPhase at most once per day when today is missing from phaseMap
-    if (lastGetCurrentPhaseDateRef.current === today) return
-    lastGetCurrentPhaseDateRef.current = today
-
-    const fetchTodayPhase = async () => {
-      try {
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Timeout')), 3000)
-        )
-        const phaseData = await Promise.race([
-          getCurrentPhase(),
-          timeoutPromise
-        ])
-        if (phaseData?.phase) {
-          setTodayPhase({
-            phase: phaseData.phase,
-            phaseDayId: phaseData.phase_day_id || null
-          })
-        }
-      } catch (err) {
-        console.error('Failed to fetch today\'s phase:', err)
-        setTodayPhase({ phase: 'Unknown', phaseDayId: null })
-      }
-    }
-    fetchTodayPhase()
-  }, [phaseMapRef]) // Only when phaseMap changes; getPhaseInfo from phaseInfoMap (derived from phaseMapRef)
-
-  // Refresh today's phase when period is logged (reset ref so one refetch is allowed)
+  // When period is logged, context refreshes phaseMap; re-derive today's phase from updated phaseMap
   useEffect(() => {
     const handlePeriodLogged = () => {
-      lastGetCurrentPhaseDateRef.current = null
       const today = format(new Date(), 'yyyy-MM-dd')
       const phaseInfo = getPhaseInfo(today)
-      if (phaseInfo?.phase) {
-        setTodayPhase({ phase: phaseInfo.phase, phaseDayId: phaseInfo.phaseDayId || null })
-      } else {
-        getCurrentPhase().then((phaseData) => {
-          if (phaseData?.phase) {
-            setTodayPhase({ phase: phaseData.phase, phaseDayId: phaseData.phase_day_id || null })
-          }
-        }).catch(() => {})
-      }
+      setTodayPhase(phaseInfo?.phase ? { phase: phaseInfo.phase, phaseDayId: phaseInfo.phaseDayId || null } : null)
     }
     window.addEventListener('periodLogged', handlePeriodLogged)
     return () => window.removeEventListener('periodLogged', handlePeriodLogged)
@@ -415,7 +343,13 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
         onPeriodLogged()
       }
     } catch (err) {
-      setError(err.response?.data?.detail || err.message || 'Failed to log period')
+      const detail = err.response?.data?.detail
+      const message = typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail) && detail[0]?.msg
+          ? detail[0].msg
+          : err.message || 'Failed to log period'
+      setError(message)
     } finally {
       setLogging(false)
     }
@@ -451,7 +385,13 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
       if (onPeriodLogged) onPeriodLogged()
     } catch (err) {
       console.error('Failed to log period start:', err)
-      setError(err.response?.data?.detail || err.message || 'Failed to log period start')
+      const detail = err.response?.data?.detail
+      const message = typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail) && detail[0]?.msg
+          ? detail[0].msg
+          : err.message || 'Failed to log period'
+      setError(message)
     } finally {
       setLogging(false)
     }
@@ -504,59 +444,64 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
 
   const tileContent = ({ date, view }) => {
     if (view === 'month') {
-      // O(1) lookup: dateStr must be 'yyyy-MM-dd' to match phaseMap keys (e.g. '2026-02-09')
+      // Date key: YYYY-MM-DD to match backend phase_map (e.g. '2026-02-10')
       const dateStr = format(date, 'yyyy-MM-dd')
       const phaseInfo = getPhaseInfo(dateStr)
       const isLogged = isDateLogged(dateStr)
       const isSelected = selectedDate && format(selectedDate, 'yyyy-MM-dd') === dateStr
       const today = format(new Date(), 'yyyy-MM-dd')
       const isToday = dateStr === today
-      
+
       let phase = phaseInfo?.phase || null
       let phaseDayId = phaseInfo?.phaseDayId || null
-      const fertilityProb = phaseInfo?.fertilityProb || 0
-      const isPredicted = phaseInfo?.isPredicted !== false
-      
-      if (!phase) {
-        const directPhaseData = phaseMap[dateStr]
+      let isPredicted = phaseInfo?.isPredicted !== false
+      let isVirtual = phaseInfo?.isVirtual === true
+      if (phaseInfo == null) {
+        const directPhaseData = phaseMap[dateStr] || phaseMap[(dateStr || '').slice(0, 10)]
         if (directPhaseData) {
           phase = typeof directPhaseData === 'string' ? directPhaseData : directPhaseData.phase
           phaseDayId = typeof directPhaseData === 'object' ? (directPhaseData.phase_day_id || null) : null
+          // Backend uses snake_case: is_predicted, is_virtual
+          const rawPredicted = typeof directPhaseData === 'object' ? (directPhaseData.is_predicted ?? directPhaseData.isPredicted) : undefined
+          isPredicted = rawPredicted !== false
+          const rawVirtual = typeof directPhaseData === 'object' ? (directPhaseData.is_virtual ?? directPhaseData.isVirtual) : undefined
+          isVirtual = rawVirtual === true
         }
       }
-      
+
       if (isLogged && !phase) {
         phase = 'Period'
         phaseDayId = 'p1'
+        isPredicted = false
+        isVirtual = false
       }
       
-      if (!phase && !isLogged && Math.random() < 0.01) {
-        console.log(`⚠️ No phase for ${dateStr}, phaseMap keys: ${Object.keys(phaseMap).length}`)
-      }
-      
-      // If phaseMap is empty, do NOT render muted/predicted colors (transparent only)
+      // Predicted includes virtual backward fill
+      const isPredictedOrVirtual = isPredicted || isVirtual
+
       const phaseMapHasData = Object.keys(phaseMap).length > 0
       const phaseKey = normalizePhaseKey(phase)
-      const backgroundColor = !phaseMapHasData
-        ? 'transparent'
+      // Solid colors (1.0 opacity) for all; border differentiates: dashed = predicted/virtual, solid = actual
+      const backgroundColor = phaseKey
+        ? (PHASE_COLORS[phaseKey] || PHASE_COLORS.Default)
         : isLogged
           ? PHASE_COLORS.Logged
-          : phaseKey
-            ? (PHASE_COLORS[phaseKey] || PHASE_COLORS.Default)
+          : phaseMapHasData
+            ? PHASE_COLORS.Default
             : 'transparent'
 
-      // #region agent log
-      const isTodayForLog = dateStr === format(new Date(), 'yyyy-MM-dd')
-      if (isTodayForLog || (phaseMapHasData && !phase && Math.random() < 0.05)) {
-        fetch('http://127.0.0.1:7242/ingest/6e7c83a7-9704-42b4-bb73-f91cceedfc17',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'PeriodCalendar.jsx:tileContent',message:'tile render',data:{dateStr,phase,phaseMapHasData,backgroundColor,hasPhaseInColors:!!(phaseKey && PHASE_COLORS[phaseKey]),phaseMapKeys:Object.keys(phaseMap).length},timestamp:Date.now(),hypothesisId:'C,D,E'})}).catch(()=>{});
-      }
-      // #endregion
+      const tileBorder = !phaseMapHasData
+        ? (isSelected ? '3px solid #E91E63' : isToday ? '2px solid #E91E63' : '1px solid rgba(0, 0, 0, 0.1)')
+        : isSelected
+          ? '3px solid #E91E63'
+          : isToday
+            ? '2px solid #E91E63'
+            : isLogged
+              ? '2px solid #C2185B'
+              : isPredictedOrVirtual
+                ? '2px dashed rgba(0, 0, 0, 0.3)'
+                : '1px solid rgba(255, 255, 255, 0.5)'
 
-      // Fast fertility/ovulation checks using pre-calculated data
-      const isFertile = fertilityProb >= 0.3 && phase !== 'Period' && phase !== 'Ovulation'
-      const isOvulation = phase === 'Ovulation'
-      const isPeriodDay = phase === 'Period' || isLogged
-      
       return (
         <div
           className="calendar-day-content"
@@ -571,7 +516,7 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
             cursor: 'pointer'
           }}
         >
-          {/* Background color based on phase - Pastel with better styling */}
+          {/* Background: solid colors; predicted/virtual = dashed border, actual = solid border */}
           <div
             style={{
               position: 'absolute',
@@ -579,29 +524,19 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
               left: '4px',
               right: '4px',
               bottom: '4px',
-              backgroundColor: backgroundColor,
+              backgroundColor,
               borderRadius: '12px',
-              border: !phaseMapHasData
-                ? (isSelected ? '3px solid #E91E63' : isToday ? '2px solid #E91E63' : '1px solid rgba(0, 0, 0, 0.1)')
-                : isSelected 
-                  ? '3px solid #E91E63'  // Vibrant border for selected
-                  : isToday 
-                    ? '2px solid #E91E63'  // Vibrant border for today
-                    : isLogged
-                      ? '2px solid #C2185B'  // Darker border for logged dates (vibrant)
-                      : isPredicted
-                        ? '1px dashed rgba(0, 0, 0, 0.15)'  // Dashed border for predicted dates
-                        : '1px solid rgba(255, 255, 255, 0.5)',
+              border: tileBorder,
               boxShadow: isSelected 
                 ? '0 4px 12px rgba(233, 30, 99, 0.4)' 
                 : isToday 
                   ? '0 2px 8px rgba(233, 30, 99, 0.3)' 
                   : isLogged
-                    ? '0 2px 6px rgba(233, 30, 99, 0.25)'  // Stronger shadow for logged
-                    : isPredicted
-                      ? '0 1px 2px rgba(0, 0, 0, 0.05)'  // Subtle shadow for predicted
+                    ? '0 2px 6px rgba(233, 30, 99, 0.25)'
+                    : isPredictedOrVirtual
+                      ? '0 1px 2px rgba(0, 0, 0, 0.05)'
                       : '0 1px 3px rgba(0, 0, 0, 0.1)',
-              opacity: !phaseMapHasData ? 1 : (isLogged ? 1 : isPredicted ? 0.7 : 0.85),
+              opacity: 1.0,
               transition: 'all 0.2s ease'
             }}
           />
@@ -645,42 +580,6 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
             >
               {phaseDayId}
             </span>
-          )}
-          
-          {/* Fertile window indicator - Pastel */}
-          {isFertile && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '6px',
-                right: '6px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#FCD34D',  // Soft pastel yellow
-                border: '2px solid white',
-                zIndex: 11,
-                boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)'
-              }}
-            />
-          )}
-          
-          {/* Ovulation indicator - Pastel */}
-          {isOvulation && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '6px',
-                left: '6px',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: '#67E8F9',  // Soft pastel cyan
-                border: '2px solid white',
-                zIndex: 11,
-                boxShadow: '0 1px 3px rgba(0, 0, 0, 0.2)'
-              }}
-            />
           )}
         </div>
       )
@@ -821,88 +720,30 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
             </div>
           )}
 
-          {/* Legend - Actual vs Predicted */}
+          {/* Legend - 4 phases, phase-based background colors only */}
           <div className="mb-6 p-5 bg-gradient-to-br from-pink-50 to-purple-50 rounded-xl border border-pink-100">
-            <p className="text-sm font-semibold text-gray-700 mb-4 flex items-center gap-2">
+            <p className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
               <span className="text-period-pink">Phase Legend</span>
             </p>
-            
-            {/* Actual/Logged Dates */}
-            <div className="mb-4">
-              <p className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Actual Dates (Logged)</p>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border-2 border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PHASE_COLORS.Logged }}
-                  />
-                  <span className="text-xs font-medium text-gray-700">Logged Period</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border-2 border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PHASE_COLORS.Period }}
-                  />
-                  <span className="text-xs font-medium text-gray-700">Period</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border-2 border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PHASE_COLORS.Follicular }}
-                  />
-                  <span className="text-xs font-medium text-gray-700">Follicular</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border-2 border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PHASE_COLORS.Ovulation }}
-                  />
-                  <span className="text-xs font-medium text-gray-700">Ovulation</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border-2 border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PHASE_COLORS.Luteal }}
-                  />
-                  <span className="text-xs font-medium text-gray-700">Luteal</span>
-                </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
+                <div className="w-5 h-5 rounded border-2 border-gray-300 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Period }} />
+                <span className="text-xs font-medium text-gray-700">Period</span>
+              </div>
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
+                <div className="w-5 h-5 rounded border-2 border-gray-300 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Follicular }} />
+                <span className="text-xs font-medium text-gray-700">Follicular</span>
+              </div>
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
+                <div className="w-5 h-5 rounded border-2 border-gray-300 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Ovulation }} />
+                <span className="text-xs font-medium text-gray-700">Ovulation</span>
+              </div>
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
+                <div className="w-5 h-5 rounded border-2 border-gray-300 shadow-sm" style={{ backgroundColor: PHASE_COLORS.Luteal }} />
+                <span className="text-xs font-medium text-gray-700">Luteal</span>
               </div>
             </div>
-            
-            {/* Predicted Dates */}
-            <div>
-              <p className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Predicted Dates (Lighter)</p>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border border-dashed border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PREDICTED_PHASE_COLORS.Period }}
-                  />
-                  <span className="text-xs font-medium text-gray-600">Predicted Period</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border border-dashed border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PREDICTED_PHASE_COLORS.Follicular }}
-                  />
-                  <span className="text-xs font-medium text-gray-600">Predicted Follicular</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border border-dashed border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PREDICTED_PHASE_COLORS.Ovulation }}
-                  />
-                  <span className="text-xs font-medium text-gray-600">Predicted Ovulation</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-white/50">
-                  <div
-                    className="w-5 h-5 rounded-lg border border-dashed border-gray-300 shadow-sm"
-                    style={{ backgroundColor: PREDICTED_PHASE_COLORS.Luteal }}
-                  />
-                  <span className="text-xs font-medium text-gray-600">Predicted Luteal</span>
-                </div>
-              </div>
-            </div>
+            <p className="text-xs text-gray-500 italic">Dashed/muted colors indicate predicted future phases.</p>
           </div>
 
           {/* Medical Note - Pastel themed */}

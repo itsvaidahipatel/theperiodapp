@@ -75,7 +75,12 @@ const PeriodLogModal = ({ isOpen, onClose, onSuccess, selectedDate }) => {
       await onSuccess(formData)
       onClose()
     } catch (err) {
-      const errorMessage = err.response?.data?.detail || err.message || 'Failed to log period'
+      const detail = err.response?.data?.detail
+      const errorMessage = typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail) && detail[0]?.msg
+          ? detail[0].msg
+          : err.message || 'Failed to log period'
       setError(errorMessage)
       setLoading(false)
     }

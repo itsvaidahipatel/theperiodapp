@@ -124,6 +124,24 @@ export const clearCache = () => {
   try {
     clearOldCache()
     localStorage.removeItem(`${CACHE_PREFIX}timestamp`)
+    // Purge any legacy, non user-keyed sessionStorage items used by old calendar cache
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        const legacyKeys = [
+          'calendar_phase_map_cache',
+          'calendar_period_logs_cache',
+          'calendar_last_load_time',
+          'wellness_data_cache',
+        ]
+        legacyKeys.forEach((k) => {
+          if (sessionStorage.getItem(k) !== null) {
+            sessionStorage.removeItem(k)
+          }
+        })
+      }
+    } catch (e) {
+      console.error('Error clearing legacy session cache keys:', e)
+    }
     console.log('Cache cleared')
   } catch (error) {
     console.error('Error clearing cache:', error)

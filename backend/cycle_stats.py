@@ -153,6 +153,30 @@ def update_user_cycle_stats(user_id: str, period_starts: Optional[List] = None) 
         traceback.print_exc()
 
 
+def _get_phase_bounds(user_id: str, cycle_length: int, avg_period_length: float) -> tuple:
+    """
+    Return (period_length, ovulation_day, ovulation_start, ovulation_end) for phase dots.
+    Matches cycle_utils calculate_phase_for_date_range logic.
+    """
+    try:
+        from cycle_utils import estimate_luteal, estimate_period_length
+
+        luteal_mean, _ = estimate_luteal(user_id)
+        period_days_raw = estimate_period_length(user_id, normalized=True)
+        period_length_days = int(round(max(3.0, min(8.0, period_days_raw))))
+        actual_cl = max(21, min(45, cycle_length))
+        ov_day = int(max(period_length_days + 1, actual_cl - luteal_mean))
+        ov_start = max(period_length_days + 1, ov_day - 1)  # ovulation_days typically {-1,0,1}
+        ov_end = min(actual_cl, ov_day + 1)
+        return (period_length_days, ov_day, ov_start, ov_end)
+    except Exception as e:
+        print(f"⚠️ _get_phase_bounds fallback: {e}")
+        pl = int(round(max(3, min(8, avg_period_length))))
+        cl = max(21, min(45, cycle_length))
+        ov = max(pl + 1, cl - 14)
+        return (pl, ov, max(pl + 1, ov - 1), min(cl, ov + 1))
+
+
 def get_cycle_stats(user_id: str) -> Dict:
     """
     Calculate comprehensive cycle statistics.
@@ -173,42 +197,39 @@ def get_cycle_stats(user_id: str) -> Dict:
         - cycleLengths: Array of last 6 cycle lengths (for chart)
     """
     try:
-        # Get cycles
-        cycles = get_cycles_from_period_starts(user_id)
-        
         # Get period starts (confirmed only for stats, but we'll also check period_logs if empty)
         period_starts = get_period_start_logs(user_id, confirmed_only=True)
         
-        # DEBUG: Log what we found
-        print(f"📊 Cycle Stats Debug for user {user_id}:")
-        print(f"   - Period starts from period_start_logs: {len(period_starts)}")
-        print(f"   - Cycles from period_starts: {len(cycles)}")
-        
-        # FALLBACK: If period_start_logs is empty, try to sync from period_logs (use return value, no DB read)
+        # If period_start_logs is empty, sync from period_logs before proceeding
         if not period_starts:
-            print("⚠️ No period_start_logs found, attempting to sync from period_logs...")
+            print(f"⚠️ No period_start_logs found for user {user_id}. Syncing from period_logs...")
             from period_start_logs import sync_period_start_logs_from_period_logs
             period_starts = sync_period_start_logs_from_period_logs(user_id)
-            cycles = get_cycles_from_period_starts(user_id, period_starts=period_starts)
-            print(f"   - After sync: {len(period_starts)} period starts, {len(cycles)} cycles")
+            print(f"✅ Synced {len(period_starts)} period starts from period_logs")
         
-        # If still empty, check period_logs directly as last resort
+        # Get cycles (after sync if needed)
+        cycles = get_cycles_from_period_starts(user_id, period_starts=period_starts)
+        
+        # If still no period_starts after sync, return default stats
         if not period_starts:
-            print("⚠️ Still no period_start_logs, checking period_logs directly...")
-            from database import supabase
-            logs_response = supabase.table("period_logs").select("date").eq("user_id", user_id).order("date").execute()
-            if logs_response.data:
-                print(f"   - Found {len(logs_response.data)} period_logs entries")
-                # Create period_starts from period_logs directly
-                period_starts = []
-                for log in logs_response.data:
-                    date_str = log.get("date")
-                    if date_str:
-                        period_starts.append({
-                            "start_date": date_str,
-                            "is_confirmed": True
-                        })
-                print(f"   - Created {len(period_starts)} period starts from period_logs")
+            print(f"⚠️ No period_start_logs found for user {user_id} after sync. Returning default stats.")
+            return {
+                "totalCycles": 0,
+                "averageCycleLength": 28.0,
+                "averagePeriodLength": 5.0,
+                "cycleRegularity": "unknown",
+                "longestCycle": None,
+                "shortestCycle": None,
+                "longestPeriod": None,
+                "shortestPeriod": None,
+                "lastPeriodDate": None,
+                "daysSinceLastPeriod": None,
+                "anomalies": 0,
+                "confidence": {"level": "low", "percentage": 0, "reason": "No cycle data available"},
+                "insights": ["Log at least 2 periods to see cycle history."],
+                "cycleLengths": [],
+                "allCycles": []
+            }
         
         # Calculate rolling averages
         avg_cycle_length = calculate_rolling_average(user_id)
@@ -322,15 +343,27 @@ def get_cycle_stats(user_id: str) -> Dict:
                     
                     cycle_length = (cycle_end_date - cycle_start_date).days
                     
-                    # Include all cycles, not just valid ones (for history display)
-                    all_cycles.append({
-                        "cycleNumber": len(period_starts) - i - 1,  # Most recent = 1
+                    # Phase boundaries for dots (match cycle_utils calculate_phase_for_date_range)
+                    period_len, ov_day, ov_start, ov_end = _get_phase_bounds(
+                        user_id, cycle_length, avg_period_length
+                    )
+                    cycle_obj = {
+                        "cycleNumber": len(period_starts) - i - 1,
                         "startDate": cycle_start,
                         "endDate": cycle_end,
                         "length": cycle_length,
-                        "isCurrent": False,  # Completed cycles
-                        "isAnomaly": cycle_length < MIN_CYCLE_DAYS or cycle_length > MAX_CYCLE_DAYS
-                    })
+                        "isCurrent": False,
+                        "isAnomaly": cycle_length < MIN_CYCLE_DAYS or cycle_length > MAX_CYCLE_DAYS,
+                        "periodLength": period_len,
+                        "ovulationDay": ov_day,
+                        "ovulationStart": ov_start,
+                        "ovulationEnd": ov_end,
+                    }
+                    # Attach stored cycle_data_json (source of truth for past cycles)
+                    stored = period_starts[i].get("cycle_data_json")
+                    if stored:
+                        cycle_obj["cycleData"] = stored
+                    all_cycles.append(cycle_obj)
             
             # Always add current cycle (from last period start to today)
             # This ensures we show at least 1 cycle even with just 1 period logged
@@ -343,14 +376,41 @@ def get_cycle_stats(user_id: str) -> Dict:
             today = datetime.now().date()
             current_cycle_length = (today - last_period_date_obj).days
             
-            all_cycles.append({
-                "cycleNumber": 0,  # Current cycle
+            # For current cycle, use estimated length (median of recent or avg)
+            est_length = avg_cycle_length
+            if valid_cycles:
+                lengths = [c["length"] for c in valid_cycles[-6:] if 21 <= c["length"] <= 45]
+                if lengths:
+                    s = sorted(lengths)
+                    est_length = s[len(s) // 2] if len(s) % 2 else (s[len(s) // 2 - 1] + s[len(s) // 2]) / 2
+            period_len_curr, ov_day_curr, ov_start_curr, ov_end_curr = _get_phase_bounds(
+                user_id, int(est_length), avg_period_length
+            )
+            current_cycle_obj = {
+                "cycleNumber": 0,
                 "startDate": last_period,
-                "endDate": None,  # Current cycle hasn't ended
+                "endDate": None,
                 "length": current_cycle_length,
                 "isCurrent": True,
-                "isAnomaly": False  # Don't mark current cycle as anomaly
-            })
+                "isAnomaly": False,
+                "periodLength": period_len_curr,
+                "ovulationDay": ov_day_curr,
+                "ovulationStart": ov_start_curr,
+                "ovulationEnd": ov_end_curr,
+            }
+            # Check if current cycle is late via missing_period_handler
+            try:
+                from missing_period_handler import handle_missing_period
+                late_result = handle_missing_period(user_id)
+                if late_result and late_result.get("is_late"):
+                    current_cycle_obj["status"] = "late"
+                    current_cycle_obj["daysLate"] = late_result.get("days_late", 0)
+            except Exception as e:
+                print(f"⚠️ Could not check late status for current cycle: {e}")
+
+            # Current cycle: Don't compute phase map here (Dashboard already has it via phase-map API)
+            # Frontend will slice phaseMap for current cycle dates
+            all_cycles.append(current_cycle_obj)
         
         # Reverse to show most recent first (current cycle will be first)
         all_cycles.reverse()

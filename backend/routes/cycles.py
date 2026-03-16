@@ -229,8 +229,22 @@ async def get_phase_map(
         # 2) Fetch period_logs once (source of truth)
         logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
         period_logs = logs_response.data or []
+
+        # 2b) Fetch stored cycle_data_json from period_start_logs (immutable past)
+        from period_start_logs import get_period_start_logs
+        period_starts_with_cycle = get_period_start_logs(user_id, confirmed_only=False)
+        stored_phases_by_date = {}  # date_str -> {phase, phase_day_id, is_predicted: False, ...}
+        for ps in period_starts_with_cycle or []:
+            cycle_json = ps.get("cycle_data_json")
+            if cycle_json and isinstance(cycle_json, list):
+                for entry in cycle_json:
+                    d = entry.get("date")
+                    if d:
+                        stored_phases_by_date[str(d)] = dict(entry)
+                        stored_phases_by_date[str(d)]["is_predicted"] = False
         
         # 3) Validate dates
+        print(f"DEBUG: /phase-map for User {user_id} with anchor {last_period_date_str}, start={start_date or 'auto'}, end={end_date or 'auto'}")
         try:
             datetime.strptime(last_period_date_str, "%Y-%m-%d")
             if start_date:
@@ -241,7 +255,7 @@ async def get_phase_map(
             print(f"❌ Invalid date format: {str(date_error)}")
             return {"phase_map": []}
         
-        # 4) PURE RAM calculation (no DB I/O inside the function)
+        # 4) Calculate phases (dynamic predictions)
         phase_mappings = calculate_phase_for_date_range(
             user_id=user_id,
             last_period_date=last_period_date_str,
@@ -250,9 +264,25 @@ async def get_phase_map(
             start_date=start_date,
             end_date=end_date,
         )
-        
-        # 5) Return directly
-        return {"phase_map": phase_mappings}
+
+        # 5) Override with stored phases where available (immutable past)
+        result = []
+        for m in phase_mappings or []:
+            d = m.get("date")
+            if d and str(d) in stored_phases_by_date:
+                stored = stored_phases_by_date[str(d)]
+                out = dict(stored)
+                out.setdefault("is_predicted", False)
+                out.setdefault("is_virtual", False)
+                result.append(out)
+            else:
+                out = dict(m)
+                # Preserve is_predicted and is_virtual from calculate_phase_for_date_range
+                out.setdefault("is_predicted", True)
+                out.setdefault("is_virtual", out.get("is_virtual", False))
+                result.append(out)
+
+        return {"phase_map": result}
     
     except Exception as e:
         print(f"Error getting phase map: {str(e)}")

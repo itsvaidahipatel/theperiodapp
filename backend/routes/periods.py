@@ -79,12 +79,13 @@ async def log_period(
                 detail="Cannot log period for future dates. Please log periods that have already occurred."
             )
         
-        # Validate if period can be logged
+        # Validate if period can be logged (reason is user-friendly from period_service)
         validation = can_log_period(user_id, date_obj)
         if not validation.get("canLog", False):
+            reason = validation.get("reason") or "Cannot log period for this date."
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=validation.get("reason", "Cannot log period for this date.")
+                detail=reason
             )
         
         # Step 0: Auto-close any periods that have been open > 10 days

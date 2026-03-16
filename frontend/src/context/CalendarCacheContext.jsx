@@ -10,12 +10,27 @@ export const useCalendarCache = () => {
   return context
 }
 
+const getCurrentUserId = () => {
+  try {
+    const raw = localStorage.getItem('user')
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed?.id || null
+  } catch {
+    return null
+  }
+}
+
 export const CalendarCacheProvider = ({ children }) => {
+  const userId = getCurrentUserId()
+  const phaseKey = userId ? `calendar_phase_map_cache_${userId}` : 'calendar_phase_map_cache'
+  const logsKey = userId ? `calendar_period_logs_cache_${userId}` : 'calendar_period_logs_cache'
+  const lastLoadKey = userId ? `calendar_last_load_time_${userId}` : 'calendar_last_load_time'
   // Cache for calendar phase data
   const [cachedPhaseMap, setCachedPhaseMap] = useState(() => {
     // Try to load from sessionStorage on mount
     try {
-      const cached = sessionStorage.getItem('calendar_phase_map_cache')
+      const cached = sessionStorage.getItem(phaseKey)
       if (cached) {
         return JSON.parse(cached)
       }
@@ -27,7 +42,7 @@ export const CalendarCacheProvider = ({ children }) => {
   
   const [cachedPeriodLogs, setCachedPeriodLogs] = useState(() => {
     try {
-      const cached = sessionStorage.getItem('calendar_period_logs_cache')
+      const cached = sessionStorage.getItem(logsKey)
       if (cached) {
         return JSON.parse(cached)
       }
@@ -37,10 +52,12 @@ export const CalendarCacheProvider = ({ children }) => {
     return []
   })
   
-  // Cache for wellness data (hormones, nutrition, exercise)
+  // Cache for wellness data (hormones, nutrition, exercise) – user-keyed
   const [cachedWellnessData, setCachedWellnessData] = useState(() => {
     try {
-      const cached = sessionStorage.getItem('wellness_data_cache')
+      const uid = getCurrentUserId()
+      const wKey = uid ? `wellness_data_cache_${uid}` : 'wellness_data_cache'
+      const cached = sessionStorage.getItem(wKey)
       if (cached) {
         return JSON.parse(cached)
       }
@@ -59,7 +76,7 @@ export const CalendarCacheProvider = ({ children }) => {
   // Track if calendar has been loaded in this session
   const [hasLoaded, setHasLoaded] = useState(() => {
     try {
-      const cached = sessionStorage.getItem('calendar_phase_map_cache')
+      const cached = sessionStorage.getItem(phaseKey)
       return cached && Object.keys(JSON.parse(cached)).length > 0
     } catch {
       return false
@@ -68,7 +85,7 @@ export const CalendarCacheProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(false)
   const [lastLoadTime, setLastLoadTime] = useState(() => {
     try {
-      return sessionStorage.getItem('calendar_last_load_time')
+      return sessionStorage.getItem(lastLoadKey)
     } catch {
       return null
     }
@@ -83,9 +100,13 @@ export const CalendarCacheProvider = ({ children }) => {
     setLastLoadTime(now)
     
     try {
-      sessionStorage.setItem('calendar_phase_map_cache', JSON.stringify(phaseMap))
-      sessionStorage.setItem('calendar_period_logs_cache', JSON.stringify(periodLogs))
-      sessionStorage.setItem('calendar_last_load_time', now)
+      const uid = getCurrentUserId()
+      const pKey = uid ? `calendar_phase_map_cache_${uid}` : 'calendar_phase_map_cache'
+      const lKey = uid ? `calendar_period_logs_cache_${uid}` : 'calendar_period_logs_cache'
+      const tKey = uid ? `calendar_last_load_time_${uid}` : 'calendar_last_load_time'
+      sessionStorage.setItem(pKey, JSON.stringify(phaseMap))
+      sessionStorage.setItem(lKey, JSON.stringify(periodLogs))
+      sessionStorage.setItem(tKey, now)
     } catch (e) {
       console.error('Error saving calendar cache:', e)
     }
@@ -95,7 +116,9 @@ export const CalendarCacheProvider = ({ children }) => {
   const updateWellnessCache = useCallback((wellnessData) => {
     setCachedWellnessData(wellnessData)
     try {
-      sessionStorage.setItem('wellness_data_cache', JSON.stringify(wellnessData))
+      const uid = getCurrentUserId()
+      const wKey = uid ? `wellness_data_cache_${uid}` : 'wellness_data_cache'
+      sessionStorage.setItem(wKey, JSON.stringify(wellnessData))
     } catch (e) {
       console.error('Error saving wellness data cache:', e)
     }
@@ -116,10 +139,15 @@ export const CalendarCacheProvider = ({ children }) => {
     setLastLoadTime(null)
     
     try {
-      sessionStorage.removeItem('calendar_phase_map_cache')
-      sessionStorage.removeItem('calendar_period_logs_cache')
-      sessionStorage.removeItem('wellness_data_cache')
-      sessionStorage.removeItem('calendar_last_load_time')
+      const uid = getCurrentUserId()
+      const pKey = uid ? `calendar_phase_map_cache_${uid}` : 'calendar_phase_map_cache'
+      const lKey = uid ? `calendar_period_logs_cache_${uid}` : 'calendar_period_logs_cache'
+      const tKey = uid ? `calendar_last_load_time_${uid}` : 'calendar_last_load_time'
+      const wKey = uid ? `wellness_data_cache_${uid}` : 'wellness_data_cache'
+      sessionStorage.removeItem(pKey)
+      sessionStorage.removeItem(lKey)
+      sessionStorage.removeItem(tKey)
+      sessionStorage.removeItem(wKey)
     } catch (e) {
       console.error('Error clearing calendar cache:', e)
     }

@@ -147,13 +147,14 @@ async def register(request: RegisterRequest):
                 is_manual_end_value = False
                 print(f"📊 Registration: end_date={end_date_value} (avg_bleeding_days={bleeding_days})")
 
-                # Create period_logs entry
+                # Create period_logs entry (Initial Log Injection)
+                # flow='Medium' so the engine recognizes it as a valid period start
                 period_log_entry = {
                     "user_id": user["id"],
                     "date": request.last_period_date,
                     "end_date": end_date_value,
                     "is_manual_end": is_manual_end_value,
-                    "flow": None,
+                    "flow": "Medium",
                     "notes": None
                 }
                 

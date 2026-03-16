@@ -29,43 +29,74 @@ MIN_CYCLE_DAYS = 21
 MAX_CYCLE_DAYS = 45
 
 
+def _generate_and_save_cycle_data_json(user_id: str, cycle_start_str: str, cycle_end_str: str, period_logs: List[Dict]) -> bool:
+    """
+    Generate phase mappings for a completed cycle and save to period_start_logs.cycle_data_json.
+    IMMUTABLE: Only writes when cycle_data_json is null; never overwrites existing.
+    """
+    try:
+        from cycle_utils import calculate_phase_for_date_range
+
+        # Get period_logs for the cycle date range
+        start_dt = datetime.strptime(cycle_start_str, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(cycle_end_str, "%Y-%m-%d").date()
+        cycle_length_days = (end_dt - start_dt).days
+        last_day_of_cycle = (end_dt - timedelta(days=1)).strftime("%Y-%m-%d")  # Cycle ends day before next period
+
+        phase_mappings = calculate_phase_for_date_range(
+            user_id=user_id,
+            last_period_date=cycle_start_str,
+            cycle_length=cycle_length_days,
+            period_logs=period_logs,
+            start_date=cycle_start_str,
+            end_date=last_day_of_cycle,
+        )
+        if not phase_mappings:
+            return False
+
+        # Store as JSON array; add is_predicted=False for actual/stored phases
+        cycle_data = []
+        for m in phase_mappings:
+            entry = dict(m)
+            entry["is_predicted"] = False
+            cycle_data.append(entry)
+
+        client = supabase_admin if supabase_admin else supabase
+        # Only update if cycle_data_json is currently null (immutable - never overwrite)
+        r = client.table("period_start_logs").update({
+            "cycle_data_json": cycle_data,
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("user_id", user_id).eq("start_date", cycle_start_str).is_("cycle_data_json", "null").execute()
+
+        updated = r.data and len(r.data) > 0
+        if updated:
+            print(f"✅ Saved cycle_data_json for cycle {cycle_start_str}→{cycle_end_str} ({len(cycle_data)} days)")
+        return bool(updated)
+    except Exception as e:
+        print(f"⚠️ Failed to generate cycle_data_json: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
     """
-    Sync PeriodStartLogs from period_logs by COMPLETELY DELETING and REBUILDING.
+    Sync PeriodStartLogs from period_logs.
     
-    CRITICAL: This function now performs a full rebuild to handle out-of-order period logging.
-    When periods are logged out of chronological order (e.g., Month 4, then Month 3),
-    cycle lengths must be recalculated correctly.
-    
-    Since period_logs now represents cycle starts (one per cycle),
-    we extract unique dates, SORT BY DATE, and completely rebuild PeriodStartLogs.
+    IMMUTABLE PAST: Preserves existing cycle_data_json. Uses delete+insert but restores
+    cycle_data_json after insert. For newly completed cycles (no stored cycle_data_json),
+    generates and saves phase mappings.
     
     Rules:
     - One log = one cycle start
-    - Duplicate dates are prevented (keep first occurrence)
-    - Future dates are marked as is_confirmed=false
-    - Past dates are marked as is_confirmed=true
-    - COMPLETE REBUILD: Deletes all existing records and inserts fresh ones
-    - SORTED BY DATE: Ensures cycle lengths are calculated correctly even if logged out of order
-    
-    Does NOT call get_period_start_logs() to verify - returns the inserted data directly
-    so callers can use it without a follow-up DB read (avoids 20s sync verification loop).
-    
-    Args:
-        user_id: User ID
-    
-    Returns:
-        List of period-start dicts (same shape as get_period_start_logs): start_date, is_confirmed.
-        Empty list if no records inserted or on error.
+    - cycle_data_json is NEVER overwritten once set
+    - New period = generate cycle_data_json for the completed cycle only
     """
     try:
-        # Get all period logs (these are cycle start dates)
         logs_response = supabase.table("period_logs").select("date").eq("user_id", user_id).order("date").execute()
-        
-        # Extract unique dates (one per cycle start)
         start_dates = []
         seen_dates = set()
-        
+
         if logs_response.data:
             for log in logs_response.data:
                 date_str = log.get("date")
@@ -74,54 +105,70 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
                         date_obj = datetime.strptime(date_str, "%Y-%m-%d").date() if isinstance(date_str, str) else date_str
                         start_dates.append(date_obj)
                         seen_dates.add(date_str)
-                    except:
+                    except Exception:
                         continue
-        
-        # CRITICAL: Sort by date to ensure correct cycle length calculation
-        # This handles out-of-order logging (e.g., Month 4 logged before Month 3)
+
         start_dates = sorted(set(start_dates))
-        
-        # Determine which are confirmed (past dates) vs predicted (future dates)
         today = datetime.now().date()
-        
-        # Use service role client if available (bypasses RLS), otherwise use regular client
         client = supabase_admin if supabase_admin else supabase
-        
-        # Sync: rebuild period_start_logs from period_logs (returns inserted list; callers use it to avoid a follow-up select)
+
+        # 1) Before delete: preserve cycle_data_json for existing records
+        preserved = {}
+        try:
+            existing = client.table("period_start_logs").select("start_date, cycle_data_json").eq("user_id", user_id).execute()
+            for row in (existing.data or []):
+                sd = row.get("start_date")
+                if sd and row.get("cycle_data_json") is not None:
+                    preserved[str(sd)] = row["cycle_data_json"]
+        except Exception:
+            pass
+
+        # 2) Delete and rebuild
         print(f"🔄 Syncing period_start_logs for user {user_id}")
         try:
             client.table("period_start_logs").delete().eq("user_id", user_id).execute()
-            print(f"✅ Deleted all existing PeriodStartLogs for user {user_id}")
         except Exception as delete_error:
-            print(f"⚠️ Warning: Error deleting existing PeriodStartLogs (non-fatal): {str(delete_error)}")
-        
-        # REBUILD: Insert all period starts in sorted order
+            print(f"⚠️ Warning: Error deleting (non-fatal): {str(delete_error)}")
+
+        result = []
         if start_dates:
             insert_data = []
             for start_date in start_dates:
-                is_confirmed = start_date <= today
+                sd_str = start_date.strftime("%Y-%m-%d") if hasattr(start_date, 'strftime') else str(start_date)
                 insert_data.append({
                     "user_id": user_id,
-                    "start_date": start_date.strftime("%Y-%m-%d") if hasattr(start_date, 'strftime') else str(start_date),
-                    "is_confirmed": is_confirmed
+                    "start_date": sd_str,
+                    "is_confirmed": start_date <= today,
                 })
-            
-            if insert_data:
-                # Execute insert and return inserted data (do NOT call get_period_start_logs to verify)
-                insert_response = client.table("period_start_logs").insert(insert_data).execute()
-                inserted = insert_response.data if insert_response.data else insert_data
-                inserted_count = len(inserted)
-                print(f"✅ period_start_logs synced: {inserted_count} records (returned to caller, no DB read needed)")
-                # Return data in same shape as get_period_start_logs (start_date, is_confirmed)
-                result = [{"start_date": r.get("start_date"), "is_confirmed": r.get("is_confirmed", True)} for r in inserted]
-                if len(start_dates) > 1:
-                    for i in range(len(start_dates) - 1):
-                        cycle_length = (start_dates[i + 1] - start_dates[i]).days
-                        print(f"   Cycle {i+1}: {start_dates[i].strftime('%Y-%m-%d')} to {start_dates[i+1].strftime('%Y-%m-%d')} = {cycle_length} days")
-                return result
+            insert_response = client.table("period_start_logs").insert(insert_data).execute()
+            inserted = insert_response.data if insert_response.data else insert_data
+            result = [{"start_date": r.get("start_date"), "is_confirmed": r.get("is_confirmed", True)} for r in inserted]
+            print(f"✅ period_start_logs synced: {len(inserted)} records")
+
+            # 3) Restore cycle_data_json for records that had it (immutable past)
+            for row in inserted:
+                sd = row.get("start_date")
+                if sd and sd in preserved:
+                    try:
+                        client.table("period_start_logs").update({
+                            "cycle_data_json": preserved[sd],
+                            "updated_at": datetime.utcnow().isoformat()
+                        }).eq("user_id", user_id).eq("start_date", sd).execute()
+                    except Exception:
+                        pass
+
+            # 4) Generate cycle_data_json for newly completed cycles (no stored data)
+            logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+            period_logs_full = logs_response.data or []
+            for i in range(len(start_dates) - 1):
+                prev_str = start_dates[i].strftime("%Y-%m-%d")
+                curr_str = start_dates[i + 1].strftime("%Y-%m-%d")
+                if prev_str not in preserved:
+                    _generate_and_save_cycle_data_json(user_id, prev_str, curr_str, period_logs_full)
         else:
-            print(f"✅ period_start_logs synced: 0 records (no period logs)")
-        return []
+            print(f"✅ period_start_logs synced: 0 records")
+
+        return result
     
     except Exception as e:
         error_msg = str(e)

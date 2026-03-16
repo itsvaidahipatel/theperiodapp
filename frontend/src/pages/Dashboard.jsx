@@ -5,8 +5,9 @@ import 'react-calendar/dist/Calendar.css'
 import { format, startOfMonth, endOfMonth, addMonths, subMonths } from 'date-fns'
 import { getTimeBasedGreeting, getTimeBasedMessage } from '../utils/greetings'
 import { getPhaseColorClass, getPhaseDescription, getPhaseEmoji, getPhaseColor } from '../utils/phaseHelpers'
-import { logout, logPeriod, getPeriodEpisodes } from '../utils/api'
+import { logout, logPeriod } from '../utils/api'
 import { useDataContext } from '../context/DataContext'
+import { useCycleData } from '../context/CycleContext'
 import SafetyDisclaimer from '../components/SafetyDisclaimer'
 import PeriodLogModal from '../components/PeriodLogModal'
 import LoadingSpinner from '../components/LoadingSpinner'
@@ -113,7 +114,9 @@ const PhaseIcon = ({ phase, size = 40 }) => {
 
 const Dashboard = () => {
   const { t } = useTranslation()
-  const { dashboardData, loading, refreshData, updatePhaseMap } = useDataContext()
+  const { loading, refreshData, dashboardData } = useDataContext()
+  const { masterPhaseMap, cycleStats: contextCycleStats, currentPhase, currentCycle, periodLogs = [], isDataReady } = useCycleData()
+  const phaseMap = (dashboardData?.phaseMap && Object.keys(dashboardData.phaseMap).length > 0) ? dashboardData.phaseMap : masterPhaseMap
   const { viewMode, isMobileView, isWebView, getResponsiveClass, toggleViewMode } = useViewMode()
   const [user, setUser] = useState(null)
 
@@ -131,9 +134,8 @@ const Dashboard = () => {
   const [selectedDate, setSelectedDate] = useState(new Date())
   const [activeStartDate, setActiveStartDate] = useState(new Date())
   const [error, setError] = useState(null)
-  const [cycleStats, setCycleStats] = useState(null)
+  const [cycleStats, setCycleStats] = useState(null) // optional override after log; otherwise derived below
   const [isModalOpen, setIsModalOpen] = useState(false)
-  const [periodEpisodes, setPeriodEpisodes] = useState([])
   const [isMobile, setIsMobile] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
@@ -156,389 +158,81 @@ const Dashboard = () => {
     }
   }, [])
   
-  // Extract data from context (phase map is ONLY fetched by PeriodCalendar; Dashboard only reads it here)
-  const currentPhase = dashboardData?.currentPhase || null
-  const phaseMap = dashboardData?.phaseMap || {}
-  const periodLogs = dashboardData?.periodLogs || []
-  console.log('Current phaseMap:', phaseMap)
+  // User from localStorage
+  useEffect(() => {
+    const userData = localStorage.getItem('user')
+    if (userData) {
+      try {
+        setUser(JSON.parse(userData))
+      } catch {}
+    }
+  }, [])
 
-  // Derive today's phase from phaseMap/currentPhase in render (no useEffect = no loop)
+  // Today's Phase card: use phaseMap[todayDateString] from shared context (no fetchCurrentPhase)
+  const todayDateString = format(new Date(), 'yyyy-MM-dd')
   const todayPhase = (() => {
-    const today = format(new Date(), 'yyyy-MM-dd')
-    const phaseData = phaseMap[today]
+    const phaseData = phaseMap[todayDateString]
     if (phaseData) {
       const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
       const phaseDayId = typeof phaseData === 'object' ? (phaseData.phase_day_id || null) : null
       if (phase) return { phase, phaseDayId }
     }
     if (currentPhase?.phase) {
-      return {
-        phase: currentPhase.phase,
-        phaseDayId: currentPhase.phase_day_id || currentPhase.id || null
-      }
+      return { phase: currentPhase.phase, phaseDayId: currentPhase.phase_day_id || null }
     }
     return null
   })()
 
-  // Check if user has last_period_date
   const hasLastPeriodDate = user?.last_period_date
 
-  // Memoize period logs and current phase to prevent infinite loops
-  const periodLogsRef = useRef([])
-  const currentPhaseRef = useRef(null)
-  const lastCalculationRef = useRef('')
-  const dataVersionRef = useRef(0)
-  
-  // Create stable string representations for comparison
-  const periodLogsKey = useRef('')
-  const currentPhaseKey = useRef('')
-  
-  // Update refs when data actually changes (using string comparison to avoid object reference issues)
-  useEffect(() => {
-    const logsKey = JSON.stringify(periodLogs?.map(log => ({ date: log?.date, flow: log?.flow })) || [])
-    const phaseKey = JSON.stringify({ phase: currentPhase?.phase, phase_day_id: currentPhase?.phase_day_id } || {})
-    
-    const logsChanged = periodLogsKey.current !== logsKey
-    const phaseChanged = currentPhaseKey.current !== phaseKey
-    
-    if (logsChanged || phaseChanged) {
-      periodLogsRef.current = periodLogs
-      currentPhaseRef.current = currentPhase
-      periodLogsKey.current = logsKey
-      currentPhaseKey.current = phaseKey
-      // Reset calculation key to force recalculation
-      lastCalculationRef.current = ''
-      dataVersionRef.current += 1
+  // Minimal cycle stats derived from user (no heavy calculation)
+  const derivedCycleStats = (() => {
+    const cycleLength = user?.cycle_length || 28
+    if (!user?.last_period_date) return { cycleLength, daysSince: null, daysUntil: null }
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const lastPeriod = new Date(user.last_period_date)
+    lastPeriod.setHours(0, 0, 0, 0)
+    const daysSince = Math.max(0, Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24)))
+    let nextPeriodDate = new Date(lastPeriod)
+    nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
+    while (nextPeriodDate <= today) {
+      nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
     }
-  }, [periodLogs, currentPhase])
+    const daysUntil = Math.floor((nextPeriodDate - today) / (1000 * 60 * 60 * 24))
+    return { cycleLength, daysSince, daysUntil }
+  })()
 
-  // Stable key for cycleStats effect: only re-run when these essentials change
-  const lastDataKeyRef = useRef('')
-  const userDataRef = useRef(null)
-  const isCalculatingRef = useRef(false)
-  const lastCycleStatsKeyRef = useRef('')
-
-  useEffect(() => {
-    // 1. Build a stable dataKey from essential dependencies only (no object refs)
-    const dataKey = JSON.stringify([
-      user?.last_period_date ?? '',
-      user?.cycle_length ?? 28,
-      periodLogs?.length ?? 0
-    ])
-    if (dataKey === lastDataKeyRef.current) {
-      return
-    }
-    lastDataKeyRef.current = dataKey
-
-    if (isCalculatingRef.current) {
-      return
-    }
-
-    try {
-      const userData = localStorage.getItem('user')
-      if (userData) {
-        const parsedUser = JSON.parse(userData)
-        const userKey = JSON.stringify({
-          id: parsedUser?.id,
-          last_period_date: parsedUser?.last_period_date,
-          cycle_length: parsedUser?.cycle_length
-        })
-        if (userDataRef.current !== userKey) {
-          userDataRef.current = userKey
-          setUser(parsedUser)
-        }
-
-        if (parsedUser?.last_period_date) {
-          const logsLength = periodLogsRef.current?.length || 0
-          const phaseName = currentPhaseRef.current?.phase || 'none'
-          const calculationKey = `${parsedUser.last_period_date}-${parsedUser.cycle_length || 28}-${logsLength}-${phaseName}-${dataVersionRef.current}`
-
-          if (lastCalculationRef.current === calculationKey) {
-            return
+  // Use cycleStats from context if available, otherwise use derived stats
+  const displayCycleStats = cycleStats && (cycleStats.daysSince != null || cycleStats.daysUntil != null) 
+    ? cycleStats 
+    : (contextCycleStats?.daysSinceLastPeriod != null 
+        ? { 
+            cycleLength: contextCycleStats.averageCycleLength || derivedCycleStats.cycleLength,
+            daysSince: contextCycleStats.daysSinceLastPeriod,
+            daysUntil: null // Not in contextCycleStats, would need calculation
           }
-          lastCalculationRef.current = calculationKey
-          isCalculatingRef.current = true
-          try {
-            const today = new Date()
-            today.setHours(0, 0, 0, 0)
-            
-            // Check if last_period_date exists
-            let daysSince = null
-            let daysUntil = null
-            
-            if (parsedUser.last_period_date) {
-              const lastPeriod = new Date(parsedUser.last_period_date)
-              
-              // Validate date
-              if (isNaN(lastPeriod.getTime())) {
-                console.warn('Invalid date in user data')
-                return
-              }
-              
-              lastPeriod.setHours(0, 0, 0, 0)
-              const cycleLength = parsedUser.cycle_length || 28
-              
-              // Calculate days since last period start date
-              // If today is the last period date, daysSince = 0
-              // If today is the day after, daysSince = 1, etc.
-              daysSince = Math.max(0, Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24)))
-              
-              // Calculate next period start date
-              // Start with last period + cycle length
-              let nextPeriodDate = new Date(lastPeriod)
-              nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
-              
-              // If the next period date has passed or is today, move to the following cycle
-              while (nextPeriodDate <= today) {
-                nextPeriodDate.setDate(nextPeriodDate.getDate() + cycleLength)
-              }
-              
-              // Calculate days until next period (always positive)
-              daysUntil = Math.floor((nextPeriodDate - today) / (1000 * 60 * 60 * 24))
-            }
-            
-            const cycleLength = parsedUser.cycle_length || 28
-            
-            // Calculate additional statistics from period logs (use ref to avoid dependency issues)
-            const logsToUse = periodLogsRef.current || []
-            const phaseToUse = currentPhaseRef.current
-            
-            let avgPeriodLength = 5 // default
-            let cyclesTracked = 0
-            let cycleRegularity = 'Regular'
-            let predictedOvulationDate = null
-            let lutealEstimate = 14
-            
-            if (logsToUse && logsToUse.length > 0) {
-              try {
-                // Calculate average period length
-                const periodLengths = []
-                logsToUse.forEach((log, index) => {
-                  if (index < logsToUse.length - 1 && log?.date && logsToUse[index + 1]?.date) {
-                    try {
-                      const currentDate = new Date(log.date)
-                      const nextDate = new Date(logsToUse[index + 1].date)
-                      if (!isNaN(currentDate.getTime()) && !isNaN(nextDate.getTime())) {
-                        const diff = Math.floor((currentDate - nextDate) / (1000 * 60 * 60 * 24))
-                        if (diff > 0 && diff < 45) { // Valid cycle length
-                          periodLengths.push(diff)
-                        }
-                      }
-                    } catch (dateError) {
-                      console.warn('Error parsing date in period log:', dateError)
-                    }
-                  }
-                })
-                
-                if (periodLengths.length > 0) {
-                  cyclesTracked = periodLengths.length
-                  const avgCycleLength = periodLengths.reduce((a, b) => a + b, 0) / periodLengths.length
-                  
-                  // Calculate cycle regularity
-                  const cycleVariance = periodLengths.reduce((sum, len) => sum + Math.pow(len - avgCycleLength, 2), 0) / periodLengths.length
-                  const cycleStdDev = Math.sqrt(cycleVariance)
-                  
-                  if (cycleStdDev < 2) {
-                    cycleRegularity = 'Very Regular'
-                  } else if (cycleStdDev < 4) {
-                    cycleRegularity = 'Regular'
-                  } else if (cycleStdDev < 7) {
-                    cycleRegularity = 'Somewhat Irregular'
-                  } else {
-                    cycleRegularity = 'Irregular'
-                  }
-                }
-                
-                // Calculate average period length (count consecutive period days)
-                const periodDays = []
-                logsToUse.forEach(log => {
-                  if (log?.flow && log.flow !== 'none' && log?.date) {
-                    periodDays.push(log.date)
-                  }
-                })
-                
-                // Group consecutive days
-                if (periodDays.length > 0) {
-                  try {
-                    let currentPeriod = []
-                    let periods = []
-                    periodDays.sort().forEach((date, index) => {
-                      try {
-                        if (index === 0) {
-                          currentPeriod = [date]
-                        } else {
-                          const prevDate = new Date(periodDays[index - 1])
-                          const currDate = new Date(date)
-                          if (!isNaN(prevDate.getTime()) && !isNaN(currDate.getTime())) {
-                            const diff = Math.floor((currDate - prevDate) / (1000 * 60 * 60 * 24))
-                            if (diff === 1) {
-                              currentPeriod.push(date)
-                            } else {
-                              periods.push(currentPeriod)
-                              currentPeriod = [date]
-                            }
-                          }
-                        }
-                      } catch (dateError) {
-                        console.warn('Error processing period date:', dateError)
-                      }
-                    })
-                    if (currentPeriod.length > 0) {
-                      periods.push(currentPeriod)
-                    }
-                    
-                    if (periods.length > 0) {
-                      const periodLengths = periods.map(p => p.length)
-                      avgPeriodLength = Math.round(periodLengths.reduce((a, b) => a + b, 0) / periodLengths.length)
-                    }
-                  } catch (periodError) {
-                    console.warn('Error calculating period lengths:', periodError)
-                  }
-                }
-                
-                // Calculate predicted ovulation date (cycle_length - luteal_mean)
-                // Estimate luteal phase (typically 14 days, but can vary)
-                if (parsedUser.last_period_date) {
-                  try {
-                    const lastPeriod = new Date(parsedUser.last_period_date)
-                    lutealEstimate = 14 // Default, could be improved with actual data
-                    const ovulationOffset = cycleLength - lutealEstimate
-                    const nextOvulation = new Date(lastPeriod)
-                    if (!isNaN(nextOvulation.getTime())) {
-                      nextOvulation.setDate(nextOvulation.getDate() + ovulationOffset)
-                      predictedOvulationDate = nextOvulation
-                    }
-                  } catch (ovulationError) {
-                    console.warn('Error calculating ovulation date:', ovulationError)
-                  }
-                }
-              } catch (statsCalcError) {
-                console.warn('Error in cycle stats calculation:', statsCalcError)
-              }
-            }
-            
-            const newStats = {
-              cycleLength,
-              daysSince: daysSince,
-              daysUntil: daysUntil,
-              avgPeriodLength,
-              cyclesTracked,
-              cycleRegularity,
-              predictedOvulationDate,
-              lutealEstimate,
-              currentPhase: phaseToUse?.phase || null,
-              phaseDayId: phaseToUse?.phase_day_id || null
-            }
-            const statsKey = JSON.stringify([cycleLength, daysSince, daysUntil, avgPeriodLength, cyclesTracked, cycleRegularity, phaseToUse?.phase ?? '', phaseToUse?.phase_day_id ?? ''])
-            if (statsKey !== lastCycleStatsKeyRef.current) {
-              lastCycleStatsKeyRef.current = statsKey
-              setCycleStats(newStats)
-            }
-          } catch (statsError) {
-            console.error('Error calculating cycle stats:', statsError)
-            // Set basic stats even if calculation fails
-            try {
-              const fallbackCycleLength = parsedUser?.cycle_length || 28
-              // Only set daysSince and daysUntil if last_period_date exists
-              let fallbackDaysSince = null
-              let fallbackDaysUntil = null
-              
-              if (parsedUser?.last_period_date) {
-                const lastPeriod = new Date(parsedUser.last_period_date)
-                const today = new Date()
-                today.setHours(0, 0, 0, 0)
-                lastPeriod.setHours(0, 0, 0, 0)
-                
-                if (!isNaN(lastPeriod.getTime())) {
-                  fallbackDaysSince = Math.max(0, Math.floor((today - lastPeriod) / (1000 * 60 * 60 * 24)))
-                  
-                  let nextPeriodDate = new Date(lastPeriod)
-                  nextPeriodDate.setDate(nextPeriodDate.getDate() + fallbackCycleLength)
-                  while (nextPeriodDate <= today) {
-                    nextPeriodDate.setDate(nextPeriodDate.getDate() + fallbackCycleLength)
-                  }
-                  fallbackDaysUntil = Math.floor((nextPeriodDate - today) / (1000 * 60 * 60 * 24))
-                }
-              }
-              
-              const fallbackStats = {
-                cycleLength: fallbackCycleLength,
-                daysSince: fallbackDaysSince,
-                daysUntil: fallbackDaysUntil,
-                avgPeriodLength: 5,
-                cyclesTracked: 0,
-                cycleRegularity: 'Regular',
-                predictedOvulationDate: null,
-                lutealEstimate: 14,
-                currentPhase: phaseToUse?.phase || null,
-                phaseDayId: phaseToUse?.phase_day_id || null
-              }
-              const fallbackStatsKey = JSON.stringify([fallbackCycleLength, fallbackDaysSince, fallbackDaysUntil, 5, 0, 'Regular', phaseToUse?.phase ?? '', phaseToUse?.phase_day_id ?? ''])
-              if (fallbackStatsKey !== lastCycleStatsKeyRef.current) {
-                lastCycleStatsKeyRef.current = fallbackStatsKey
-                setCycleStats(fallbackStats)
-              }
-            } catch (fallbackError) {
-              console.error('Error setting fallback stats:', fallbackError)
-            }
-          }
-          isCalculatingRef.current = false
-        }
-      } else {
-        navigate('/login')
-      }
-    } catch (error) {
-      console.error('Error in Dashboard useEffect:', error)
-      isCalculatingRef.current = false
-      // Don't crash the app, just log the error
-    }
-    // Stable key: only re-run when user identity, last period date, or log count changes
-  }, [user?.id, user?.last_period_date, periodLogs?.length])
-
-  // Throttle: don't fire fetch more than once every 2 seconds (stops API spam)
-  const lastFetchRef = useRef(0)
-  const FETCH_THROTTLE_MS = 2000
-
-  // Fetch period episodes for bleeding range visualization
-  useEffect(() => {
-    const fetchPeriodEpisodes = async () => {
-      if (!user) return
-      const now = Date.now()
-      if (now - lastFetchRef.current < FETCH_THROTTLE_MS) return
-      lastFetchRef.current = now
-      try {
-        const episodes = await getPeriodEpisodes()
-        setPeriodEpisodes(episodes || [])
-      } catch (error) {
-        console.error('Failed to fetch period episodes:', error)
-        setPeriodEpisodes([])
-      }
-    }
-    fetchPeriodEpisodes()
-    const handlePeriodLogged = () => {
-      setTimeout(() => {
-        fetchPeriodEpisodes()
-      }, 2000)
-    }
-    window.addEventListener('periodLogged', handlePeriodLogged)
-    return () => {
-      window.removeEventListener('periodLogged', handlePeriodLogged)
-    }
-  }, [user])
+        : derivedCycleStats)
 
   const handleLogout = async () => {
     try {
       await logout()
-      sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
-      navigate('/login')
     } catch (error) {
-      sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
-      navigate('/login')
+      console.error('Logout error (continuing to clear client state):', error)
     }
+
+    // Clear browser storage
+    sessionStorage.clear()
+    localStorage.removeItem('access_token')
+    localStorage.removeItem('user')
+
+    // Tell contexts to reset any cached cycle data
+    window.dispatchEvent(new CustomEvent('resetAllCycles'))
+    window.dispatchEvent(new CustomEvent('calendarRefresh'))
+    window.dispatchEvent(new CustomEvent('authSuccess'))
+
+    // Force a clean app state for the next user
+    window.location.href = '/login'
   }
 
   const handleLogPeriod = async (logData) => {
@@ -587,12 +281,6 @@ const Dashboard = () => {
       
       window.dispatchEvent(new CustomEvent('periodLogged'))
       window.dispatchEvent(new CustomEvent('calendarUpdated'))
-      try {
-        const episodes = await getPeriodEpisodes()
-        setPeriodEpisodes(episodes || [])
-      } catch (error) {
-        console.error('Failed to refresh period episodes:', error)
-      }
       setIsModalOpen(false)
     } catch (error) {
       console.error('Failed to log period:', error)
@@ -600,25 +288,16 @@ const Dashboard = () => {
     }
   }
 
-  // Check if a date is in predicted bleeding range
+  // Check if a date is in predicted bleeding range (derived from phaseMap)
   const isInBleedingRange = (dateStr) => {
-    if (!periodEpisodes || periodEpisodes.length === 0) return false
+    const phaseData = phaseMap[dateStr]
+    if (!phaseData) return false
     
-    const date = new Date(dateStr)
-    date.setHours(0, 0, 0, 0)
+    const phase = typeof phaseData === 'string' ? phaseData : phaseData.phase
+    const isPredicted = typeof phaseData === 'object' ? (phaseData.is_predicted ?? false) : false
     
-    for (const episode of periodEpisodes) {
-      const startDate = new Date(episode.start_date)
-      startDate.setHours(0, 0, 0, 0)
-      const endDate = new Date(episode.predicted_end_date)
-      endDate.setHours(0, 0, 0, 0)
-      
-      if (date >= startDate && date <= endDate) {
-        return true
-      }
-    }
-    
-    return false
+    // Show bleeding range for Period phase (both actual and predicted)
+    return phase === 'Period' || phase === 'Menstrual'
   }
 
   const handleLogPeriodClick = (date) => {
@@ -672,7 +351,6 @@ const Dashboard = () => {
     if (view === 'month') {
       const dateStr = format(date, "yyyy-MM-dd")
       const dayData = phaseMap[dateStr]
-      console.log(`Lookup ${dateStr}:`, dayData?.phase)
       const dayNumber = date.getDate()
       const today = new Date()
       const isToday = format(date, 'yyyy-MM-dd') === format(today, 'yyyy-MM-dd')
@@ -697,10 +375,6 @@ const Dashboard = () => {
       if (!resolvedPhase && isBleeding) resolvedPhase = 'Period'
 
       const circleColor = resolvedPhase ? getPhaseCircleColor(resolvedPhase) : '#D1D5DB'
-      
-      if (isToday || (dayNumber <= 3 && date.getMonth() === currentMonth && date.getFullYear() === currentYear)) {
-        console.log(`📅 Date ${dateStr}: dayData=${dayData ? 'yes' : 'no'}, phase=${resolvedPhase ?? 'null'}, color=${circleColor}`)
-      }
       
       // Circle: highest z-index so it sits on top; backgroundColor explicitly from resolvedPhase
       const circleSize = (isMobile === true) ? '2rem' : '2.75rem'
@@ -833,7 +507,7 @@ const Dashboard = () => {
     setActiveStartDate(activeStartDate)
   }
 
-  if (loading) {
+  if (loading || !isDataReady) {
     return <LoadingSpinner message="Loading dashboard..." />
   }
 
