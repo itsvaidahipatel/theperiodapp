@@ -9,12 +9,21 @@ import os
 from database import supabase, async_supabase_call, retry_supabase_call
 from routes.auth import get_current_user
 from cycle_utils import (
+    calculate_phase_for_date_range,
     get_user_phase_day,
-    calculate_phase_for_date_range
+    group_logs_into_episodes,
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _late_anchor_shift_days_from_user(user: dict) -> int:
+    try:
+        return int(max(0, user.get("late_period_anchor_shift_days") or 0))
+    except (TypeError, ValueError):
+        return 0
+
 
 # NOTE: _prediction_in_progress removed - predictions are now calculated synchronously on-demand
 
@@ -30,10 +39,15 @@ async def predict_cycles(
     """Generate cycle predictions and phase mappings for user using adaptive local algorithms."""
     try:
         user_id = current_user["id"]
+        from missing_period_handler import handle_missing_period
+
+        handle_missing_period(user_id)
         current_date = request.current_date or datetime.now().strftime("%Y-%m-%d")
         
         # Get user data
-        user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+        user_response = supabase.table("users").select(
+            "last_period_date, cycle_length, late_period_anchor_shift_days"
+        ).eq("id", user_id).execute()
         if not user_response.data or not user_response.data[0]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -64,14 +78,25 @@ async def predict_cycles(
         current_date_obj = datetime.strptime(str(current_date), "%Y-%m-%d")
         start_date = (current_date_obj - timedelta(days=30)).strftime("%Y-%m-%d")
         end_date = (current_date_obj + timedelta(days=60)).strftime("%Y-%m-%d")
+
+        logs_response = (
+            supabase.table("period_logs")
+            .select("date, end_date")
+            .eq("user_id", user_id)
+            .order("date")
+            .execute()
+        )
+        period_logs = logs_response.data or []
         
         # Generate cycle phase map using adaptive local algorithms
         phase_mappings = calculate_phase_for_date_range(
             user_id=user_id,
             last_period_date=last_period_date_str,
             cycle_length=cycle_length,
+            period_logs=period_logs,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            late_anchor_shift_days=_late_anchor_shift_days_from_user(user),
         )
         
         # Get current phase-day
@@ -106,6 +131,10 @@ async def get_current_phase(
         check_date = str(date or datetime.now().strftime("%Y-%m-%d"))
         today = datetime.now().date()
 
+        from missing_period_handler import handle_missing_period_async
+
+        await handle_missing_period_async(user_id, check_date)
+
         # Type safety: validate incoming date
         try:
             check_date_obj = datetime.strptime(check_date, "%Y-%m-%d").date()
@@ -115,7 +144,9 @@ async def get_current_phase(
         # 1) Fetch user and period_logs in parallel (reduces latency)
         @retry_supabase_call(max_retries=3)
         def _fetch_user():
-            return supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+            return supabase.table("users").select(
+                "last_period_date, cycle_length, late_period_anchor_shift_days"
+            ).eq("id", user_id).execute()
 
         @retry_supabase_call(max_retries=3)
         def _fetch_logs():
@@ -175,6 +206,7 @@ async def get_current_phase(
             period_logs=period_logs,
             start_date=check_date,
             end_date=check_date,
+            late_anchor_shift_days=_late_anchor_shift_days_from_user(user),
         )
         if phase_mappings and len(phase_mappings) >= 1:
             m = phase_mappings[0]
@@ -229,9 +261,15 @@ async def get_phase_map(
     """
     try:
         user_id = current_user["id"]
+
+        from missing_period_handler import handle_missing_period_async
+
+        await handle_missing_period_async(user_id)
         
         # 1) Get user cycle config
-        user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+        user_response = supabase.table("users").select(
+            "last_period_date, cycle_length, late_period_anchor_shift_days"
+        ).eq("id", user_id).execute()
         
         if not user_response.data or not user_response.data[0]:
             return {"phase_map": []}
@@ -295,6 +333,7 @@ async def get_phase_map(
             period_logs=period_logs,
             start_date=start_date,
             end_date=end_date,
+            late_anchor_shift_days=_late_anchor_shift_days_from_user(user),
         )
 
         # 5) Override with stored phases where available (immutable past)
@@ -344,7 +383,9 @@ async def cycle_health_check(
         user_id = current_user["id"]
         
         # Get user data for current cycle stats
-        user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+        user_response = supabase.table("users").select(
+            "last_period_date, cycle_length, late_period_anchor_shift_days"
+        ).eq("id", user_id).execute()
         user_data = user_response.data[0] if user_response.data else {}
         last_period_date = user_data.get("last_period_date")
         # Type safety: cast cycle_length explicitly
@@ -507,6 +548,7 @@ async def cycle_health_check(
                 period_logs=period_logs,
                 start_date=overall_start,
                 end_date=overall_end,
+                late_anchor_shift_days=_late_anchor_shift_days_from_user(user_data),
             ) or []
             phases_by_date = {str(r.get("date")): (r.get("phase") or "Follicular") for r in phase_rows if r.get("date")}
 
@@ -742,6 +784,7 @@ async def cycle_health_check(
             period_logs=period_logs,
             start_date=overall_start,
             end_date=overall_end,
+            late_anchor_shift_days=_late_anchor_shift_days_from_user(user_data),
         ) or []
         phases_by_date = {str(r.get("date")): (r.get("phase") or "Follicular") for r in phase_rows if r.get("date")}
 
@@ -866,9 +909,11 @@ async def debug_cycle_data(current_user: dict = Depends(get_current_user)):
         # Check user data
         user_data = supabase.table("users").select("*").eq("id", user_id).execute()
         
+        pl = period_logs.data or []
         return {
-            "period_logs_count": len(period_logs.data or []),
-            "period_logs": period_logs.data or [],
+            "period_logs_count": len(pl),
+            "period_logs": pl,
+            "bleeding_episodes": group_logs_into_episodes(pl),
             "cycle_days_count": len(cycle_days.data or []),
             "cycle_days_sample": (cycle_days.data or [])[:5],  # First 5 entries
             "user_last_period_date": user_data.data[0].get("last_period_date") if user_data.data else None,

@@ -36,7 +36,9 @@ def get_average_period_length(request_id: str) -> float:
 
 def get_average_cycle_length(request_id: str) -> float:
     """DEPRECATED: RapidAPI. Raises if called."""
-    raise NotImplementedError("get_average_cycle_length is deprecated. Use compute_cycle_stats_from_period_events() instead.")
+    raise NotImplementedError(
+        "get_average_cycle_length is deprecated. Use compute_cycle_stats_from_period_starts() in cycle_stats instead."
+    )
 
 
 def get_cycle_phases(request_id: str) -> List[Dict]:

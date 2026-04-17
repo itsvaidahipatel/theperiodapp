@@ -5,9 +5,11 @@ All calculations are performed locally without external API dependencies.
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any, Tuple
 import math
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
+
 from database import supabase
 
 logger = logging.getLogger(__name__)
@@ -16,6 +18,89 @@ logger = logging.getLogger(__name__)
 
 # Max day-in-phase bounds for phase_day_id (wellness agents expect these ranges)
 PHASE_DAY_CAPS = {"Period": 10, "Menstrual": 10, "Follicular": 14, "Ovulation": 3, "Luteal": 14}
+
+
+def group_logs_into_episodes(
+    logs: List[Dict],
+    *,
+    reference_date: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Group consecutive bleeding days from period_logs-style rows into episodes (no I/O).
+
+    A day counts as bleeding when ``flow`` is present and not ``none`` (case-insensitive).
+    Consecutive calendar days (gap == 1) belong to the same episode. A larger gap ends the
+    current episode and starts a new one.
+
+    Returns dicts: ``start_date``, ``end_date`` (YYYY-MM-DD), ``length`` (days), ``is_confirmed``.
+    Intermediate episodes are confirmed when the gap to the next bleeding day is > 1 day.
+    The trailing episode uses ``reference_date`` (default: today) to mirror legacy behavior:
+    confirmed when at least one full day has passed since ``end_date``.
+    """
+    if not logs:
+        return []
+
+    bleeding_days: List[date] = []
+    for log in logs:
+        flow_raw = log.get("flow")
+        flow = str(flow_raw).lower().strip() if flow_raw is not None else ""
+        if not flow or flow == "none":
+            continue
+        date_str = log.get("date")
+        if not date_str:
+            continue
+        try:
+            if isinstance(date_str, str):
+                d = datetime.strptime(date_str.strip()[:10], "%Y-%m-%d").date()
+            elif hasattr(date_str, "date"):
+                d = date_str.date()
+            else:
+                d = date_str
+            bleeding_days.append(d)
+        except (TypeError, ValueError):
+            continue
+
+    bleeding_days = sorted(set(bleeding_days))
+    if not bleeding_days:
+        return []
+
+    ref = reference_date if reference_date is not None else date.today()
+    episodes: List[Dict[str, Any]] = []
+
+    current_start = bleeding_days[0]
+    current_end = bleeding_days[0]
+
+    for i in range(1, len(bleeding_days)):
+        days_gap = (bleeding_days[i] - current_end).days
+        if days_gap == 1:
+            current_end = bleeding_days[i]
+            continue
+
+        period_length = (current_end - current_start).days + 1
+        is_confirmed = days_gap > 1
+        episodes.append(
+            {
+                "start_date": current_start.strftime("%Y-%m-%d"),
+                "end_date": current_end.strftime("%Y-%m-%d"),
+                "length": period_length,
+                "is_confirmed": is_confirmed,
+            }
+        )
+        current_start = bleeding_days[i]
+        current_end = bleeding_days[i]
+
+    period_length = (current_end - current_start).days + 1
+    days_since_end = (ref - current_end).days
+    episodes.append(
+        {
+            "start_date": current_start.strftime("%Y-%m-%d"),
+            "end_date": current_end.strftime("%Y-%m-%d"),
+            "length": period_length,
+            "is_confirmed": days_since_end >= 1,
+        }
+    )
+
+    return episodes
 
 
 def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
@@ -49,11 +134,26 @@ def parse_phase_day_id(phase_day_id: Optional[str]) -> Tuple[Optional[str], Opti
 
 
 def parse_hormone_value(value: Any) -> float:
-    """Coerce hormones_data TEXT hormone fields to float for charts (0 if missing/invalid)."""
+    """
+    Coerce hormones_data numeric hormone columns to float for charts.
+
+    Post-migration: estrogen/progesterone/fsh/lh are DECIMAL; legacy rows may still hold
+    parseable numeric strings. Non-numeric text (e.g. old 'Low'/'High' labels) returns 0.0 —
+    use estrogen_text / *_text columns for display labels, not this helper.
+    """
     if value is None or value == "":
         return 0.0
-    try:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
         return float(value)
+    if isinstance(value, Decimal):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return float(str(value).strip())
     except (TypeError, ValueError):
         return 0.0
 
@@ -309,6 +409,32 @@ def estimate_period_length(user_id: str, user_observations: Optional[List[float]
     else:
         # Return raw estimate (actual pattern, may be outside 3-8 days)
         return round(raw_estimate, 1)
+
+
+def get_phase_bounds_for_dots(
+    user_id: str, cycle_length: int, avg_period_length: float
+) -> Tuple[int, int, int, int]:
+    """
+    Period and ovulation day bounds for dashboard dots (aligned with calculate_phase_for_date_range).
+
+    Returns:
+        (period_length_days, ovulation_day, ovulation_start, ovulation_end) — all 1-based day-in-cycle indices.
+    """
+    try:
+        luteal_mean, _ = estimate_luteal(user_id)
+        period_days_raw = estimate_period_length(user_id, normalized=True)
+        period_length_days = int(round(max(3.0, min(8.0, period_days_raw))))
+        actual_cl = max(21, min(45, int(cycle_length)))
+        ov_day = int(max(period_length_days + 1, actual_cl - luteal_mean))
+        ov_start = max(period_length_days + 1, ov_day - 1)
+        ov_end = min(actual_cl, ov_day + 1)
+        return (period_length_days, ov_day, ov_start, ov_end)
+    except Exception:
+        logger.warning("get_phase_bounds_for_dots fallback for user_id=%s", user_id, exc_info=True)
+        pl = int(round(max(3, min(8, avg_period_length))))
+        cl = max(21, min(45, int(cycle_length)))
+        ov = max(pl + 1, cl - 14)
+        return (pl, ov, max(pl + 1, ov - 1), min(cl, ov + 1))
 
 
 def get_period_length_raw(user_id: str) -> float:
@@ -1356,14 +1482,77 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
         traceback.print_exc()
         return []
 
+
+def _apply_late_anchor_shift_to_cycle_starts(
+    cycle_starts: List[datetime],
+    cycle_metadata: Dict[datetime, Dict],
+    shift_days: int,
+    min_cycle_days: int = 21,
+) -> Tuple[List[datetime], Dict[datetime, Dict]]:
+    """
+    Shift future *predicted* cycle starts forward when the next period is late.
+    Real logged anchors and virtual back-fill anchors are not moved.
+    """
+    if shift_days <= 0 or not cycle_starts:
+        return cycle_starts, cycle_metadata
+
+    last_real: Optional[datetime] = None
+    for cs in sorted(cycle_starts):
+        if cycle_metadata.get(cs, {}).get("source") == "real":
+            last_real = cs
+
+    bucket: Dict[str, Tuple[datetime, Dict[str, Any]]] = {}
+    for cs in sorted(cycle_starts):
+        meta = dict(cycle_metadata.get(cs, {}))
+        src = meta.get("source")
+        if src == "predicted" and (last_real is None or cs > last_real):
+            ncs = cs + timedelta(days=shift_days)
+        else:
+            ncs = cs
+        key = ncs.strftime("%Y-%m-%d")
+        if key not in bucket:
+            bucket[key] = (ncs, meta)
+        else:
+            _existing_ncs, old_meta = bucket[key]
+            if meta.get("source") == "real" or (
+                meta.get("source") == "predicted" and old_meta.get("source") != "real"
+            ):
+                bucket[key] = (ncs, meta)
+
+    sorted_pairs = sorted(bucket.values(), key=lambda p: p[0])
+    sorted_cs = [p[0] for p in sorted_pairs]
+    fixed_meta: Dict[datetime, Dict] = {p[0]: p[1] for p in sorted_pairs}
+
+    final_cs: List[datetime] = [sorted_cs[0]]
+    final_meta: Dict[datetime, Dict] = {sorted_cs[0]: fixed_meta[sorted_cs[0]]}
+    for idx in range(1, len(sorted_cs)):
+        cur = sorted_cs[idx]
+        prev = final_cs[-1]
+        gap = (cur - prev).days
+        src = fixed_meta[cur].get("source", "unknown")
+        if src == "real" or gap >= min_cycle_days:
+            final_cs.append(cur)
+            final_meta[cur] = fixed_meta[cur]
+        else:
+            logger.debug(
+                "Late-anchor shift: dropping predicted start %s (gap=%s < %s)",
+                cur.strftime("%Y-%m-%d"),
+                gap,
+                min_cycle_days,
+            )
+
+    return final_cs, final_meta
+
+
 def calculate_phase_for_date_range(
     user_id: str,
     last_period_date: Optional[str],
     cycle_length: int,
-    period_logs: List[Dict],
+    period_logs: Optional[List[Dict]] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     diagnostic_log: Optional[List[Dict[str, Any]]] = None,
+    late_anchor_shift_days: int = 0,
 ) -> List[Dict]:
     """
     Calculate phase mappings for a date range using adaptive, medically credible algorithms.
@@ -1404,14 +1593,19 @@ def calculate_phase_for_date_range(
         user_id: User ID (for adaptive estimates like luteal_mean, period_length)
         last_period_date: Last known period date (YYYY-MM-DD), or None when no data (returns [])
         cycle_length: Estimated cycle length (days)
-        period_logs: List of period log dicts with "date" (and optional "end_date") keys
+        period_logs: Period log dicts with "date" (and optional "end_date"); sorted by date. Defaults to [].
         start_date: Optional start date for calculation range (YYYY-MM-DD)
         end_date: Optional end date for calculation range (YYYY-MM-DD)
+        late_anchor_shift_days: Forward shift (days) applied only to predicted future cycle starts
+            (late-period handler); real logs and virtual back-fill are unchanged.
     
     Returns:
         List of dicts with date, phase, phase_day_id, fertility_prob, and other fields; [] when no data.
     """
     try:
+        if period_logs is None:
+            period_logs = []
+
         # ZERO-DATA: No period_logs and no last_period_date -> empty calendar (Log to See Data)
         has_logs = bool(period_logs and len(period_logs) > 0)
         has_last_period = bool(last_period_date and (isinstance(last_period_date, str) and last_period_date.strip()))
@@ -1701,6 +1895,16 @@ def calculate_phase_for_date_range(
             cycle_metadata[anchor_start] = {"source": "virtual", "is_fallback": False, "is_virtual": True}
             cycle_starts.sort()
             print(f"✅ Initial anchor: added virtual cycle start {anchor_start.strftime('%Y-%m-%d')} so range is covered")
+
+        late_shift = int(max(0, late_anchor_shift_days or 0))
+        if late_shift > 0:
+            cycle_starts, cycle_metadata = _apply_late_anchor_shift_to_cycle_starts(
+                cycle_starts, cycle_metadata, late_shift, MIN_CYCLE_DAYS
+            )
+            print(
+                f"📌 Late-period anchor adjustment: shifted predicted starts by +{late_shift}d "
+                f"({len(cycle_starts)} cycle anchors)"
+            )
         
         # ====================================================================
         # B) LUTEAL ANCHORING (PER-CYCLE, NOT PER-DAY)

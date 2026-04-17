@@ -1,29 +1,70 @@
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from datetime import datetime, timedelta
-from typing import Optional
+import logging
 import os
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
-from routes import auth, user, periods, ai_chat, cycles, wellness, feedback, debug
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
+
+from routes import ai_chat, auth, cycles, debug, feedback, periods, user, wellness
+
+logger = logging.getLogger("periodcycle_ai.main")
 
 # Optional notification service (graceful degradation if apscheduler not installed)
 try:
     from notification_service import notification_service
+
     NOTIFICATION_SERVICE_AVAILABLE = True
 except ImportError:
-    print("⚠️ Notification service not available (apscheduler not installed). Run: pip install apscheduler")
+    logger.warning(
+        "Notification service not available (apscheduler not installed). Run: pip install apscheduler"
+    )
     NOTIFICATION_SERVICE_AVAILABLE = False
     notification_service = None
 
-load_dotenv()
+_RAW_CORS = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+origins = [o.strip() for o in _RAW_CORS.split(",") if o.strip()]
+if not origins:
+    origins = ["http://localhost:5173"]
 
-app = FastAPI(title="PeriodCycle.AI API", version="1.0.0")
 
-# CORS Configuration
-origins = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+def _cors_allows_any_origin() -> bool:
+    return any(o == "*" for o in origins)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if os.getenv("ENV", "").lower() == "production" and _cors_allows_any_origin():
+        logger.critical(
+            "SECURITY: CORS_ORIGINS is set to allow any origin (*) in production. "
+            "This is unsafe for credentialed cross-origin requests. Restrict to explicit origins."
+        )
+
+    try:
+        ai_chat.configure_genai_on_startup()
+    except Exception as e:
+        logger.warning("Gemini startup configure skipped: %s", e)
+
+    if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
+        try:
+            notification_service.start()
+            logger.info("Smart Notification Agent started")
+        except Exception as e:
+            logger.warning("Failed to start notification scheduler: %s", e)
+
+    yield
+
+    if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
+        try:
+            notification_service.stop()
+            logger.info("Smart Notification Agent stopped")
+        except Exception as e:
+            logger.warning("Error stopping notification scheduler: %s", e)
+
+
+app = FastAPI(title="PeriodCycle.AI API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,8 +75,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security
-security = HTTPBearer()
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
@@ -47,43 +95,41 @@ app.include_router(wellness.router, prefix="/wellness", tags=["Wellness"])
 app.include_router(feedback.router, prefix="/feedback", tags=["Feedback"])
 app.include_router(debug.router, prefix="/debug", tags=["Debug"])
 
+
 @app.get("/")
 async def root():
     return {"message": "PeriodCycle.AI API", "status": "running"}
 
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    """Liveness plus a lightweight Supabase connectivity check."""
+    from database import async_supabase_call, supabase
 
-@app.on_event("startup")
-async def startup_event():
-    """Start notification scheduler on app startup."""
+    def _ping_supabase():
+        supabase.table("users").select("id").limit(1).execute()
+
     try:
-        from routes.ai_chat import configure_genai_on_startup
-
-        configure_genai_on_startup()
+        await async_supabase_call(_ping_supabase)
     except Exception as e:
-        print(f"⚠️ Gemini startup configure skipped: {str(e)}")
+        logger.warning("Health check: Supabase ping failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "unhealthy",
+                "database": "unreachable",
+                "message": "Supabase request failed",
+            },
+        )
 
-    if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
-        try:
-            notification_service.start()
-            print("✅ Smart Notification Agent started")
-        except Exception as e:
-            print(f"⚠️ Failed to start notification scheduler: {str(e)}")
+    return {
+        "status": "healthy",
+        "database": "connected",
+    }
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop notification scheduler on app shutdown."""
-    if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
-        try:
-            notification_service.stop()
-            print("🛑 Smart Notification Agent stopped")
-        except Exception as e:
-            print(f"⚠️ Error stopping notification scheduler: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from cycle_utils import (
     calculate_today_phase_day_id,
@@ -20,6 +21,31 @@ HORMONE_DISCLAIMER = (
     "Hormone values are based on standard cycle mapping and are for educational tracking only."
 )
 
+# Explicit columns for hormones_data (numeric levels + text labels + directional trends).
+_HORMONES_DATA_SELECT = (
+    "id, phase_id, day_number, energy_level, "
+    "estrogen, progesterone, fsh, lh, "
+    "estrogen_text, progesterone_text, fsh_text, lh_text, "
+    "estrogen_trend, progesterone_trend, fsh_trend, lh_trend, "
+    "mood, energy, best_work_type, brain_note, created_at"
+)
+
+
+class HormoneHistoryPoint(BaseModel):
+    """One day in /wellness/hormones?days>1 history (charts + labels)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    phase_day_id: str
+    estrogen_value: float = Field(0.0, description="Numeric level for charts; 0.0 if not backfilled yet")
+    progesterone_value: float = 0.0
+    fsh_value: float = 0.0
+    lh_value: float = 0.0
+    estrogen_label: Optional[str] = Field(None, description="Display text e.g. Low/High from estrogen_text")
+    progesterone_label: Optional[str] = None
+    fsh_label: Optional[str] = None
+    lh_label: Optional[str] = None
+
 
 def get_hormone_trends_summary_for_llm(user_id: str) -> str:
     """
@@ -35,7 +61,11 @@ def get_hormone_trends_summary_for_llm(user_id: str) -> str:
     try:
         r = (
             supabase.table("hormones_data")
-            .select("id, estrogen_trend, progesterone_trend, fsh_trend, lh_trend")
+            .select(
+                "id, estrogen, progesterone, fsh, lh, "
+                "estrogen_text, progesterone_text, fsh_text, lh_text, "
+                "estrogen_trend, progesterone_trend, fsh_trend, lh_trend"
+            )
             .eq("id", resolved)
             .limit(1)
             .execute()
@@ -49,18 +79,39 @@ def get_hormone_trends_summary_for_llm(user_id: str) -> str:
 
     h = r.data[0]
     parts: List[str] = []
-    for key, label in (
-        ("estrogen_trend", "Estrogen"),
-        ("progesterone_trend", "Progesterone"),
-        ("fsh_trend", "FSH"),
-        ("lh_trend", "LH"),
+    for text_key, trend_key, label in (
+        ("estrogen_text", "estrogen_trend", "Estrogen"),
+        ("progesterone_text", "progesterone_trend", "Progesterone"),
+        ("fsh_text", "fsh_trend", "FSH"),
+        ("lh_text", "lh_trend", "LH"),
     ):
-        v = h.get(key)
-        if v is not None and str(v).strip():
-            parts.append(f"{label}: {v}")
+        ttxt = h.get(text_key)
+        lab = str(ttxt).strip() if ttxt is not None and str(ttxt).strip() else None
+        tr = h.get(trend_key)
+        trend_s = str(tr).strip() if tr is not None and str(tr).strip() else None
+        if lab and trend_s:
+            parts.append(f"{label}: {lab} (trend {trend_s})")
+        elif trend_s:
+            parts.append(f"{label}: trend {trend_s}")
+        elif lab:
+            parts.append(f"{label}: {lab}")
+
+    nums = []
+    for label, col in (
+        ("E", "estrogen"),
+        ("P", "progesterone"),
+        ("FSH", "fsh"),
+        ("LH", "lh"),
+    ):
+        v = parse_hormone_value(h.get(col))
+        if v != 0.0:
+            nums.append(f"{label}={v:.2f}")
+
+    if nums:
+        parts.append("reference scale (numeric): " + ", ".join(nums))
 
     if not parts:
-        return f"Hormone reference for phase day {resolved}: trend fields empty in reference data."
+        return f"Hormone reference for phase day {resolved}: trend/label fields empty in reference data."
 
     return (
         "Typical mapped hormone trends for today (phase day "
@@ -80,20 +131,41 @@ def _resolve_phase_day_id(user_id: str, phase_day_id: Optional[str]) -> Optional
     return str(calculated).strip().lower() if calculated else None
 
 
+def _optional_hormone_label(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s if s else None
+
+
 def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Build API dict: *_label from *_text columns; *_value from numeric columns (0.0 if null)."""
     phase_day_id_from_db = hormone_data.get("id")
+    e_val = parse_hormone_value(hormone_data.get("estrogen"))
+    p_val = parse_hormone_value(hormone_data.get("progesterone"))
+    f_val = parse_hormone_value(hormone_data.get("fsh"))
+    l_val = parse_hormone_value(hormone_data.get("lh"))
     return {
         "id": phase_day_id_from_db,
         "phase_day_id": phase_day_id_from_db,
         "phase_id": hormone_data.get("phase_id"),
         "day_number": hormone_data.get("day_number"),
-        "estrogen": hormone_data.get("estrogen"),
+        "estrogen_label": _optional_hormone_label(hormone_data.get("estrogen_text")),
+        "progesterone_label": _optional_hormone_label(hormone_data.get("progesterone_text")),
+        "fsh_label": _optional_hormone_label(hormone_data.get("fsh_text")),
+        "lh_label": _optional_hormone_label(hormone_data.get("lh_text")),
+        "estrogen_value": e_val,
+        "progesterone_value": p_val,
+        "fsh_value": f_val,
+        "lh_value": l_val,
+        # Backward compatibility: same numeric series pre-*_value keys
+        "estrogen": e_val,
+        "progesterone": p_val,
+        "fsh": f_val,
+        "lh": l_val,
         "estrogen_trend": hormone_data.get("estrogen_trend"),
-        "progesterone": hormone_data.get("progesterone"),
         "progesterone_trend": hormone_data.get("progesterone_trend"),
-        "fsh": hormone_data.get("fsh"),
         "fsh_trend": hormone_data.get("fsh_trend"),
-        "lh": hormone_data.get("lh"),
         "lh_trend": hormone_data.get("lh_trend"),
         "mood": hormone_data.get("mood"),
         "energy": hormone_data.get("energy"),
@@ -101,7 +173,7 @@ def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any
         "brain_note": hormone_data.get("brain_note"),
         "energy_level": hormone_data.get("energy", {}).get("level")
         if isinstance(hormone_data.get("energy"), dict)
-        else None,
+        else hormone_data.get("energy_level"),
         "emotional_summary": hormone_data.get("mood", {}).get("summary")
         if isinstance(hormone_data.get("mood"), dict)
         else None,
@@ -109,6 +181,21 @@ def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any
         if isinstance(hormone_data.get("brain_note"), dict)
         else None,
     }
+
+
+def _history_point_from_row(hormone_data: Dict[str, Any], phase_day_id: str) -> Dict[str, Any]:
+    row = HormoneHistoryPoint(
+        phase_day_id=phase_day_id,
+        estrogen_value=parse_hormone_value(hormone_data.get("estrogen")),
+        progesterone_value=parse_hormone_value(hormone_data.get("progesterone")),
+        fsh_value=parse_hormone_value(hormone_data.get("fsh")),
+        lh_value=parse_hormone_value(hormone_data.get("lh")),
+        estrogen_label=_optional_hormone_label(hormone_data.get("estrogen_text")),
+        progesterone_label=_optional_hormone_label(hormone_data.get("progesterone_text")),
+        fsh_label=_optional_hormone_label(hormone_data.get("fsh_text")),
+        lh_label=_optional_hormone_label(hormone_data.get("lh_text")),
+    )
+    return row.model_dump()
 
 
 def _empty_hormone_response(
@@ -157,7 +244,10 @@ async def get_hormones(
 
             try:
                 hormone_response = (
-                    supabase.table("hormones_data").select("*").in_("id", unique_ids).execute()
+                    supabase.table("hormones_data")
+                    .select(_HORMONES_DATA_SELECT)
+                    .in_("id", unique_ids)
+                    .execute()
                 )
             except Exception:
                 logger.exception("hormones_data batch query failed")
@@ -175,15 +265,7 @@ async def get_hormones(
                 key = pid.lower()
                 hormone_data = by_id_lower.get(key)
                 if hormone_data:
-                    hormone_history.append(
-                        {
-                            "phase_day_id": pid,
-                            "estrogen": parse_hormone_value(hormone_data.get("estrogen")),
-                            "progesterone": parse_hormone_value(hormone_data.get("progesterone")),
-                            "fsh": parse_hormone_value(hormone_data.get("fsh")),
-                            "lh": parse_hormone_value(hormone_data.get("lh")),
-                        }
-                    )
+                    hormone_history.append(_history_point_from_row(hormone_data, pid))
 
             today_row = by_id_lower.get(today_phase_day_id.lower())
             if today_row:
@@ -206,7 +288,12 @@ async def get_hormones(
             return out
 
         try:
-            response = supabase.table("hormones_data").select("*").eq("id", today_phase_day_id).execute()
+            response = (
+                supabase.table("hormones_data")
+                .select(_HORMONES_DATA_SELECT)
+                .eq("id", today_phase_day_id)
+                .execute()
+            )
         except Exception:
             logger.exception("hormones_data single lookup failed")
             raise

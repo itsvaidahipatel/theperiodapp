@@ -16,7 +16,7 @@ from period_start_logs import sync_period_start_logs_from_period_logs
 from prediction_cache import (
     hard_invalidate_predictions_from_date,
     invalidate_predictions_after_period,
-    regenerate_predictions_from_last_confirmed_period,
+    schedule_regenerate_predictions,
 )
 from routes.auth import get_current_user
 
@@ -368,15 +368,9 @@ async def reset_cycle_data(current_user: dict = Depends(get_current_user)):
         supabase.table("user_cycle_days").delete().eq("user_id", user_id).execute()
         logger.info("Deleted all user_cycle_days for user reset")
 
-        try:
-            supabase.table("period_events").delete().eq("user_id", user_id).execute()
-            logger.info("Deleted all period_events for user reset")
-        except Exception:
-            logger.warning("Error deleting period_events (table may not exist)", exc_info=True)
-
         # Ensure prediction cache is fully cleared if any rows survived RLS/edge cases
         try:
-            invalidate_predictions_after_period(user_id)
+            await invalidate_predictions_after_period(user_id)
         except Exception:
             logger.warning("Prediction cache invalidation helper failed (non-fatal)", exc_info=True)
 
@@ -461,8 +455,9 @@ async def reset_last_period(current_user: dict = Depends(get_current_user)):
         logger.info("Deleted most recent period log")
 
         # Hard invalidation: all cached phases on/after removed period start (stateless recompute baseline)
+        hard_inv: Dict[str, Any] = {"cache_invalidated": False}
         try:
-            hard_invalidate_predictions_from_date(user_id, str(last_period_date_str))
+            hard_inv = await hard_invalidate_predictions_from_date(user_id, str(last_period_date_str))
         except Exception:
             logger.warning("hard_invalidate_predictions_from_date failed; narrowing cleanup", exc_info=True)
             if period_end_date:
@@ -506,17 +501,19 @@ async def reset_last_period(current_user: dict = Depends(get_current_user)):
         logger.info("Synced period_start_logs and cycle stats after last-period reset")
 
         try:
-            invalidate_predictions_after_period(user_id)
+            await invalidate_predictions_after_period(user_id)
         except Exception:
             logger.warning("invalidate_predictions_after_period after reset failed (non-fatal)", exc_info=True)
 
-        regenerate_predictions_from_last_confirmed_period(user_id, days_ahead=730)
-        logger.info("Regenerated predictions after last-period reset")
+        schedule_regenerate_predictions(user_id, days_ahead=180)
+        logger.info("Scheduled prediction cache regeneration after last-period reset")
 
         return {
             "message": "Last period has been reset successfully",
             "user": _strip_auth_secrets(updated_user),
             "deleted_period_date": last_period_date_str,
+            "cacheInvalidated": bool(hard_inv.get("cache_invalidated", False)),
+            "cacheInvalidation": hard_inv,
         }
 
     except HTTPException:

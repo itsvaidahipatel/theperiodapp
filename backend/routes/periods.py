@@ -12,12 +12,15 @@ from cycle_utils import estimate_period_length, get_user_phase_day
 from database import supabase
 from luteal_learning import learn_luteal_from_new_period
 from period_service import (
+    MAX_CYCLE_DAYS,
+    MIN_CYCLE_DAYS,
     can_log_period,
     check_anomaly,
     get_predictions,
     calculate_rolling_average,
     calculate_rolling_period_length,
 )
+from prediction_cache import hard_invalidate_predictions_from_date, schedule_regenerate_predictions
 from period_start_logs import get_period_start_logs, sync_period_start_logs_from_period_logs
 from routes.auth import get_current_user
 
@@ -61,6 +64,25 @@ def _within_idempotency_window(row: Dict[str, Any], seconds: int = IDEMPOTENCY_W
     return 0 <= age <= seconds
 
 
+def _next_predicted_period_start(user_id: str) -> Optional[date]:
+    """Next simple calendar predicted start after last confirmed period (pre-write snapshot)."""
+    try:
+        starts = get_period_start_logs(user_id, confirmed_only=True)
+        if not starts:
+            return None
+        last_raw = starts[-1].get("start_date")
+        if not last_raw:
+            return None
+        last_d = parse_period_date(last_raw)
+        avg = calculate_rolling_average(user_id)
+        cycle_int = int(round(avg))
+        cycle_int = max(MIN_CYCLE_DAYS, min(cycle_int, MAX_CYCLE_DAYS))
+        return last_d + timedelta(days=cycle_int)
+    except Exception:
+        logger.exception("Failed to compute next predicted period start")
+        return None
+
+
 def _medical_overlap_exception(existing_start: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
@@ -83,8 +105,14 @@ def _assemble_period_log_response(
     rolling_period_average: float,
     is_anomaly: bool,
     estimated_end_date: date,
+    cache_invalidation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build POST /log JSON (no user_id / internal FKs in payloads)."""
+    ci = cache_invalidation or {
+        "cache_invalidated": False,
+        "invalidation_date": str(saved_row.get("date") or ""),
+        "deleted_count": 0,
+    }
     return {
         "log": {
             "id": saved_row.get("id"),
@@ -110,6 +138,8 @@ def _assemble_period_log_response(
         "predictions": predictions,
         "rollingAverage": rolling_average,
         "rollingPeriodAverage": rolling_period_average,
+        "cacheInvalidated": bool(ci.get("cache_invalidated", False)),
+        "cacheInvalidation": ci,
     }
 
 
@@ -118,6 +148,7 @@ async def _parallel_fetch_post_log_bundle(
     saved_row: Dict[str, Any],
     is_anomaly: bool,
     estimated_end_date: date,
+    cache_invalidation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     def fetch_logs():
         return (
@@ -143,6 +174,7 @@ async def _parallel_fetch_post_log_bundle(
         rolling_period_average,
         is_anomaly,
         estimated_end_date,
+        cache_invalidation=cache_invalidation,
     )
 
 
@@ -177,6 +209,8 @@ class CycleStatsAPIResponse(BaseModel):
     averagePeriodLengthRaw: Optional[float] = None
     averagePeriodLengthNormalized: Optional[float] = None
     isPeriodLengthOutsideRange: Optional[bool] = None
+    periodLengthHealthAlert: Optional[bool] = None
+    healthAlerts: Optional[Dict[str, Any]] = None
     cycleRegularity: str = "unknown"
     longestCycle: Optional[int] = None
     shortestCycle: Optional[int] = None
@@ -191,6 +225,7 @@ class CycleStatsAPIResponse(BaseModel):
     insightsParams: List[Any] = Field(default_factory=list)
     cycleLengths: List[Any] = Field(default_factory=list)
     allCycles: List[Any] = Field(default_factory=list)
+    bleedingEpisodes: List[Any] = Field(default_factory=list)
 
 
 @router.post("/log")
@@ -311,6 +346,10 @@ async def log_period(
             .execute()
         )
 
+        next_predicted_start: Optional[date] = None
+        if not existing.data:
+            next_predicted_start = _next_predicted_period_start(user_id)
+
         if existing.data:
             response = supabase.table("period_logs").update(log_entry).eq("user_id", user_id).eq("date", log_data.date).execute()
         else:
@@ -354,11 +393,33 @@ async def log_period(
 
         supabase.table("users").update({"last_period_date": log_data.date}).eq("id", user_id).execute()
 
+        hard_inv: Dict[str, Any] = {
+            "cache_invalidated": False,
+            "invalidation_date": log_data.date,
+            "deleted_count": 0,
+        }
+        if (
+            not existing.data
+            and next_predicted_start is not None
+            and date_obj < next_predicted_start
+        ):
+            try:
+                hard_inv = await hard_invalidate_predictions_from_date(user_id, log_data.date)
+            except Exception:
+                logger.warning(
+                    "hard_invalidate_predictions_from_date failed after early period log",
+                    exc_info=True,
+                )
+            if hard_inv.get("cache_invalidated"):
+                schedule_regenerate_predictions(user_id, days_ahead=180)
+
         rolling_period_avg = calculate_rolling_period_length(user_id)
         estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
         display_estimated_end = date_obj + timedelta(days=estimated_days - 1)
 
-        return await _parallel_fetch_post_log_bundle(user_id, saved, is_anomaly, display_estimated_end)
+        return await _parallel_fetch_post_log_bundle(
+            user_id, saved, is_anomaly, display_estimated_end, cache_invalidation=hard_inv
+        )
 
     except HTTPException:
         raise
@@ -407,14 +468,18 @@ async def get_predictions_endpoint(
     """Get predictions with confidence levels. Returns camelCase."""
     try:
         user_id = current_user["id"]
+        language = current_user.get("language", "en")
 
-        predictions = get_predictions(user_id, count=count)
+        pred_bundle = get_predictions(user_id, count=count, language=language)
+        predictions = pred_bundle.get("predictions", [])
+        is_late = bool(pred_bundle.get("is_late", False))
         rolling_average = calculate_rolling_average(user_id)
         rolling_period_average = calculate_rolling_period_length(user_id)
-        confidence = get_cycle_stats(user_id).get("confidence", {})
+        confidence = get_cycle_stats(user_id, language=language).get("confidence", {})
 
         return {
             "predictions": predictions,
+            "isLate": is_late,
             "rollingAverage": rolling_average,
             "rollingPeriodAverage": rolling_period_average,
             "confidence": confidence,

@@ -44,7 +44,9 @@ async def _execute_phase_diagnostic(
     Returns:
       (phase_mappings, diagnostic_log, period_logs_count)
     """
-    user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+    user_response = supabase.table("users").select(
+        "last_period_date, cycle_length, late_period_anchor_shift_days"
+    ).eq("id", user_id).execute()
     if not user_response.data or not user_response.data[0]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User data not found")
     user = user_response.data[0]
@@ -61,6 +63,11 @@ async def _execute_phase_diagnostic(
     period_logs = logs_response.data or []
 
     diagnostic_log: List[Dict[str, Any]] = []
+    try:
+        late_shift = int(max(0, user.get("late_period_anchor_shift_days") or 0))
+    except (TypeError, ValueError):
+        late_shift = 0
+
     phase_mappings = calculate_phase_for_date_range(
         user_id=user_id,
         last_period_date=last_period_date,
@@ -69,6 +76,7 @@ async def _execute_phase_diagnostic(
         start_date=start_date,
         end_date=end_date,
         diagnostic_log=diagnostic_log,
+        late_anchor_shift_days=late_shift,
     ) or []
 
     return phase_mappings, diagnostic_log, len(period_logs)
