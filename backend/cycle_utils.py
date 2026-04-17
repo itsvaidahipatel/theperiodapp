@@ -5,7 +5,7 @@ All calculations are performed locally without external API dependencies.
 """
 
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import math
 from database import supabase
 
@@ -741,9 +741,6 @@ def get_effective_period_end(user_id: str, start_date: str):
         Effective end date as date object
     """
     try:
-        # timedelta is already imported at module level
-        from period_service import calculate_rolling_period_length
-        
         start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
         
         # Get period log for this start date
@@ -757,9 +754,8 @@ def get_effective_period_end(user_id: str, start_date: str):
             return end_date_obj
         else:
             # User hasn't logged end yet, or it was auto-closed
-            # Use rolling period average (AI estimate)
-            rolling_period_avg = calculate_rolling_period_length(user_id)
-            estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
+            # Use normalized estimate_period_length (3-8 days) to avoid importing period_service in hot path.
+            estimated_days = int(round(max(3.0, min(8.0, estimate_period_length(user_id, normalized=True)))))
             end_date_obj = start_date_obj + timedelta(days=estimated_days - 1)
             print(f"📊 Using rolling period average ({estimated_days} days) for {start_date}")
             return end_date_obj
@@ -767,11 +763,8 @@ def get_effective_period_end(user_id: str, start_date: str):
     except Exception as e:
         print(f"Error getting effective period end: {str(e)}")
         # Fallback to estimate
-        # timedelta is already imported at module level
-        from period_service import calculate_rolling_period_length
         start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-        rolling_period_avg = calculate_rolling_period_length(user_id)
-        estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
+        estimated_days = int(round(max(3.0, min(8.0, estimate_period_length(user_id, normalized=True)))))
         return start_date_obj + timedelta(days=estimated_days - 1)
 
 
@@ -796,11 +789,8 @@ def get_period_range(user_id: str, cycle_start: str) -> tuple:
     except Exception as e:
         print(f"Error getting period range: {str(e)}")
         # Fallback
-        # timedelta is already imported at module level
-        from period_service import calculate_rolling_period_length
         cycle_start_obj = datetime.strptime(cycle_start, "%Y-%m-%d").date()
-        rolling_period_avg = calculate_rolling_period_length(user_id)
-        estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
+        estimated_days = int(round(max(3.0, min(8.0, estimate_period_length(user_id, normalized=True)))))
         return cycle_start_obj, cycle_start_obj + timedelta(days=estimated_days - 1)
 
 
@@ -1282,7 +1272,7 @@ def calculate_phase_for_date_range(
     period_logs: List[Dict],
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    diagnostic_log: Optional[List[Dict]] = None,
+    diagnostic_log: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict]:
     """
     Calculate phase mappings for a date range using adaptive, medically credible algorithms.
@@ -2007,7 +1997,6 @@ def calculate_phase_for_date_range(
         by_date = {m["date"]: m for m in phase_mappings}
         follicular_default = {
             "phase": "Follicular",
-            "phase_day_id": "f1",
             "source": "local",
             "is_predicted": True,
             "is_virtual": True,
@@ -2027,7 +2016,11 @@ def calculate_phase_for_date_range(
                 final_phase_mappings.append(m)
             else:
                 # Fill gaps with predicted/virtual phases (including before first log)
-                final_phase_mappings.append({"date": date_str, **follicular_default})
+                # More intelligent default: increment follicular day based on distance from range start,
+                # instead of showing f1 for long gaps.
+                day_in_range = (d - start_date_obj).days + 1
+                phase_day_id = generate_phase_day_id("Follicular", day_in_range)
+                final_phase_mappings.append({"date": date_str, "phase_day_id": phase_day_id, **follicular_default})
             d += timedelta(days=1)
         print(f"✅ Generated {len(final_phase_mappings)} phase mappings (includes virtual backward fill before first log)")
         return final_phase_mappings
