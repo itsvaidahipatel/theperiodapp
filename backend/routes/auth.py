@@ -3,13 +3,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
-import uuid
 
 from database import supabase, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
 
 router = APIRouter()
 security = HTTPBearer()
+# Optional Supabase session on /register: links public.users.id to auth.users (JWT ``sub``)
+optional_supabase_bearer = HTTPBearer(auto_error=False)
 
 def _post_registration_sync(user_id: str) -> None:
     """
@@ -88,10 +89,23 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         )
 
 @router.post("/register")
-async def register(request: RegisterRequest, background_tasks: BackgroundTasks):
-    """Register a new user."""
+async def register(
+    request: RegisterRequest,
+    background_tasks: BackgroundTasks,
+    supabase_session: Optional[HTTPAuthorizationCredentials] = Depends(optional_supabase_bearer),
+):
+    """
+    Register a new user. ``RegisterRequest`` is unchanged.
+
+    For Supabase Auth as primary IdP: send ``Authorization: Bearer <supabase_access_token>`` from the
+    client after sign-up. The token is verified with the Supabase JWT secret; ``sub`` becomes
+    ``users.id`` so RLS and ``get_current_user`` align with ``auth.users``. The registration email must
+    match the token's ``email`` claim. Email remains the unique business key for duplicate detection.
+
+    Without a Bearer token, a database-generated UUID is used for ``users.id`` (legacy self-contained auth).
+    """
     try:
-        # Check if user already exists
+        # Check if user already exists (email links app profile to the Supabase account)
         @retry_supabase_call(max_retries=3)
         def _check_existing():
             return supabase.table("users").select("id").eq("email", request.email).execute()
@@ -124,7 +138,7 @@ async def register(request: RegisterRequest, background_tasks: BackgroundTasks):
             avg_bleeding_days = 5
 
         # Create user - schema includes avg_bleeding_days (Integer, default 5)
-        user_data = {
+        user_data: dict = {
             "name": request.name,
             "email": request.email,
             "password_hash": hashed_password,
@@ -137,6 +151,30 @@ async def register(request: RegisterRequest, background_tasks: BackgroundTasks):
             "favorite_exercise": request.favorite_exercise,
             "interests": request.interests or []
         }
+
+        if supabase_session and supabase_session.credentials:
+            try:
+                auth_payload = verify_token(supabase_session.credentials)
+            except HTTPException:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired Supabase session token. Sign in again.",
+                ) from None
+            raw_sub = auth_payload.get("sub")
+            supabase_sub = str(raw_sub).strip() if raw_sub else None
+            if not supabase_sub:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Supabase token is missing sub (user id).",
+                )
+            claim_email = auth_payload.get("email")
+            if claim_email is not None and str(claim_email).strip():
+                if str(claim_email).strip().lower() != str(request.email).strip().lower():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Registration email must match the Supabase signed-in account email.",
+                    )
+            user_data["id"] = supabase_sub
         
         @retry_supabase_call(max_retries=3)
         def _insert_user():

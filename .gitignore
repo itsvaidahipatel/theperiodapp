@@ -27,6 +27,9 @@ backend/.env
 frontend/.env
 frontend/.env.local
 
+# Railway CLI / local project link (may contain tokens)
+.railway
+
 # IDE
 .vscode/
 .idea/

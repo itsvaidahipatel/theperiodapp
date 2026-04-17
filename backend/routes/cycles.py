@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
@@ -358,6 +358,24 @@ async def get_phase_map(
     except Exception:
         logger.exception("Error getting phase map")
         return {"phase_map": []}
+
+
+@router.get("/period-start-logs")
+async def get_period_start_logs_endpoint(
+    confirmed_only: bool = Query(False, description="If true, only confirmed (on or before today) starts"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return synced period start anchors for the authenticated user (same source as phase-map past window).
+
+    Scoped strictly by ``get_current_user`` → ``users.id`` from the verified JWT ``sub``.
+    """
+    from period_start_logs import get_period_start_logs
+
+    user_id = current_user["id"]
+    logs = get_period_start_logs(user_id, confirmed_only=confirmed_only)
+    return {"period_start_logs": logs}
+
 
 @router.get("/health-check")
 async def cycle_health_check(

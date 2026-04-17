@@ -48,7 +48,11 @@ def get_password_hash(password: str) -> str:
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create a JWT access token with exp and iat. Requires 'sub' in the payload."""
+    """
+    Create a JWT access token with exp and iat. Requires ``sub`` (user id, same as Supabase Auth subject).
+
+    Signed with ``JWT_SECRET_KEY`` (Supabase JWT secret) using HS256, compatible with Supabase Auth tokens.
+    """
     if "sub" not in data:
         raise ValueError("JWT payload must include a 'sub' (subject) claim")
 
@@ -61,14 +65,32 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
     # NumericDate claims (seconds since epoch) for broad python-jose / client compatibility
     to_encode.update({"exp": int(expire.timestamp()), "iat": int(now.timestamp())})
-    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    alg = (settings.JWT_ALGORITHM or "HS256").upper()
+    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=alg)
     return encoded_jwt
 
 
 def verify_token(token: str) -> dict:
-    """Verify and decode a JWT token."""
+    """
+    Verify and decode a JWT using the Supabase JWT secret (``JWT_SECRET_KEY`` / ``SUPABASE_JWT_SECRET``).
+
+    Supabase Auth issues HS256 tokens; ``sub`` is the authenticated user's UUID. We do not require
+    issuer/audience checks so both Supabase-issued sessions and locally minted tokens (same secret) verify.
+    """
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        alg = (settings.JWT_ALGORITHM or "HS256").upper()
+        if alg != "HS256":
+            logger.warning("JWT_ALGORITHM is %s; Supabase Auth uses HS256. Verification may fail.", alg)
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[alg],
+            options={
+                "verify_signature": True,
+                "verify_exp": True,
+                "verify_aud": False,
+            },
+        )
         return payload
     except ExpiredSignatureError:
         raise HTTPException(

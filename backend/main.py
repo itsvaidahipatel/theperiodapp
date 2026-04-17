@@ -24,10 +24,24 @@ except ImportError:
     NOTIFICATION_SERVICE_AVAILABLE = False
     notification_service = None
 
-_RAW_CORS = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+# Default: Vite + common Flutter/web dev hosts. Set CORS_ORIGINS (comma-separated) on Railway.
+_DEFAULT_CORS = (
+    "http://localhost:5173,http://localhost:3000,"
+    "http://127.0.0.1:5173,http://127.0.0.1:3000,http://127.0.0.1:8000"
+)
+_RAW_CORS = os.getenv("CORS_ORIGINS", _DEFAULT_CORS)
+_EXTRA_ORIGIN = os.getenv("CORS_EXTRA_ORIGIN", "").strip()
 origins = [o.strip() for o in _RAW_CORS.split(",") if o.strip()]
+if _EXTRA_ORIGIN and _EXTRA_ORIGIN not in origins:
+    origins.append(_EXTRA_ORIGIN)
 if not origins:
     origins = ["http://localhost:5173"]
+
+# Browser clients on Vercel previews, Railway-hosted web, and typical Railway app hostnames
+_CORS_ORIGIN_REGEX = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"https://.*\.vercel\.app|https://.*\.up\.railway\.app|https://.*\.railway\.app",
+)
 
 
 def _cors_allows_any_origin() -> bool:
@@ -69,7 +83,7 @@ app = FastAPI(title="PeriodCycle.AI API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",  # Allows all Vercel preview deployments
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

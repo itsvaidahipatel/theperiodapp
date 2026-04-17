@@ -1,0 +1,2 @@
+# Delegates to the backend manifest (single source of truth).
+-r backend/requirements.txt
