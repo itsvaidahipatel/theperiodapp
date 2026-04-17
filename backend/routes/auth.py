@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -10,6 +10,24 @@ from auth_utils import get_password_hash, verify_password, create_access_token, 
 
 router = APIRouter()
 security = HTTPBearer()
+
+def _post_registration_sync(user_id: str) -> None:
+    """
+    Background work after registration.
+    Keeps /auth/register fast by moving heavy sync + stats out of request path.
+    """
+    try:
+        from period_start_logs import sync_period_start_logs_from_period_logs
+        from cycle_stats import update_user_cycle_stats
+
+        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        update_user_cycle_stats(user_id, period_starts=period_starts)
+        print(f"✅ Post-registration sync completed for user {user_id}")
+    except Exception as e:
+        import traceback
+        print(f"⚠️ Post-registration sync failed for user {user_id}: {str(e)}")
+        print(traceback.format_exc())
+
 
 class RegisterRequest(BaseModel):
     name: str
@@ -70,7 +88,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         )
 
 @router.post("/register")
-async def register(request: RegisterRequest):
+async def register(request: RegisterRequest, background_tasks: BackgroundTasks):
     """Register a new user."""
     try:
         # Check if user already exists
@@ -160,17 +178,9 @@ async def register(request: RegisterRequest):
                 
                 supabase.table("period_logs").insert(period_log_entry).execute()
                 print(f"✅ Created period_logs entry for registration: start={request.last_period_date}, end={end_date_value}")
-                # Sync period_start_logs and cycle stats so get_phase_map returns valid calendar on first login
-                try:
-                    from period_start_logs import sync_period_start_logs_from_period_logs
-                    from cycle_stats import update_user_cycle_stats
-                    period_starts = sync_period_start_logs_from_period_logs(user["id"])
-                    update_user_cycle_stats(user["id"], period_starts=period_starts)
-                    print(f"✅ Synced period_start_logs and cycle stats for new user {user['id']}")
-                except Exception as sync_error:
-                    import traceback
-                    print(f"⚠️ Warning: Failed to sync period_start_logs/cycle_stats during registration: {str(sync_error)}")
-                    print(traceback.format_exc())
+
+                # OPTION B: Move heavy sync + stats to background (keeps register fast)
+                background_tasks.add_task(_post_registration_sync, user["id"])
             except Exception as period_log_error:
                 # Don't fail registration if period log creation fails, but log it
                 import traceback
@@ -180,18 +190,18 @@ async def register(request: RegisterRequest):
         # Create access token
         access_token = create_access_token(data={"sub": user["id"]})
         
-        # Send welcome email to new user
+        # OPTION B: Send welcome email in background (external calls can be slow/hang)
         try:
             from email_service import email_service
-            email_service.send_welcome_email(
+            background_tasks.add_task(
+                email_service.send_welcome_email,
                 to_email=request.email,
                 user_name=request.name,
                 language=request.language or "en"
             )
-            print(f"✅ Welcome email sent to {request.email}")
         except Exception as email_error:
             # Don't fail registration if email fails, but log it
-            print(f"⚠️ Failed to send welcome email: {str(email_error)}")
+            print(f"⚠️ Failed to schedule welcome email: {str(email_error)}")
         
         return {
             "msg": "User registered successfully",
