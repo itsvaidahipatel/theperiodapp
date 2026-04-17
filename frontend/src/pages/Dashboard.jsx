@@ -158,7 +158,7 @@ const Dashboard = () => {
     }
   }, [])
   
-  // User from localStorage
+  // User from localStorage (persists across refresh)
   useEffect(() => {
     const userData = localStorage.getItem('user')
     if (userData) {
@@ -221,10 +221,8 @@ const Dashboard = () => {
       console.error('Logout error (continuing to clear client state):', error)
     }
 
-    // Clear browser storage
+    // Clear browser storage (session only)
     sessionStorage.clear()
-    localStorage.removeItem('access_token')
-    localStorage.removeItem('user')
 
     // Tell contexts to reset any cached cycle data
     window.dispatchEvent(new CustomEvent('resetAllCycles'))

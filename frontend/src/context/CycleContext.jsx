@@ -275,12 +275,30 @@ export function CycleProvider({ children }) {
     loadOnce()
   }, [loadOnce])
 
+  // IMPORTANT: Providers mount before login. If there was no token on initial mount,
+  // loadOnce() will early-return and never run again. Listen for authSuccess to
+  // immediately fetch phaseMap/cycle data after login/register.
+  useEffect(() => {
+    const onAuthSuccess = () => {
+      refreshCycleData()
+    }
+    window.addEventListener('authSuccess', onAuthSuccess)
+    return () => window.removeEventListener('authSuccess', onAuthSuccess)
+  }, [refreshCycleData])
+
   useEffect(() => {
     const onPeriodLogged = () => {
       refreshCycleData()
     }
     window.addEventListener('periodLogged', onPeriodLogged)
     return () => window.removeEventListener('periodLogged', onPeriodLogged)
+  }, [refreshCycleData])
+
+  // Keep manual refresh button in PeriodCalendar working.
+  useEffect(() => {
+    const onCalendarRefresh = () => refreshCycleData()
+    window.addEventListener('calendarRefresh', onCalendarRefresh)
+    return () => window.removeEventListener('calendarRefresh', onCalendarRefresh)
   }, [refreshCycleData])
 
   const value = useMemo(

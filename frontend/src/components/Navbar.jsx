@@ -12,16 +12,12 @@ const Navbar = () => {
   const handleLogout = async () => {
     try {
       await logout()
-      sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
-      navigate('/login')
     } catch (error) {
-      sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
-      navigate('/login')
+      console.error('Logout error (continuing to clear client state):', error)
     }
+    try { sessionStorage.clear() } catch {}
+    try { localStorage.clear() } catch {}
+    window.location.href = '/login'
   }
 
   const getViewModeIcon = () => {

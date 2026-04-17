@@ -8,7 +8,7 @@ import { useCalendarCache } from '../context/CalendarCacheContext'
 import { useDataContext } from '../context/DataContext'
 import { useCycleData } from '../context/CycleContext'
 
-// Get user from localStorage (since we don't have context here)
+// Get user from localStorage (login persistence across refresh)
 const getUser = () => {
   try {
     const userStr = localStorage.getItem('user')
@@ -378,8 +378,20 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
       const user = getUser()
       const bleedingDays = user?.avg_bleeding_days != null ? Math.max(2, Math.min(8, Number(user.avg_bleeding_days))) : 5
       await logPeriod({ date: selectedDateStr, bleeding_days: bleedingDays })
-      window.dispatchEvent(new CustomEvent('periodLogged'))
-      window.dispatchEvent(new CustomEvent('calendarUpdated'))
+
+      // Clear calendar cache so consumers don't see stale anchors
+      clearCache()
+
+      // Give backend a brief moment to finish sync/index work, then trigger a hard dashboard refresh
+      setTimeout(() => {
+        try {
+          window.dispatchEvent(new CustomEvent('periodLogged'))
+          window.dispatchEvent(new CustomEvent('calendarUpdated'))
+        } catch (e) {
+          console.error('Error dispatching refresh events after period log:', e)
+        }
+      }, 300)
+
       setSelectedDate(null)
       setShowLogButton(false)
       if (onPeriodLogged) onPeriodLogged()
@@ -654,7 +666,7 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
         </div>
       </div>
 
-      {loading ? (
+      {loading || !phaseMap || Object.keys(phaseMap).length === 0 ? (
         <div className="flex items-center justify-center py-16">
           <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-period-pink"></div>
         </div>

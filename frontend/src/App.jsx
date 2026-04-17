@@ -1,4 +1,5 @@
 import { Routes, Route } from 'react-router-dom'
+import { useEffect } from 'react'
 import ProtectedRoute from './components/ProtectedRoute'
 import ErrorBoundary from './components/ErrorBoundary'
 import { DataProvider } from './context/DataContext'
@@ -22,6 +23,18 @@ import CycleStatistics from './pages/CycleStatistics'
 import NotFound from './pages/NotFound'
 
 function App() {
+  useEffect(() => {
+    const handleTabClose = () => {
+      try {
+        sessionStorage.clear()
+      } catch {
+        // ignore
+      }
+    }
+    window.addEventListener('beforeunload', handleTabClose)
+    return () => window.removeEventListener('beforeunload', handleTabClose)
+  }, [])
+
   return (
     <ErrorBoundary>
       <ViewModeProvider>

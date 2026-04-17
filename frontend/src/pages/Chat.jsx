@@ -91,13 +91,9 @@ const Chat = () => {
       await logout()
       sessionStorage.clear()
       clearChatCache()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
       navigate('/login')
     } catch (error) {
       sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
       clearChatCache()
       navigate('/login')
     }

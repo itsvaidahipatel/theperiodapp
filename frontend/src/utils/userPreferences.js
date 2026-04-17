@@ -1,6 +1,6 @@
 /**
  * Global user preferences utility
- * Gets user preferences from localStorage
+ * Gets user preferences from sessionStorage
  */
 
 /**
@@ -239,7 +239,7 @@ export const getLocalizedText = (data, language = null) => {
 }
 
 /**
- * Update user data in localStorage
+ * Update user data in sessionStorage
  */
 export const updateUserData = (updatedUser) => {
   try {

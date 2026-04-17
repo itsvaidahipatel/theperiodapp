@@ -1,6 +1,6 @@
 /**
  * Chat history cache utility
- * Caches chat history in localStorage for 24 hours
+ * Caches chat history in sessionStorage for 24 hours
  */
 
 const CHAT_CACHE_KEY = 'period_gpt_chat_history'
@@ -12,7 +12,7 @@ const CACHE_DURATION_MS = 24 * 60 * 60 * 1000 // 24 hours in milliseconds
  */
 const isCacheValid = () => {
   try {
-    const timestamp = localStorage.getItem(CHAT_CACHE_TIMESTAMP_KEY)
+    const timestamp = sessionStorage.getItem(CHAT_CACHE_TIMESTAMP_KEY)
     if (!timestamp) return false
     
     const cacheAge = Date.now() - parseInt(timestamp)
@@ -33,7 +33,7 @@ export const getCachedChatHistory = () => {
       return null
     }
     
-    const cached = localStorage.getItem(CHAT_CACHE_KEY)
+    const cached = sessionStorage.getItem(CHAT_CACHE_KEY)
     if (cached) {
       return JSON.parse(cached)
     }
@@ -49,8 +49,8 @@ export const getCachedChatHistory = () => {
  */
 export const setCachedChatHistory = (messages) => {
   try {
-    localStorage.setItem(CHAT_CACHE_KEY, JSON.stringify(messages))
-    localStorage.setItem(CHAT_CACHE_TIMESTAMP_KEY, Date.now().toString())
+    sessionStorage.setItem(CHAT_CACHE_KEY, JSON.stringify(messages))
+    sessionStorage.setItem(CHAT_CACHE_TIMESTAMP_KEY, Date.now().toString())
     console.log('Chat history cached successfully')
   } catch (error) {
     console.error('Error saving chat cache:', error)
@@ -87,8 +87,8 @@ export const addMessageToCache = (message) => {
  */
 export const clearChatCache = () => {
   try {
-    localStorage.removeItem(CHAT_CACHE_KEY)
-    localStorage.removeItem(CHAT_CACHE_TIMESTAMP_KEY)
+    sessionStorage.removeItem(CHAT_CACHE_KEY)
+    sessionStorage.removeItem(CHAT_CACHE_TIMESTAMP_KEY)
     console.log('Chat cache cleared')
   } catch (error) {
     console.error('Error clearing chat cache:', error)
@@ -99,8 +99,8 @@ export const clearChatCache = () => {
  * Get cache info for debugging
  */
 export const getChatCacheInfo = () => {
-  const timestamp = localStorage.getItem(CHAT_CACHE_TIMESTAMP_KEY)
-  const cached = localStorage.getItem(CHAT_CACHE_KEY)
+  const timestamp = sessionStorage.getItem(CHAT_CACHE_TIMESTAMP_KEY)
+  const cached = sessionStorage.getItem(CHAT_CACHE_KEY)
   
   return {
     hasCache: !!cached,

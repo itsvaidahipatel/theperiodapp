@@ -177,7 +177,7 @@ def _get_phase_bounds(user_id: str, cycle_length: int, avg_period_length: float)
         return (pl, ov, max(pl + 1, ov - 1), min(cl, ov + 1))
 
 
-def get_cycle_stats(user_id: str) -> Dict:
+def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
     """
     Calculate comprehensive cycle statistics.
     
@@ -236,7 +236,9 @@ def get_cycle_stats(user_id: str) -> Dict:
         avg_period_length = calculate_rolling_period_length(user_id)
         
         # Get confidence
-        confidence = calculate_prediction_confidence(user_id)
+        # Localize backend-generated strings for mobile/web consumers.
+        # Also return stable keys so clients can localize if desired.
+        confidence = calculate_prediction_confidence(user_id, language=language)
         
         # Filter valid cycles (21-45 days)
         valid_cycles = [c for c in cycles if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS]
@@ -420,37 +422,62 @@ def get_cycle_stats(user_id: str) -> Dict:
             print(f"   Cycle {i+1}: {cycle.get('startDate')} - {cycle.get('endDate') or 'current'}, {cycle.get('length')} days, isCurrent={cycle.get('isCurrent')}")
         
         # Generate insights
+        from i18n import t
+
         insights = []
+        insight_keys = []
+        insight_params = []
         
         if len(valid_cycles) < 3:
-            insights.append("Log at least 3 cycles for more accurate predictions and insights.")
+            key = "insight.log_3_cycles_more"
+            insights.append(t(key, language))
+            insight_keys.append(key)
+            insight_params.append({})
         
-        if cycle_regularity == "irregular":
-            insights.append("Your cycles show high variability. Consider consulting a healthcare provider if this pattern continues.")
-        elif cycle_regularity == "somewhat_irregular":
-            insights.append("Your cycles show moderate variability. Continue tracking to identify patterns.")
-        elif cycle_regularity == "regular":
-            insights.append("Your cycles are regular. Great job tracking!")
-        elif cycle_regularity == "very_regular":
-            insights.append("Your cycles are very regular. Excellent consistency!")
+        if cycle_regularity in ("irregular", "somewhat_irregular", "regular", "very_regular"):
+            key = f"insight.regularity.{cycle_regularity}"
+            insights.append(t(key, language))
+            insight_keys.append(key)
+            insight_params.append({})
         
         if len(anomaly_cycles) > 0:
-            insights.append(f"You have {len(anomaly_cycles)} cycle(s) outside the normal range (21-45 days).")
+            key = "insight.anomalies_count"
+            params = {"anomaly_count": len(anomaly_cycles)}
+            insights.append(t(key, language, params))
+            insight_keys.append(key)
+            insight_params.append(params)
         
         # Add insight if period length is outside typical range
         if is_period_length_outside_range:
             if avg_period_length < 3.0:
-                insights.append(f"Your period length ({avg_period_length:.1f} days) is shorter than typical (3-8 days). This is detected from your logged data.")
+                key = "insight.period_short"
+                params = {"period_days": f"{avg_period_length:.1f}"}
+                insights.append(t(key, language, params))
+                insight_keys.append(key)
+                insight_params.append(params)
             elif avg_period_length > 8.0:
-                insights.append(f"Your period length ({avg_period_length:.1f} days) is longer than typical (3-8 days). This is detected from your logged data.")
+                key = "insight.period_long"
+                params = {"period_days": f"{avg_period_length:.1f}"}
+                insights.append(t(key, language, params))
+                insight_keys.append(key)
+                insight_params.append(params)
         
         if avg_cycle_length < 21:
-            insights.append("Your average cycle length is shorter than typical. Consider discussing with a healthcare provider.")
+            key = "insight.avg_cycle_short"
+            insights.append(t(key, language))
+            insight_keys.append(key)
+            insight_params.append({})
         elif avg_cycle_length > 35:
-            insights.append("Your average cycle length is longer than typical. Consider discussing with a healthcare provider.")
+            key = "insight.avg_cycle_long"
+            insights.append(t(key, language))
+            insight_keys.append(key)
+            insight_params.append({})
         
         if not insights:
-            insights.append("Continue tracking your periods for personalized insights.")
+            key = "insight.continue_tracking"
+            insights.append(t(key, language))
+            insight_keys.append(key)
+            insight_params.append({})
         
         return {
             "totalCycles": len(valid_cycles),
@@ -469,6 +496,9 @@ def get_cycle_stats(user_id: str) -> Dict:
             "anomalies": len(anomaly_cycles),
             "confidence": confidence,
             "insights": insights,
+            # Stable keys for clients that want local mapping
+            "insightsKeys": insight_keys,
+            "insightsParams": insight_params,
             "cycleLengths": cycle_lengths_chart,
             "allCycles": all_cycles  # All cycles with dates for history view
         }

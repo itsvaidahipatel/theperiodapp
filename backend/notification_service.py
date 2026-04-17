@@ -295,7 +295,9 @@ class NotificationService:
                     return
             
             # Get cycle stats to detect anomalies
-            stats = get_cycle_stats(user_id)
+            # Notification emails should use user's language when available.
+            language = user.get("language", "en") if isinstance(user, dict) else "en"
+            stats = get_cycle_stats(user_id, language=language)
             
             anomaly_detected = False
             anomaly_type = None

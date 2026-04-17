@@ -188,7 +188,7 @@ const Profile = () => {
       
       // Update local user data
       const updatedUser = { ...user, ...response.user }
-      localStorage.setItem('user', JSON.stringify(updatedUser))
+      sessionStorage.setItem('user', JSON.stringify(updatedUser))
       setUser(updatedUser)
       
       setFormData(prev => ({ ...prev }))
@@ -219,7 +219,7 @@ const Profile = () => {
       
       // Update local user data
       const updatedUser = { ...user, ...response.user }
-      localStorage.setItem('user', JSON.stringify(updatedUser))
+      sessionStorage.setItem('user', JSON.stringify(updatedUser))
       setUser(updatedUser)
       clearCache()
       updatePhaseMap({})

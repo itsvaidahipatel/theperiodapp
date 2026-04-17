@@ -16,7 +16,7 @@ const Register = () => {
     const currentLang = getUserLanguage()
     console.log('Register component mounted. Current language:', currentLang)
     console.log('useTranslation hook language:', language)
-    console.log('localStorage selectedLanguage:', localStorage.getItem('selectedLanguage'))
+    console.log('sessionStorage selectedLanguage:', sessionStorage.getItem('selectedLanguage'))
     
     // Test a translation
     console.log('Testing translation for "auth.createAccount":', t('auth.createAccount'))

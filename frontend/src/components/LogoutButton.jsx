@@ -9,14 +9,12 @@ const LogoutButton = () => {
     try {
       await logout()
       sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
+      sessionStorage.clear()
       navigate('/login')
     } catch (error) {
       console.error('Logout error:', error)
       sessionStorage.clear()
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('user')
+      sessionStorage.clear()
       navigate('/login')
     }
   }

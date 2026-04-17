@@ -125,7 +125,7 @@ def calculate_ovulation_day(user_id: str, cycle_length: int) -> int:
     return ovulation_day
 
 
-def calculate_prediction_confidence(user_id: str) -> Dict:
+def calculate_prediction_confidence(user_id: str, language: str = "en") -> Dict:
     """
     Calculate confidence level (High/Medium/Low) based on:
     - Number of logged cycles (more = higher confidence)
@@ -142,11 +142,16 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
     try:
         cycles = get_cycles_from_period_starts(user_id)
         
+        from i18n import t
+
         if not cycles or len(cycles) < 1:
             return {
                 "level": "Low",
+                "level_key": "low",
                 "percentage": 0,
-                "reason": "No cycle data available. Log at least 3 cycles for accurate predictions."
+                "reason_key": "confidence.no_cycle_data",
+                "reason_params": {},
+                "reason": t("confidence.no_cycle_data", language),
             }
         
         valid_cycles = [c for c in cycles if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS]
@@ -154,8 +159,11 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
         if len(valid_cycles) < 2:
             return {
                 "level": "Low",
+                "level_key": "low",
                 "percentage": 25,
-                "reason": "Insufficient data. Log at least 3 cycles for better predictions."
+                "reason_key": "confidence.insufficient_data",
+                "reason_params": {},
+                "reason": t("confidence.insufficient_data", language),
             }
         
         cycle_lengths = [c["length"] for c in valid_cycles]
@@ -217,42 +225,54 @@ def calculate_prediction_confidence(user_id: str) -> Dict:
         
         if total_score >= 70:
             level = "High"
+            level_key = "high"
         elif total_score >= 50:
             level = "Medium"
+            level_key = "medium"
         else:
             level = "Low"
+            level_key = "low"
         
+        reason_key = "confidence.good_regularity_count"
+        reason_params = {"cycle_count": len(valid_cycles)}
         if len(valid_cycles) < 3:
-            reason = f"Log at least 3 cycles for better predictions. Currently have {len(valid_cycles)} cycle(s)."
+            reason_key = "confidence.log_3_cycles_count"
+            reason_params = {"cycle_count": len(valid_cycles)}
         elif ovulation_sd > 4.0:
-            reason = (
-                f"High cycle variance (irregular cycles) reduces prediction confidence. "
-                f"Ovulation timing is less certain. More consistent logging will improve accuracy."
-            )
+            reason_key = "confidence.high_variance"
+            reason_params = {}
         elif ovulation_sd > 3.0:
-            reason = (
-                f"Cycle variance is moderate; predictions are less certain. "
-                f"Based on {len(valid_cycles)} cycle(s)."
-            )
+            reason_key = "confidence.moderate_variance_count"
+            reason_params = {"cycle_count": len(valid_cycles)}
         elif cv >= 25:
-            reason = f"Cycles are irregular (variance: {cv:.1f}%). More data will improve accuracy."
+            reason_key = "confidence.irregular_cv"
+            reason_params = {"cv": f"{cv:.1f}"}
         elif cv >= 15:
-            reason = f"Cycles are somewhat irregular. Tracking more cycles will improve accuracy."
+            reason_key = "confidence.somewhat_irregular"
+            reason_params = {}
         else:
-            reason = f"Based on {len(valid_cycles)} cycle(s) with good regularity."
+            reason_key = "confidence.good_regularity_count"
+            reason_params = {"cycle_count": len(valid_cycles)}
         
         return {
-            "level": level,
+            "level": level,  # backward compatible display string
+            "level_key": level_key,  # stable key for clients
             "percentage": int(total_score),
-            "reason": reason
+            "reason_key": reason_key,
+            "reason_params": reason_params,
+            "reason": t(reason_key, language, reason_params),
         }
     
     except Exception as e:
         print(f"Error calculating prediction confidence: {str(e)}")
+        from i18n import t
         return {
             "level": "Low",
+            "level_key": "low",
             "percentage": 0,
-            "reason": "Unable to calculate confidence. Please log more periods."
+            "reason_key": "confidence.unable",
+            "reason_params": {},
+            "reason": t("confidence.unable", language),
         }
 
 

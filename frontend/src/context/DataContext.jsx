@@ -19,10 +19,13 @@ export const DataProvider = ({ children }) => {
   const [loading, setLoading] = useState(true)
   const [loadingWellness, setLoadingWellness] = useState(false)
   const [error, setError] = useState(null)
-  const [lastLoadDate, setLastLoadDate] = useState(() => {
-    // Get last load date from localStorage
+  const [lastLoadDate, setLastLoadDate] = useState(null)
+  const [userId, setUserId] = useState(() => {
     try {
-      return localStorage.getItem('period_gpt_last_load_date')
+      const raw = localStorage.getItem('user')
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      return parsed?.id || null
     } catch {
       return null
     }
@@ -151,7 +154,6 @@ export const DataProvider = ({ children }) => {
 
       const today = new Date().toISOString().split('T')[0]
       setLastLoadDate(today)
-      localStorage.setItem('period_gpt_last_load_date', today)
     } catch (err) {
       console.error('Error loading data:', err)
       setError(err.message || 'Failed to load data')
@@ -186,6 +188,10 @@ export const DataProvider = ({ children }) => {
         setLoading(false)
         return
       }
+      if (!userId) {
+        setLoading(false)
+        return
+      }
       
       const today = new Date().toISOString().split('T')[0]
       
@@ -212,8 +218,7 @@ export const DataProvider = ({ children }) => {
       }
       
       const currentDate = new Date().toISOString().split('T')[0]
-      const storedLastLoadDate = localStorage.getItem('period_gpt_last_load_date')
-      if (storedLastLoadDate && storedLastLoadDate !== currentDate) {
+      if (lastLoadDate && lastLoadDate !== currentDate) {
         console.log('Date changed (detected via interval), forcing refresh')
         checkAndLoadData(true)
       }
@@ -240,11 +245,29 @@ export const DataProvider = ({ children }) => {
         // ignore JSON errors
       }
       console.log(`DEBUG: Initializing DataContext for User ${userId || '(unknown)'}`)
-      setDashboardData(prev => (prev ? { ...prev, phaseMap: {} } : null))
+      // Cleanup phase: wipe old user's data immediately
+      setDashboardData(null)
+      setWellnessData(null)
+      lastPhaseMapFetchedAtRef.current = 0
+      setLoading(true)
+      setUserId(userId)
     }
     window.addEventListener('authSuccess', handleAuthSuccess)
     return () => window.removeEventListener('authSuccess', handleAuthSuccess)
   }, [])
+
+  // User ID guard: when user changes or logs out, immediately wipe old data then refetch
+  useEffect(() => {
+    setDashboardData(null)
+    setWellnessData(null)
+    lastPhaseMapFetchedAtRef.current = 0
+    if (userId) {
+      setLoading(true)
+      checkAndLoadData(true)
+    } else {
+      setLoading(false)
+    }
+  }, [userId, checkAndLoadData])
 
   // Listen for period log events (clear cache and reload)
   useEffect(() => {
@@ -309,6 +332,10 @@ export const DataProvider = ({ children }) => {
 
   // Manual refresh function
   const refreshData = useCallback(() => {
+    // Immediately mark as loading and clear stale dashboard data so consumers (e.g. calendar)
+    // know they must wait for fresh data after a log or explicit refresh.
+    setDashboardData(null)
+    setLoading(true)
     clearCache()
     checkAndLoadData(true)
   }, [checkAndLoadData])

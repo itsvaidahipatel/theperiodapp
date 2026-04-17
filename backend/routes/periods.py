@@ -340,7 +340,8 @@ async def get_stats(current_user: dict = Depends(get_current_user)):
     """Get comprehensive cycle statistics. Returns camelCase."""
     try:
         user_id = current_user["id"]
-        stats = get_cycle_stats(user_id)
+        language = current_user.get("language", "en")
+        stats = get_cycle_stats(user_id, language=language)
         return stats
     
     except Exception as e:

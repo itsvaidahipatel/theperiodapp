@@ -1887,7 +1887,7 @@ export const useTranslation = (useSavedLanguage = false) => {
   // Choose the appropriate language getter function
   const getLanguageFn = useSavedLanguage ? getUserSavedLanguage : getUserLanguage
   
-  // Read language directly from localStorage on mount
+  // Read language directly from sessionStorage on mount
   const [language, setLanguage] = useState(() => {
     const lang = getLanguageFn()
     console.log('useTranslation: Initial language:', lang, 'useSavedLanguage:', useSavedLanguage)
@@ -1895,7 +1895,7 @@ export const useTranslation = (useSavedLanguage = false) => {
   })
   
   useEffect(() => {
-    // On mount, always re-read from localStorage to ensure we have the latest value
+    // On mount, always re-read from sessionStorage to ensure we have the latest value
     // This handles the case where language was set just before navigation
     const currentLang = getLanguageFn()
     console.log('useTranslation: useEffect on mount, current language:', currentLang, 'state:', language)
@@ -1906,7 +1906,7 @@ export const useTranslation = (useSavedLanguage = false) => {
     
     // Listen for language change events
     const handleLanguageChange = (event) => {
-      // Get language from event detail or re-read from localStorage
+      // Get language from event detail or re-read from sessionStorage
       const newLang = event?.detail?.language || getLanguageFn()
       console.log('useTranslation: Language changed event, new language:', newLang)
       setLanguage(newLang)

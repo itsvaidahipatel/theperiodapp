@@ -1,6 +1,6 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-// Helper function to get auth token
+// Helper function to get auth token (persist across refresh)
 const getToken = () => {
   return localStorage.getItem('access_token')
 }
@@ -80,9 +80,10 @@ const apiRequest = async (endpoint, options = {}, retryCount = 0) => {
         
         // Handle authentication errors (401/403) - clear invalid token
         if (response.status === 401 || response.status === 403) {
-          // Clear invalid token
+          // Clear invalid token/user (nuclear option for strict isolation)
           localStorage.removeItem('access_token')
           localStorage.removeItem('user')
+          try { sessionStorage.clear() } catch {}
           
           // Only redirect if not already on login/register/home page
           // Don't redirect from home page - it's a public route
@@ -126,14 +127,10 @@ export const registerUser = async (payload) => {
     body: JSON.stringify(payload),
   })
   if (data.access_token) {
-    // Clean slate: clear session and calendar caches before redirect
-    sessionStorage.clear()
-    localStorage.removeItem('calendar_phase_map_cache')
-    localStorage.removeItem('calendar_period_logs_cache')
-    localStorage.removeItem('calendar_last_load_time')
+    // Clean slate: clear session caches; persist auth to localStorage for refresh
+    try { sessionStorage.clear() } catch {}
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('user', JSON.stringify(data.user))
-    localStorage.removeItem('selectedLanguage')
     window.dispatchEvent(new CustomEvent('authSuccess'))
   }
   return data
@@ -145,14 +142,10 @@ export const loginUser = async (payload) => {
     body: JSON.stringify(payload),
   })
   if (data.access_token) {
-    // Clean slate: clear session and calendar caches before redirect
-    sessionStorage.clear()
-    localStorage.removeItem('calendar_phase_map_cache')
-    localStorage.removeItem('calendar_period_logs_cache')
-    localStorage.removeItem('calendar_last_load_time')
+    // Clean slate: clear session caches; persist auth to localStorage for refresh
+    try { sessionStorage.clear() } catch {}
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('user', JSON.stringify(data.user))
-    localStorage.removeItem('selectedLanguage')
     window.dispatchEvent(new CustomEvent('authSuccess'))
   }
   return data
@@ -163,12 +156,9 @@ export const getMe = async () => {
 }
 
 export const logout = async () => {
-  sessionStorage.clear()
-  localStorage.removeItem('access_token')
-  localStorage.removeItem('user')
-  localStorage.removeItem('calendar_phase_map_cache')
-  localStorage.removeItem('calendar_period_logs_cache')
-  localStorage.removeItem('calendar_last_load_time')
+  // Nuclear option: clear everything to prevent leakage between users
+  try { sessionStorage.clear() } catch {}
+  try { localStorage.clear() } catch {}
   return { msg: 'logged out' }
 }
 
@@ -179,6 +169,7 @@ export const updateUserProfile = async (profileData) => {
     body: JSON.stringify(profileData),
   })
   if (data) {
+    // Persist updated profile for refresh
     localStorage.setItem('user', JSON.stringify(data))
   }
   return data
@@ -303,12 +294,22 @@ export const getPhaseMap = async (startDate, endDate, forceRecalculate = false, 
     
     let response
     try {
+      const token = getToken()
+      if (!token) {
+        const error = new Error('Not authenticated')
+        error.response = {
+          data: { detail: 'Authentication required' },
+          status: 401,
+        }
+        throw error
+      }
+
       // Make request and check status
       const rawResponse = await fetch(`${API_BASE_URL}/cycles/phase-map${query}`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+          'Authorization': `Bearer ${token}`
         },
         signal: controller.signal
       })
