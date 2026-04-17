@@ -112,14 +112,20 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
         today = datetime.now().date()
         client = supabase_admin if supabase_admin else supabase
 
-        # 1) Before delete: preserve cycle_data_json for existing records
+        # 1) Before delete: preserve cycle_data_json and user/statistical outlier flags
         preserved = {}
+        preserved_outlier = {}
         try:
-            existing = client.table("period_start_logs").select("start_date, cycle_data_json").eq("user_id", user_id).execute()
+            existing = client.table("period_start_logs").select("start_date, cycle_data_json, is_outlier").eq("user_id", user_id).execute()
             for row in (existing.data or []):
                 sd = row.get("start_date")
-                if sd and row.get("cycle_data_json") is not None:
-                    preserved[str(sd)] = row["cycle_data_json"]
+                if not sd:
+                    continue
+                sd = str(sd)
+                if row.get("cycle_data_json") is not None:
+                    preserved[sd] = row["cycle_data_json"]
+                if row.get("is_outlier"):
+                    preserved_outlier[sd] = True
         except Exception:
             pass
 
@@ -139,10 +145,18 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
                     "user_id": user_id,
                     "start_date": sd_str,
                     "is_confirmed": start_date <= today,
+                    "is_outlier": bool(preserved_outlier.get(sd_str, False)),
                 })
             insert_response = client.table("period_start_logs").insert(insert_data).execute()
             inserted = insert_response.data if insert_response.data else insert_data
-            result = [{"start_date": r.get("start_date"), "is_confirmed": r.get("is_confirmed", True)} for r in inserted]
+            result = [
+                {
+                    "start_date": r.get("start_date"),
+                    "is_confirmed": r.get("is_confirmed", True),
+                    "is_outlier": bool(r.get("is_outlier", False)),
+                }
+                for r in inserted
+            ]
             print(f"✅ period_start_logs synced: {len(inserted)} records")
 
             # 3) Restore cycle_data_json for records that had it (immutable past)
@@ -256,11 +270,15 @@ def get_cycles_from_period_starts(user_id: str, period_starts: Optional[List[Dic
             # Only include valid cycle lengths (21-45 days per ACOG guidelines)
             # Very short cycles (< 21) are outliers (mistakes/fake logs)
             # Very long cycles (> 45) are irregular (gaps/skipped months)
+            start_meta = period_starts[i] if isinstance(period_starts[i], dict) else {}
+            db_outlier = bool(start_meta.get("is_outlier", False))
+
             if MIN_CYCLE_DAYS <= cycle_length <= MAX_CYCLE_DAYS:
                 cycles.append({
                     "cycle_number": len(period_starts) - i - 1,  # Most recent = 1
                     "start_date": cycle_start,
-                    "length": cycle_length
+                    "length": cycle_length,
+                    "is_outlier": db_outlier,
                 })
             else:
                 # Store but mark as outlier/irregular
@@ -268,8 +286,8 @@ def get_cycles_from_period_starts(user_id: str, period_starts: Optional[List[Dic
                     "cycle_number": len(period_starts) - i - 1,
                     "start_date": cycle_start,
                     "length": cycle_length,
-                    "is_outlier": cycle_length < 15,
-                    "is_irregular": cycle_length > 60
+                    "is_outlier": db_outlier or cycle_length < MIN_CYCLE_DAYS,
+                    "is_irregular": cycle_length > MAX_CYCLE_DAYS
                 })
         
         return cycles

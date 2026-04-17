@@ -1,498 +1,528 @@
-from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.security import HTTPBearer
-from pydantic import BaseModel, EmailStr
-from typing import Optional, Dict, Any
-from datetime import datetime
 import json
+import logging
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
-from database import supabase
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel, ConfigDict, model_validator
+
 from auth_utils import get_password_hash, verify_password
-from routes.auth import get_current_user
-from datetime import timedelta
-from cycle_utils import estimate_period_length
-from period_start_logs import sync_period_start_logs_from_period_logs
-from prediction_cache import regenerate_predictions_from_last_confirmed_period
 from cycle_stats import update_user_cycle_stats
+from cycle_utils import estimate_period_length
+from database import supabase
+from period_start_logs import sync_period_start_logs_from_period_logs
+from prediction_cache import (
+    hard_invalidate_predictions_from_date,
+    invalidate_predictions_after_period,
+    regenerate_predictions_from_last_confirmed_period,
+)
+from routes.auth import get_current_user
 
 router = APIRouter()
 security = HTTPBearer()
+logger = logging.getLogger("periodcycle_ai.user")
+
+
+def _strip_auth_secrets(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Never return password material to clients."""
+    if not row:
+        return {}
+    out = dict(row)
+    out.pop("password", None)
+    out.pop("password_hash", None)
+    return out
+
+
+def _validate_new_password_strength(new_password: str) -> None:
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 8 characters long.",
+        )
+    has_digit = bool(re.search(r"\d", new_password))
+    has_special = bool(re.search(r"[^A-Za-z0-9]", new_password))
+    if not has_digit and not has_special:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must include at least one number or one special character.",
+        )
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _merge_user_update_payload(base: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Attach users.updated_at when the column exists (see database/schema.sql).
+    If your deployment lacks this column, remove the line or add a DB trigger — see TODO below.
+    """
+    # TODO: Alternatively rely on a Postgres trigger: BEFORE UPDATE ON users SET NEW.updated_at = NOW()
+    merged = {**base, "updated_at": _now_iso_utc()}
+    return merged
+
 
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
-    # cycle_length and last_period_date are NOT updatable via profile (managed automatically)
-    avg_bleeding_days: Optional[int] = None  # Typical bleeding length (2-8), used for auto end_date
+    avg_bleeding_days: Optional[int] = None
     allergies: Optional[list] = None
     language: Optional[str] = None
     favorite_cuisine: Optional[str] = None
     favorite_exercise: Optional[str] = None
     interests: Optional[list] = None
 
+
+class NotificationPreferencesPayload(BaseModel):
+    """Validated shape for users.notification_preferences (JSONB)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    upcoming_reminders: bool = True
+    logging_reminders: bool = True
+    health_alerts: bool = True
+    pause_emails_until: Optional[str] = None
+    snooze_this_cycle: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_jsonb(cls, data: Any) -> Any:
+        if data is None:
+            return {}
+        if isinstance(data, str):
+            stripped = data.strip()
+            if not stripped:
+                return {}
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                return {}
+        if not isinstance(data, dict):
+            return {}
+        out = dict(data)
+        if "upcoming_reminders" not in out and "period_reminders" in out:
+            out["upcoming_reminders"] = out.get("period_reminders", True)
+        if "logging_reminders" not in out and "period_reminders" in out:
+            out["logging_reminders"] = out.get("period_reminders", True)
+        if "health_alerts" not in out:
+            out["health_alerts"] = True
+        if "pause_emails_until" not in out:
+            out["pause_emails_until"] = None
+        if "snooze_this_cycle" not in out:
+            out["snooze_this_cycle"] = False
+        return out
+
+
 class NotificationPreferencesUpdate(BaseModel):
     email_notifications_enabled: Optional[bool] = None
     notification_preferences: Optional[Dict[str, Any]] = None
-    # New fields for clean email system
     upcoming_reminders: Optional[bool] = None
     logging_reminders: Optional[bool] = None
     health_alerts: Optional[bool] = None
+
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
 
+
 class RemoveItemRequest(BaseModel):
-    type: str  # "recipe" | "wholeFood" | "dessert"
+    type: str
     item: dict
+
 
 @router.get("/profile")
 async def get_profile(current_user: dict = Depends(get_current_user)):
     """Get user profile."""
-    current_user.pop("password_hash", None)
-    return current_user
+    return _strip_auth_secrets(current_user)
+
 
 @router.post("/profile")
 async def update_profile(
     profile_data: ProfileUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update user profile."""
     try:
         user_id = current_user["id"]
-        update_data = profile_data.dict(exclude_unset=True)
-        # Clamp avg_bleeding_days to 2-8 if present
+        update_data = profile_data.model_dump(exclude_unset=True)
         if "avg_bleeding_days" in update_data and update_data["avg_bleeding_days"] is not None:
             update_data["avg_bleeding_days"] = max(2, min(8, int(update_data["avg_bleeding_days"])))
-        # Note: updated_at column doesn't exist in database, so we skip it
 
-        response = supabase.table("users").update(update_data).eq("id", user_id).execute()
-        
+        payload = _merge_user_update_payload(update_data)
+        response = supabase.table("users").update(payload).eq("id", user_id).execute()
+
         if not response.data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to update profile"
+                detail="Failed to update profile",
             )
-        
-        updated_user = response.data[0]
-        updated_user.pop("password", None)
-        
-        return updated_user
-    
+
+        logger.info("Profile updated for user")
+        return _strip_auth_secrets(response.data[0])
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Profile update failed: {str(e)}"
+            detail=f"Profile update failed: {str(e)}",
         )
+
 
 @router.post("/change-password")
 async def change_password(
     password_data: ChangePasswordRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Change user password."""
     try:
         user_id = current_user["id"]
-        
-        # Verify current password
+
         if not verify_password(password_data.current_password, current_user.get("password_hash", "")):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Current password is incorrect"
+                detail="Current password is incorrect",
             )
-        
-        # Hash new password
+
+        _validate_new_password_strength(password_data.new_password)
+
         new_password_hash = get_password_hash(password_data.new_password)
-        
-        # Update password
-        response = supabase.table("users").update({
-            "password_hash": new_password_hash
-        }).eq("id", user_id).execute()
-        
+        payload = _merge_user_update_payload({"password_hash": new_password_hash})
+        response = supabase.table("users").update(payload).eq("id", user_id).execute()
+
         if not response.data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to change password"
+                detail="Failed to change password",
             )
-        
+
+        logger.info("Password changed for user")
         return {"message": "Password changed successfully"}
-    
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Password change failed: {str(e)}"
+            detail=f"Password change failed: {str(e)}",
         )
+
 
 @router.post("/remove-item")
 async def remove_item(
     request: RemoveItemRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Remove item from user's saved items."""
     try:
         user_id = current_user["id"]
-        
-        # Check if saved_items column exists in database
-        # If not, return a message that this feature is not available
+
         if "saved_items" not in current_user:
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail="Saved items feature is not available. The saved_items column does not exist in the database."
+                detail="Saved items feature is not available. The saved_items column does not exist in the database.",
             )
-        
-        # Get current saved items
+
         saved_items = current_user.get("saved_items", {})
         item_type = request.type
-        
+
         if item_type not in saved_items:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"No saved {item_type} items found"
+                detail=f"No saved {item_type} items found",
             )
-        
-        # Remove item from list
+
         items_list = saved_items[item_type]
         items_list = [item for item in items_list if item != request.item]
-        
-        # Update saved items
         saved_items[item_type] = items_list
-        
-        response = supabase.table("users").update({
-            "saved_items": saved_items
-        }).eq("id", user_id).execute()
-        
+
+        payload = _merge_user_update_payload({"saved_items": saved_items})
+        supabase.table("users").update(payload).eq("id", user_id).execute()
+
+        logger.info("Saved item removed for user")
         return {
             "message": f"{item_type} item removed successfully",
-            "removed": True
+            "removed": True,
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to remove item: {str(e)}"
+            detail=f"Failed to remove item: {str(e)}",
         )
+
+
+def _coerce_notification_preferences(raw: Any) -> NotificationPreferencesPayload:
+    """Normalize DB JSONB (dict or legacy JSON string) via Pydantic."""
+    return NotificationPreferencesPayload.model_validate(raw)
+
 
 @router.get("/notification-preferences")
 async def get_notification_preferences(current_user: dict = Depends(get_current_user)):
     """Get user's notification preferences."""
     try:
-        user_id = current_user["id"]
-        
-        # Get notification preferences
         email_enabled = current_user.get("email_notifications_enabled", True)
-        notification_prefs = current_user.get("notification_preferences", {})
-        
-        # Parse JSONB if it's a string
-        if isinstance(notification_prefs, str):
-            try:
-                notification_prefs = json.loads(notification_prefs) if notification_prefs else {}
-            except json.JSONDecodeError:
-                notification_prefs = {}
-        
-        # Default preferences if not set
-        if not notification_prefs:
-            notification_prefs = {
-                "upcoming_reminders": True,
-                "logging_reminders": True,
-                "health_alerts": True,
-                "pause_emails_until": None,
-                "snooze_this_cycle": False
-            }
-        else:
-            # Ensure new fields exist (backward compatibility)
-            if "upcoming_reminders" not in notification_prefs:
-                notification_prefs["upcoming_reminders"] = notification_prefs.get("period_reminders", True)
-            if "logging_reminders" not in notification_prefs:
-                notification_prefs["logging_reminders"] = notification_prefs.get("period_reminders", True)
-            if "health_alerts" not in notification_prefs:
-                notification_prefs["health_alerts"] = True
-            if "pause_emails_until" not in notification_prefs:
-                notification_prefs["pause_emails_until"] = None
-            if "snooze_this_cycle" not in notification_prefs:
-                notification_prefs["snooze_this_cycle"] = False
-        
+        raw_prefs = current_user.get("notification_preferences")
+        prefs = _coerce_notification_preferences(raw_prefs if raw_prefs is not None else {})
+
         return {
             "email_notifications_enabled": email_enabled,
-            "notification_preferences": notification_prefs
+            "notification_preferences": prefs.model_dump(),
         }
-    
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get notification preferences: {str(e)}"
+            detail=f"Failed to get notification preferences: {str(e)}",
         )
+
 
 @router.post("/notification-preferences")
 async def update_notification_preferences(
     preferences: NotificationPreferencesUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update user's notification preferences."""
     try:
         user_id = current_user["id"]
-        update_data = {}
-        
-        # Update email notifications enabled
+        update_data: Dict[str, Any] = {}
+
         if preferences.email_notifications_enabled is not None:
             update_data["email_notifications_enabled"] = preferences.email_notifications_enabled
-        
-        # Update notification preferences
-        # Support both old format (notification_preferences dict) and new individual fields
-        current_prefs = current_user.get("notification_preferences", {})
-        if isinstance(current_prefs, str):
-            try:
-                current_prefs = json.loads(current_prefs) if current_prefs else {}
-            except json.JSONDecodeError:
-                current_prefs = {}
-        
-        # Update from individual fields if provided
+
+        current_prefs = _coerce_notification_preferences(
+            current_user.get("notification_preferences")
+        ).model_dump()
+
         if preferences.upcoming_reminders is not None:
             current_prefs["upcoming_reminders"] = preferences.upcoming_reminders
         if preferences.logging_reminders is not None:
             current_prefs["logging_reminders"] = preferences.logging_reminders
         if preferences.health_alerts is not None:
             current_prefs["health_alerts"] = preferences.health_alerts
-        
-        # Also support updating via notification_preferences dict (backward compatibility)
+
         if preferences.notification_preferences is not None:
-            # Merge with new preferences
-            current_prefs = {**current_prefs, **preferences.notification_preferences}
-        
+            merged = {**current_prefs, **preferences.notification_preferences}
+            current_prefs = _coerce_notification_preferences(merged).model_dump()
+
         update_data["notification_preferences"] = current_prefs
-        
+
         if not update_data:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No preferences provided to update"
+                detail="No preferences provided to update",
             )
-        
-        # Update in database
-        response = supabase.table("users").update(update_data).eq("id", user_id).execute()
-        
+
+        payload = _merge_user_update_payload(update_data)
+        response = supabase.table("users").update(payload).eq("id", user_id).execute()
+
         if not response.data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to update notification preferences"
+                detail="Failed to update notification preferences",
             )
-        
+
         updated_user = response.data[0]
-        updated_prefs = updated_user.get("notification_preferences", {})
-        if isinstance(updated_prefs, str):
-            try:
-                updated_prefs = json.loads(updated_prefs) if updated_prefs else {}
-            except json.JSONDecodeError:
-                updated_prefs = {}
-        
+        final_prefs = _coerce_notification_preferences(updated_user.get("notification_preferences"))
+
+        logger.info("Notification preferences updated for user")
         return {
             "message": "Notification preferences updated successfully",
             "email_notifications_enabled": updated_user.get("email_notifications_enabled", True),
-            "notification_preferences": updated_prefs
+            "notification_preferences": final_prefs.model_dump(),
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update notification preferences: {str(e)}"
+            detail=f"Failed to update notification preferences: {str(e)}",
         )
+
 
 @router.post("/reset-cycle-data")
 async def reset_cycle_data(current_user: dict = Depends(get_current_user)):
     """
     Reset all cycle data for the user.
-    
-    This will permanently delete:
-    - All period logs (past, current, and future)
-    - All period start logs
-    - All phase predictions (user_cycle_days)
-    - Reset user profile cycle fields (last_period_date, cycle_length)
-    
-    WARNING: This action cannot be undone!
+
+    Clears period logs, period_start_logs, and prediction cache (user_cycle_days) so
+    stateless phase logic (e.g. calculate_phase_for_date_range) sees no stale cycles.
     """
     try:
         user_id = current_user["id"]
-        
-        # Delete all period logs
+
         supabase.table("period_logs").delete().eq("user_id", user_id).execute()
-        print(f"✅ Deleted all period_logs for user {user_id}")
-        
-        # Delete all period start logs
+        logger.info("Deleted all period_logs for user reset")
+
         try:
             supabase.table("period_start_logs").delete().eq("user_id", user_id).execute()
-            print(f"✅ Deleted all period_start_logs for user {user_id}")
-        except Exception as e:
-            print(f"⚠️ Error deleting period_start_logs (table may not exist): {str(e)}")
-        
-        # Delete all phase predictions (user_cycle_days)
+            logger.info("Deleted all period_start_logs for user reset")
+        except Exception:
+            logger.warning("Error deleting period_start_logs (table may not exist)", exc_info=True)
+
         supabase.table("user_cycle_days").delete().eq("user_id", user_id).execute()
-        print(f"✅ Deleted all user_cycle_days for user {user_id}")
-        
-        # Delete period events if table exists
+        logger.info("Deleted all user_cycle_days for user reset")
+
         try:
             supabase.table("period_events").delete().eq("user_id", user_id).execute()
-            print(f"✅ Deleted all period_events for user {user_id}")
-        except Exception as e:
-            print(f"⚠️ Error deleting period_events (table may not exist): {str(e)}")
-        
-        # Reset user profile cycle fields to defaults
-        update_data = {
-            "last_period_date": None,
-            "cycle_length": 28,  # Default cycle length
-        }
-        
+            logger.info("Deleted all period_events for user reset")
+        except Exception:
+            logger.warning("Error deleting period_events (table may not exist)", exc_info=True)
+
+        # Ensure prediction cache is fully cleared if any rows survived RLS/edge cases
+        try:
+            invalidate_predictions_after_period(user_id)
+        except Exception:
+            logger.warning("Prediction cache invalidation helper failed (non-fatal)", exc_info=True)
+
+        update_data = _merge_user_update_payload(
+            {
+                "last_period_date": None,
+                "cycle_length": 28,
+            }
+        )
+
         response = supabase.table("users").update(update_data).eq("id", user_id).execute()
-        
+
         if not response.data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to reset user profile cycle fields"
+                detail="Failed to reset user profile cycle fields",
             )
-        
-        updated_user = response.data[0]
-        updated_user.pop("password", None)
-        updated_user.pop("password_hash", None)
-        
-        print(f"✅ Reset cycle data for user {user_id}")
-        
+
+        logger.info("Cycle data reset completed for user")
         return {
             "message": "All cycle data has been reset successfully",
-            "user": updated_user
+            "user": _strip_auth_secrets(response.data[0]),
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset cycle data: {str(e)}"
+            detail=f"Failed to reset cycle data: {str(e)}",
         )
+
 
 @router.post("/reset-last-period")
 async def reset_last_period(current_user: dict = Depends(get_current_user)):
     """
     Reset only the most recently logged period start.
-    
-    This will:
-    - Delete the most recent period log
-    - Delete all user_cycle_days entries for that period range
-    - Update last_period_date to the previous period's date (if any)
-    - Sync period_start_logs
-    - Regenerate predictions from the new last period
-    
-    Useful if a user accidentally logged a period and wants to undo just that entry.
+
+    Hard-invalidates phase cache from that date forward, rebuilds period_start_logs,
+    refreshes stats, and regenerates predictions from the new last confirmed period.
     """
     try:
         user_id = current_user["id"]
-        
-        # Get the most recent period log (ordered by date desc)
-        logs_response = supabase.table("period_logs").select("*").eq("user_id", user_id).order("date", desc=True).limit(1).execute()
-        
+
+        logs_response = (
+            supabase.table("period_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+
         if not logs_response.data or len(logs_response.data) == 0:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="No period logs found to reset"
+                detail="No period logs found to reset",
             )
-        
+
         last_period_log = logs_response.data[0]
         last_period_date_str = last_period_log["date"]
-        
-        # Parse the date
+
         if isinstance(last_period_date_str, str):
             last_period_date = datetime.strptime(last_period_date_str, "%Y-%m-%d").date()
         else:
             last_period_date = last_period_date_str
-        
-        # SAFETY: Handle period end date - use actual end_date if available, else estimate
-        # This ensures we delete the correct period range regardless of whether end_date exists
-        period_end_date = None
+
         if last_period_log.get("end_date"):
-            # Use actual end_date if available
             end_date_str = last_period_log["end_date"]
             if isinstance(end_date_str, str):
                 period_end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
             else:
                 period_end_date = end_date_str
-            print(f"🔄 Resetting last period: {last_period_date_str} to {period_end_date.strftime('%Y-%m-%d')} (using actual end_date)")
+            logger.info("Resetting last period using stored end_date")
         else:
-            # No end_date - use estimated period length (fallback)
             period_length = estimate_period_length(user_id)
             period_length_days = int(round(max(3.0, min(8.0, period_length))))
             period_end_date = last_period_date + timedelta(days=period_length_days - 1)
-            print(f"🔄 Resetting last period: {last_period_date_str} to {period_end_date.strftime('%Y-%m-%d')} (estimated {period_length_days} days, end_date was NULL)")
-        
-        # Step 1: Delete the period log (handles both start_date only and start_date + end_date)
-        delete_response = supabase.table("period_logs").delete().eq("id", last_period_log["id"]).execute()
-        print(f"✅ Deleted period log: {last_period_date_str} (end_date was {'provided' if last_period_log.get('end_date') else 'NULL'})")
-        
-        # Step 2: Delete all user_cycle_days entries for this period range
-        # SAFETY: Only delete if we have a valid period_end_date
-        if period_end_date:
-            current_date = last_period_date
-            deleted_count = 0
-            while current_date <= period_end_date:
-                date_str = current_date.strftime("%Y-%m-%d")
-                try:
-                    supabase.table("user_cycle_days").delete().eq("user_id", user_id).eq("date", date_str).eq("phase", "Period").execute()
-                    deleted_count += 1
-                except Exception as e:
-                    print(f"⚠️ Warning: Could not delete user_cycle_days for {date_str}: {str(e)}")
-                current_date += timedelta(days=1)
-            
-            print(f"✅ Deleted {deleted_count} user_cycle_days entries for period range")
-        else:
-            print(f"⚠️ Warning: Could not determine period_end_date, skipping user_cycle_days deletion")
-        
-        # Step 3: Update last_period_date to the previous period's date (if any)
-        remaining_logs = supabase.table("period_logs").select("*").eq("user_id", user_id).order("date", desc=True).limit(1).execute()
-        
+            logger.info("Resetting last period using estimated bleed length")
+
+        supabase.table("period_logs").delete().eq("id", last_period_log["id"]).execute()
+        logger.info("Deleted most recent period log")
+
+        # Hard invalidation: all cached phases on/after removed period start (stateless recompute baseline)
+        try:
+            hard_invalidate_predictions_from_date(user_id, str(last_period_date_str))
+        except Exception:
+            logger.warning("hard_invalidate_predictions_from_date failed; narrowing cleanup", exc_info=True)
+            if period_end_date:
+                current_date = last_period_date
+                while current_date <= period_end_date:
+                    date_str = current_date.strftime("%Y-%m-%d")
+                    try:
+                        supabase.table("user_cycle_days").delete().eq("user_id", user_id).eq("date", date_str).execute()
+                    except Exception:
+                        logger.warning("Could not delete user_cycle_days for %s", date_str, exc_info=True)
+                    current_date += timedelta(days=1)
+
+        remaining_logs = (
+            supabase.table("period_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+
         new_last_period_date = None
         if remaining_logs.data and len(remaining_logs.data) > 0:
             new_last_period_date = remaining_logs.data[0]["date"]
-        
-        update_data = {
-            "last_period_date": new_last_period_date
-        }
-        
-        user_update = supabase.table("users").update(update_data).eq("id", user_id).execute()
-        
+
+        user_update = supabase.table("users").update(
+            _merge_user_update_payload({"last_period_date": new_last_period_date})
+        ).eq("id", user_id).execute()
+
         if not user_update.data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to update user's last_period_date"
+                detail="Failed to update user's last_period_date",
             )
-        
+
         updated_user = user_update.data[0]
-        updated_user.pop("password", None)
-        updated_user.pop("password_hash", None)
-        
-        print(f"✅ Updated last_period_date to: {new_last_period_date}")
-        
-        # Step 4: Sync period_start_logs (rebuild from remaining period_logs)
+        logger.info("Updated last_period_date after last-period reset")
+
         period_starts = sync_period_start_logs_from_period_logs(user_id)
-        print(f"✅ Synced period_start_logs")
-        
-        # Step 5: Update cycle stats (use returned data to avoid DB read)
         update_user_cycle_stats(user_id, period_starts=period_starts)
-        print(f"✅ Updated cycle stats")
-        
-        # Step 6: Regenerate predictions from the new last confirmed period
+        logger.info("Synced period_start_logs and cycle stats after last-period reset")
+
+        try:
+            invalidate_predictions_after_period(user_id)
+        except Exception:
+            logger.warning("invalidate_predictions_after_period after reset failed (non-fatal)", exc_info=True)
+
         regenerate_predictions_from_last_confirmed_period(user_id, days_ahead=730)
-        print(f"✅ Regenerated predictions")
-        
+        logger.info("Regenerated predictions after last-period reset")
+
         return {
             "message": "Last period has been reset successfully",
-            "user": updated_user,
-            "deleted_period_date": last_period_date_str
+            "user": _strip_auth_secrets(updated_user),
+            "deleted_period_date": last_period_date_str,
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset last period: {str(e)}"
+            detail=f"Failed to reset last period: {str(e)}",
         )

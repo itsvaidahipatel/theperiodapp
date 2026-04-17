@@ -61,7 +61,12 @@ def compute_cycle_stats_from_period_starts(user_id: str, period_starts: Optional
             }
         
         # Separate valid cycles from outliers/irregular (ACOG guidelines: 21-45 days)
-        valid_cycles = [c for c in cycles if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS]
+        # Exclude DB/user-flagged is_outlier from rolling stats (Bayesian inputs).
+        valid_cycles = [
+            c for c in cycles
+            if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS
+            and not c.get("is_outlier", False)
+        ]
         outliers = [c for c in cycles if c.get("is_outlier", False) or c["length"] < MIN_CYCLE_DAYS]
         irregular = [c for c in cycles if c.get("is_irregular", False) or c["length"] > MAX_CYCLE_DAYS]
         
@@ -240,9 +245,16 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
         # Also return stable keys so clients can localize if desired.
         confidence = calculate_prediction_confidence(user_id, language=language)
         
-        # Filter valid cycles (21-45 days)
-        valid_cycles = [c for c in cycles if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS]
-        anomaly_cycles = [c for c in cycles if c["length"] < MIN_CYCLE_DAYS or c["length"] > MAX_CYCLE_DAYS]
+        # Filter valid cycles (21-45 days), excluding user/statistical outliers flagged in period_start_logs
+        valid_cycles = [
+            c for c in cycles
+            if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS
+            and not c.get("is_outlier", False)
+        ]
+        anomaly_cycles = [
+            c for c in cycles
+            if c["length"] < MIN_CYCLE_DAYS or c["length"] > MAX_CYCLE_DAYS or c.get("is_outlier", False)
+        ]
         
         # Calculate cycle regularity (coefficient of variation)
         cycle_regularity = "unknown"
@@ -349,13 +361,14 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
                     period_len, ov_day, ov_start, ov_end = _get_phase_bounds(
                         user_id, cycle_length, avg_period_length
                     )
+                    flagged_outlier = bool(period_starts[i].get("is_outlier", False))
                     cycle_obj = {
                         "cycleNumber": len(period_starts) - i - 1,
                         "startDate": cycle_start,
                         "endDate": cycle_end,
                         "length": cycle_length,
                         "isCurrent": False,
-                        "isAnomaly": cycle_length < MIN_CYCLE_DAYS or cycle_length > MAX_CYCLE_DAYS,
+                        "isAnomaly": cycle_length < MIN_CYCLE_DAYS or cycle_length > MAX_CYCLE_DAYS or flagged_outlier,
                         "periodLength": period_len,
                         "ovulationDay": ov_day,
                         "ovulationStart": ov_start,

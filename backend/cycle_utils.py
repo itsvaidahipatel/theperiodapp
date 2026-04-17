@@ -4,10 +4,13 @@ Uses adaptive, medically credible algorithms to predict cycles and generate phas
 All calculations are performed locally without external API dependencies.
 """
 
+import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import math
 from database import supabase
+
+logger = logging.getLogger(__name__)
 
 # Deprecated RapidAPI stubs moved to legacy_utils.py. All cycle predictions use calculate_phase_for_date_range().
 
@@ -31,6 +34,92 @@ def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
     cap = PHASE_DAY_CAPS.get(phase, 14)
     day_in_phase = max(1, min(int(day_in_phase), cap))
     return f"{prefix}{day_in_phase}"
+
+
+def parse_phase_day_id(phase_day_id: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
+    """Parse phase-day ID like 'f7' into phase prefix ('f') and day number (7)."""
+    if not phase_day_id or len(phase_day_id) < 2:
+        return None, None
+    phase_prefix = phase_day_id[0].lower()
+    try:
+        day_num = int(phase_day_id[1:])
+        return phase_prefix, day_num
+    except ValueError:
+        return None, None
+
+
+def parse_hormone_value(value: Any) -> float:
+    """Coerce hormones_data TEXT hormone fields to float for charts (0 if missing/invalid)."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_previous_phase_day_ids(current_phase_day_id: str, total_ids: int) -> List[str]:
+    """
+    Walk backward in phase-day space to produce a chronological list of phase_day_id strings
+    (oldest first, current last). Used for wellness hormone history charts.
+
+    Phase bounds match the legacy wellness navigator (wider than PHASE_DAY_CAPS used when persisting IDs).
+    """
+    try:
+        phase_prefix, day_num = parse_phase_day_id(current_phase_day_id)
+        if not phase_prefix or day_num is None:
+            logger.debug("Could not parse phase_day_id: %s", current_phase_day_id)
+            return [current_phase_day_id.lower()] if current_phase_day_id else []
+
+        phase_limits = {"p": 12, "f": 30, "o": 8, "l": 25}
+        phase_order = ["p", "f", "o", "l"]
+        phase_day_ids: List[str] = []
+
+        current_day = day_num
+        current_phase = phase_prefix
+        phase_day_ids.append(current_phase_day_id.lower())
+
+        for _ in range(max(0, total_ids - 1)):
+            current_day -= 1
+            if current_day < 1:
+                try:
+                    phase_index = phase_order.index(current_phase)
+                    if phase_index > 0:
+                        current_phase = phase_order[phase_index - 1]
+                    else:
+                        current_phase = phase_order[-1]
+                    current_day = phase_limits.get(current_phase, 1)
+                except ValueError:
+                    logger.debug("Phase %s not in phase_order", current_phase)
+                    break
+                except Exception:
+                    logger.exception("Phase transition error")
+                    break
+
+            phase_limit = phase_limits.get(current_phase, 1)
+            if current_day > phase_limit:
+                current_day = phase_limit
+            if current_day < 1:
+                current_day = 1
+
+            try:
+                phase_name = {
+                    "p": "Period",
+                    "f": "Follicular",
+                    "o": "Ovulation",
+                    "l": "Luteal",
+                }.get(current_phase, "Period")
+                prev_phase_day_id = generate_phase_day_id(phase_name, current_day)
+                phase_day_ids.insert(0, prev_phase_day_id.lower())
+            except Exception:
+                logger.exception("Error generating phase_day_id for phase=%s day=%s", current_phase, current_day)
+                break
+
+        return phase_day_ids
+    except Exception:
+        logger.exception("get_previous_phase_day_ids failed")
+        return [current_phase_day_id.lower()] if current_phase_day_id else []
+
 
 def normal_pdf(x: float, mean: float, sd: float) -> float:
     """
@@ -1123,11 +1212,20 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
         user_response = supabase.table("users").select("cycle_length").eq("id", user_id).execute()
         current_cycle_length = float(user_response.data[0].get("cycle_length", 28)) if user_response.data else 28.0
         
-        # OUTLIER DETECTION: Standard Deviation Filter
-        # If a cycle length is outside (Mean ± 2×SD), mark it as is_outlier
-        # This prevents one weird month (flu, stress) from ruining predictions
+        # OUTLIER DETECTION: Statistical (Mean ± 2×SD) + manual flags on period_start_logs
+        # Do not auto-clear is_outlier in DB (user / API may set it for Bayesian exclusion).
         non_outlier_cycles = []
         if len(cycle_lengths) > 0:
+            outlier_flags = {}
+            try:
+                _or = supabase.table("period_start_logs").select("start_date, is_outlier").eq("user_id", user_id).execute()
+                for row in (_or.data or []):
+                    sd = row.get("start_date")
+                    if sd:
+                        outlier_flags[str(sd)] = bool(row.get("is_outlier"))
+            except Exception:
+                pass
+
             # Calculate statistics
             cycle_mean = sum(cycle_lengths) / len(cycle_lengths)
             if len(cycle_lengths) > 1:
@@ -1142,29 +1240,22 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
             
             print(f"📊 Cycle statistics: mean={cycle_mean:.1f}, sd={cycle_sd:.1f}, outlier_range=[{outlier_threshold_low:.1f}, {outlier_threshold_high:.1f}]")
             
-            # Filter out outliers
             for i in range(1, len(period_starts)):
                 cycle_length = (period_starts[i] - period_starts[i-1]).days
-                is_outlier = cycle_length < outlier_threshold_low or cycle_length > outlier_threshold_high
+                cycle_start_str = period_starts[i - 1].strftime("%Y-%m-%d")
+                manual_outlier = outlier_flags.get(cycle_start_str, False)
+                statistical_outlier = cycle_length < outlier_threshold_low or cycle_length > outlier_threshold_high
                 
-                if is_outlier:
-                    print(f"⚠️ Cycle {period_starts[i-1].strftime('%Y-%m-%d')} to {period_starts[i].strftime('%Y-%m-%d')} ({cycle_length} days) is OUTLIER (outside Mean ± 2×SD)")
-                    # Mark as outlier in period_start_logs
+                if statistical_outlier:
+                    print(f"⚠️ Cycle {cycle_start_str} to {period_starts[i].strftime('%Y-%m-%d')} ({cycle_length} days) is OUTLIER (outside Mean ± 2×SD)")
                     try:
-                        start_date_str = period_starts[i].strftime("%Y-%m-%d")
-                        supabase.table("period_start_logs").update({"is_outlier": True}).eq("user_id", user_id).eq("start_date", start_date_str).execute()
+                        supabase.table("period_start_logs").update({"is_outlier": True}).eq("user_id", user_id).eq("start_date", cycle_start_str).execute()
                     except Exception as e:
                         print(f"⚠️ Could not mark cycle as outlier: {str(e)}")
-                else:
-                    # Not an outlier - include in calculations
-                    if cycle_length in cycle_lengths:
-                        non_outlier_cycles.append(cycle_length)
-                    # Ensure not marked as outlier
-                    try:
-                        start_date_str = period_starts[i].strftime("%Y-%m-%d")
-                        supabase.table("period_start_logs").update({"is_outlier": False}).eq("user_id", user_id).eq("start_date", start_date_str).execute()
-                    except Exception as e:
-                        pass  # Non-critical
+                
+                exclude_from_mean = manual_outlier or statistical_outlier
+                if not exclude_from_mean and cycle_length in cycle_lengths:
+                    non_outlier_cycles.append(cycle_length)
             
             # Use only non-outlier cycles for Bayesian smoothing
             if len(non_outlier_cycles) > 0:

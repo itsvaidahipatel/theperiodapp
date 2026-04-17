@@ -52,6 +52,7 @@ def calculate_rolling_average(user_id: str) -> float:
             c for c in cycles
             if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS
             and not c.get("is_anomaly", False)
+            and not c.get("is_outlier", False)
         ]
         
         if not valid_cycles:
@@ -154,7 +155,11 @@ def calculate_prediction_confidence(user_id: str, language: str = "en") -> Dict:
                 "reason": t("confidence.no_cycle_data", language),
             }
         
-        valid_cycles = [c for c in cycles if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS]
+        valid_cycles = [
+            c for c in cycles
+            if MIN_CYCLE_DAYS <= c["length"] <= MAX_CYCLE_DAYS
+            and not c.get("is_outlier", False)
+        ]
         
         if len(valid_cycles) < 2:
             return {

@@ -58,6 +58,13 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Start notification scheduler on app startup."""
+    try:
+        from routes.ai_chat import configure_genai_on_startup
+
+        configure_genai_on_startup()
+    except Exception as e:
+        print(f"⚠️ Gemini startup configure skipped: {str(e)}")
+
     if NOTIFICATION_SERVICE_AVAILABLE and notification_service:
         try:
             notification_service.start()
