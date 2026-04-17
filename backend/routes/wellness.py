@@ -1,6 +1,7 @@
+import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +21,99 @@ logger = logging.getLogger("periodcycle_ai.wellness")
 HORMONE_DISCLAIMER = (
     "Hormone values are based on standard cycle mapping and are for educational tracking only."
 )
+
+
+def _normalize_interests_list(raw: Any) -> List[str]:
+    """Coerce users.interests (JSONB list, JSON string, or list) into non-empty trimmed strings."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                raw = parsed
+            else:
+                return [s]
+        except json.JSONDecodeError:
+            return [s]
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for x in raw:
+        if x is None:
+            continue
+        t = str(x).strip()
+        if t:
+            out.append(t)
+    return out
+
+
+def _text_matches_interest(text: Optional[Any], interest: str) -> bool:
+    """Case-insensitive overlap: substring either way or equality."""
+    if text is None or not interest:
+        return False
+    t = str(text).strip().lower()
+    i = interest.strip().lower()
+    if not t or not i:
+        return False
+    return i in t or t in i or t == i
+
+
+def _nutrition_interest_score(
+    row: Dict[str, Any],
+    interests: List[str],
+    cuisine_boost: Optional[str],
+) -> int:
+    """Higher score = better match to profile interests / favorite cuisine."""
+    score = 0
+    cuisine = row.get("cuisine")
+    recipe_name = row.get("recipe_name")
+    for interest in interests:
+        if _text_matches_interest(cuisine, interest) or _text_matches_interest(recipe_name, interest):
+            score += 2
+    if cuisine_boost and (
+        _text_matches_interest(cuisine, cuisine_boost) or _text_matches_interest(recipe_name, cuisine_boost)
+    ):
+        score += 1
+    return score
+
+
+def _exercise_interest_score(
+    row: Dict[str, Any],
+    interests: List[str],
+    category_boost: Optional[str],
+) -> int:
+    score = 0
+    cat = row.get("category")
+    name = row.get("exercise_name")
+    desc = row.get("description")
+    for interest in interests:
+        if (
+            _text_matches_interest(cat, interest)
+            or _text_matches_interest(name, interest)
+            or _text_matches_interest(desc, interest)
+        ):
+            score += 2
+    if category_boost and _text_matches_interest(cat, category_boost):
+        score += 1
+    return score
+
+
+def _rank_rows_by_score(
+    rows: List[Dict[str, Any]],
+    score_fn: Callable[[Dict[str, Any]], int],
+) -> List[Dict[str, Any]]:
+    """Stable sort: higher score first; original order preserved among ties."""
+    if not rows:
+        return rows
+    keyed: List[Tuple[int, int, Dict[str, Any]]] = [
+        (-score_fn(r), i, r) for i, r in enumerate(rows)
+    ]
+    keyed.sort(key=lambda t: (t[0], t[1]))
+    return [t[2] for t in keyed]
 
 # Explicit columns for hormones_data (numeric levels + text labels + directional trends).
 _HORMONES_DATA_SELECT = (
@@ -324,10 +418,16 @@ async def get_hormones(
 async def get_nutrition(
     phase_day_id: Optional[str] = Query(None, description="Phase day ID. If not provided, uses today's phase-day ID"),
     language: str = Query("en", description="Language code"),
-    cuisine: Optional[str] = Query(None, description="Cuisine filter"),
+    cuisine: Optional[str] = Query(None, description="Optional strict cuisine filter (query); falls back to all rows if no match"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get nutrition data for a specific phase day. Defaults to today's phase-day ID."""
+    """
+    Nutrition for the resolved phase day.
+
+    Rows are ranked by ``users.interests`` (e.g. South Indian) against ``cuisine`` / ``recipe_name``,
+    then by ``favorite_cuisine`` as a boost. Optional ``cuisine`` query narrows results when matches exist;
+    otherwise all phase-day recipes are returned, interest-matched first.
+    """
     try:
         user_id = current_user["id"]
 
@@ -335,20 +435,33 @@ async def get_nutrition(
         if not resolved:
             return {"recipes": [], "wholefoods": []}
 
-        effective_cuisine = cuisine if cuisine is not None else current_user.get("favorite_cuisine")
-        if effective_cuisine is not None:
-            effective_cuisine = str(effective_cuisine).strip() or None
+        interests = _normalize_interests_list(current_user.get("interests"))
+        favorite_cuisine = current_user.get("favorite_cuisine")
+        favorite_cuisine = str(favorite_cuisine).strip() if favorite_cuisine else None
+        cuisine_query = str(cuisine).strip() if cuisine is not None and str(cuisine).strip() else None
 
         table_name = f"nutrition_{language}"
-        query = supabase.table(table_name).select("*").eq("hormone_id", resolved)
+        recipes_response = supabase.table(table_name).select("*").eq("hormone_id", resolved).execute()
+        rows: List[Dict[str, Any]] = list(recipes_response.data or [])
 
-        if effective_cuisine:
-            query = query.eq("cuisine", effective_cuisine)
+        if cuisine_query:
+            narrowed = [
+                r
+                for r in rows
+                if _text_matches_interest(r.get("cuisine"), cuisine_query)
+                or _text_matches_interest(r.get("recipe_name"), cuisine_query)
+            ]
+            if narrowed:
+                rows = narrowed
 
-        recipes_response = query.execute()
+        cuisine_boost = favorite_cuisine if cuisine_query is None else None
+        ranked = _rank_rows_by_score(
+            rows,
+            lambda r: _nutrition_interest_score(r, interests, cuisine_boost),
+        )
 
         return {
-            "recipes": recipes_response.data or [],
+            "recipes": ranked,
             "wholefoods": [],
         }
 
@@ -361,10 +474,16 @@ async def get_nutrition(
 async def get_exercises(
     phase_day_id: Optional[str] = Query(None, description="Phase day ID. If not provided, uses today's phase-day ID"),
     language: str = Query("en", description="Language code"),
-    category: Optional[str] = Query(None, description="Exercise category"),
+    category: Optional[str] = Query(None, description="Optional category filter; falls back to all rows if no match"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get exercise data for a specific phase day. Defaults to today's phase-day ID."""
+    """
+    Exercises for the resolved phase day.
+
+    Rows are ranked by ``users.interests`` (e.g. Yoga) against ``category``, ``exercise_name``, and
+    ``description``. Optional ``category`` query narrows when matches exist; otherwise all rows are
+    returned with interest matches first.
+    """
     try:
         user_id = current_user["id"]
 
@@ -372,15 +491,33 @@ async def get_exercises(
         if not resolved:
             return {"exercises": []}
 
-        table_name = f"exercises_{language}"
-        query = supabase.table(table_name).select("*").eq("hormone_id", resolved)
-        if category:
-            logger.debug("Exercise category filter requested but not applied (schema may vary): %s", category)
+        interests = _normalize_interests_list(current_user.get("interests"))
+        category_query = str(category).strip() if category is not None and str(category).strip() else None
+        favorite_exercise = current_user.get("favorite_exercise")
+        favorite_exercise = str(favorite_exercise).strip() if favorite_exercise else None
 
-        response = query.execute()
+        table_name = f"exercises_{language}"
+        response = supabase.table(table_name).select("*").eq("hormone_id", resolved).execute()
+        rows: List[Dict[str, Any]] = list(response.data or [])
+
+        if category_query:
+            narrowed = [
+                r
+                for r in rows
+                if _text_matches_interest(r.get("category"), category_query)
+                or _text_matches_interest(r.get("exercise_name"), category_query)
+            ]
+            if narrowed:
+                rows = narrowed
+
+        category_boost = favorite_exercise if category_query is None else None
+        ranked = _rank_rows_by_score(
+            rows,
+            lambda r: _exercise_interest_score(r, interests, category_boost),
+        )
 
         return {
-            "exercises": response.data or [],
+            "exercises": ranked,
         }
 
     except Exception as e:
