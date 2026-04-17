@@ -1,10 +1,12 @@
-from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import asyncio
+import logging
+import os
 
-from database import supabase
+from database import supabase, async_supabase_call, retry_supabase_call
 from routes.auth import get_current_user
 from cycle_utils import (
     get_user_phase_day,
@@ -12,6 +14,7 @@ from cycle_utils import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # NOTE: _prediction_in_progress removed - predictions are now calculated synchronously on-demand
 
@@ -39,7 +42,11 @@ async def predict_cycles(
         
         user = user_response.data[0]
         last_period_date = user.get("last_period_date")
-        cycle_length = user.get("cycle_length", 28)
+        # Type safety: cast cycle_length explicitly
+        try:
+            cycle_length = int(user.get("cycle_length", 28) or 28)
+        except (TypeError, ValueError):
+            cycle_length = 28
         
         if not last_period_date:
             raise HTTPException(
@@ -54,7 +61,7 @@ async def predict_cycles(
             last_period_date_str = str(last_period_date)
         
         # Calculate date range (3 months around current date)
-        current_date_obj = datetime.strptime(current_date, "%Y-%m-%d")
+        current_date_obj = datetime.strptime(str(current_date), "%Y-%m-%d")
         start_date = (current_date_obj - timedelta(days=30)).strftime("%Y-%m-%d")
         end_date = (current_date_obj + timedelta(days=60)).strftime("%Y-%m-%d")
         
@@ -62,7 +69,7 @@ async def predict_cycles(
         phase_mappings = calculate_phase_for_date_range(
             user_id=user_id,
             last_period_date=last_period_date_str,
-            cycle_length=int(cycle_length),
+            cycle_length=cycle_length,
             start_date=start_date,
             end_date=end_date
         )
@@ -79,6 +86,7 @@ async def predict_cycles(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Cycle prediction failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Cycle prediction failed: {str(e)}"
@@ -92,33 +100,57 @@ async def get_current_phase(
     """Get current phase using the same logic as the calendar (calculate_phase_for_date_range).
     If the date is inside a period_log, phase is always Period (p1, p2, ...)."""
     try:
-        from database import supabase
         from cycle_utils import get_period_phase_day_from_logs, calculate_phase_for_date_range
 
         user_id = current_user["id"]
-        check_date = date or datetime.now().strftime("%Y-%m-%d")
+        check_date = str(date or datetime.now().strftime("%Y-%m-%d"))
+        today = datetime.now().date()
 
-        # 1) Fetch user and period_logs once (same as phase-map)
-        user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
-        if not user_response.data or not user_response.data[0]:
+        # Type safety: validate incoming date
+        try:
+            check_date_obj = datetime.strptime(check_date, "%Y-%m-%d").date()
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format. Use YYYY-MM-DD.")
+
+        # 1) Fetch user and period_logs in parallel (reduces latency)
+        @retry_supabase_call(max_retries=3)
+        def _fetch_user():
+            return supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
+
+        @retry_supabase_call(max_retries=3)
+        def _fetch_logs():
+            return supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+
+        user_response, logs_response = await asyncio.gather(
+            async_supabase_call(_fetch_user),
+            async_supabase_call(_fetch_logs),
+        )
+
+        if not getattr(user_response, "data", None) or not user_response.data[0]:
             return {"phase": None, "phase_day_id": None, "id": None, "message": "User data not found."}
+
         user = user_response.data[0]
         last_period_date = user.get("last_period_date")
         if hasattr(last_period_date, "strftime"):
             last_period_date = last_period_date.strftime("%Y-%m-%d") if last_period_date else None
         elif last_period_date is not None and not isinstance(last_period_date, str):
             last_period_date = str(last_period_date)
-        cycle_length = int(user.get("cycle_length", 28))
 
-        logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
-        period_logs = logs_response.data or []
+        # Type safety: cast cycle_length explicitly
+        try:
+            cycle_length = int(user.get("cycle_length", 28) or 28)
+        except (TypeError, ValueError):
+            cycle_length = 28
+
+        period_logs = (getattr(logs_response, "data", None) or [])
 
         # 2) If date is inside a period_log, always return Period + pN (matches calendar)
         period_day_id = get_period_phase_day_from_logs(user_id, period_logs, check_date)
         if period_day_id is not None:
-            if period_day_id.lower() == "p1":
+            # Graceful auto-update: only update last_period_date for today or past, never future dates
+            if period_day_id.lower() == "p1" and check_date_obj <= today:
                 supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
-                print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 in log)")
+                logger.info("Auto-updated last_period_date due to p1 (log)")
             return {
                 "phase": "Period",
                 "phase_day_id": period_day_id,
@@ -148,9 +180,10 @@ async def get_current_phase(
             m = phase_mappings[0]
             phase = m.get("phase") or "Follicular"
             phase_day_id = m.get("phase_day_id") or "f1"
-            if phase_day_id.lower() == "p1":
+            # Graceful auto-update: only update last_period_date for today or past, never future dates
+            if phase_day_id.lower() == "p1" and check_date_obj <= today:
                 supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
-                print(f"Auto-updated last_period_date to {check_date} for user {user_id} (p1 from calc)")
+                logger.info("Auto-updated last_period_date due to p1 (calc)")
             return {
                 "phase": phase,
                 "phase_day_id": phase_day_id,
@@ -166,16 +199,11 @@ async def get_current_phase(
             "id": None,
             "message": "No phase data available. Please set your last period date."
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        print(f"❌ Error in get_current_phase: {str(e)}")
-        traceback.print_exc()
-        return {
-            "phase": None,
-            "phase_day_id": None,
-            "id": None,
-            "message": f"No phase data available: {str(e)}"
-        }
+        logger.exception("Error in get_current_phase")
+        return {"phase": None, "phase_day_id": None, "id": None, "message": f"No phase data available: {str(e)}"}
 
 # NOTE: _generate_phase_map_background removed - predictions are now calculated synchronously on-demand
 
@@ -210,7 +238,11 @@ async def get_phase_map(
         
         user = user_response.data[0]
         last_period_date = user.get("last_period_date")
-        cycle_length = user.get("cycle_length", 28)
+        # Type safety: cast cycle_length explicitly
+        try:
+            cycle_length = int(user.get("cycle_length", 28) or 28)
+        except (TypeError, ValueError):
+            cycle_length = 28
         
         # Log to See Data: no last_period_date -> empty phase map (onboarding collects it)
         if not last_period_date:
@@ -224,7 +256,7 @@ async def get_phase_map(
         else:
             last_period_date_str = str(last_period_date)
         
-        cycle_length_int = int(cycle_length) if cycle_length else 28
+        cycle_length_int = cycle_length
         
         # 2) Fetch period_logs once (source of truth)
         logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
@@ -244,15 +276,15 @@ async def get_phase_map(
                         stored_phases_by_date[str(d)]["is_predicted"] = False
         
         # 3) Validate dates
-        print(f"DEBUG: /phase-map for User {user_id} with anchor {last_period_date_str}, start={start_date or 'auto'}, end={end_date or 'auto'}")
+        logger.info("Phase map requested")
         try:
             datetime.strptime(last_period_date_str, "%Y-%m-%d")
             if start_date:
-                datetime.strptime(start_date, "%Y-%m-%d")
+                datetime.strptime(str(start_date), "%Y-%m-%d")
             if end_date:
-                datetime.strptime(end_date, "%Y-%m-%d")
+                datetime.strptime(str(end_date), "%Y-%m-%d")
         except Exception as date_error:
-            print(f"❌ Invalid date format: {str(date_error)}")
+            logger.error("Invalid date format in phase-map request")
             return {"phase_map": []}
         
         # 4) Calculate phases (dynamic predictions)
@@ -284,10 +316,8 @@ async def get_phase_map(
 
         return {"phase_map": result}
     
-    except Exception as e:
-        print(f"Error getting phase map: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        logger.exception("Error getting phase map")
         return {"phase_map": []}
 
 @router.get("/health-check")
@@ -317,7 +347,11 @@ async def cycle_health_check(
         user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
         user_data = user_response.data[0] if user_response.data else {}
         last_period_date = user_data.get("last_period_date")
-        cycle_length = user_data.get("cycle_length", 28)
+        # Type safety: cast cycle_length explicitly
+        try:
+            cycle_length = int(user_data.get("cycle_length", 28) or 28)
+        except (TypeError, ValueError):
+            cycle_length = 28
         
         # Calculate current cycle stats
         current_cycle_stats = None
@@ -355,8 +389,8 @@ async def cycle_health_check(
                                 # Check if within 7 days of last period
                                 if abs((log_date - last_period_date_only).days) <= 7:
                                     period_days.append(log_date)
-                            except Exception as log_error:
-                                print(f"Error parsing log date: {str(log_error)}")
+                            except Exception:
+                                logger.error("Error parsing period log date in health-check")
                                 continue
                 
                 period_length = len(period_days) if period_days else 5  # Default to 5 if no logs
@@ -373,10 +407,8 @@ async def cycle_health_check(
                     "estimated_next_period": estimated_next.strftime("%Y-%m-%d"),
                     "days_until_next_period": days_until_next
                 }
-            except Exception as e:
-                print(f"Error calculating current cycle stats: {str(e)}")
-                import traceback
-                traceback.print_exc()
+            except Exception:
+                logger.exception("Error calculating current cycle stats")
                 current_cycle_stats = None
         
         # Use PeriodStartLogs for cycle analysis (one log = one cycle start)
@@ -445,74 +477,60 @@ async def cycle_health_check(
         
         # Only perform medical checks if we have sufficient data (2+ cycles)
         if not has_sufficient_data:
-            # Still return timeline and stats, but no abnormalities analysis
+            # Still return timeline and stats, but no abnormalities analysis.
+            # PERFORMANCE: build full timeline in one pass using calculate_phase_for_date_range.
             cycle_timeline = []
-            from cycle_utils import get_user_phase_day, estimate_period_length, predict_ovulation, estimate_luteal, select_ovulation_days
-            
-            # Build timeline even with just 1 period start
-            for i, period_start in enumerate(period_starts):
-                start_date = period_start["start_date"]
-                
-                if isinstance(start_date, str):
-                    start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-                else:
-                    start_date_obj = start_date
-                
-                cycle_number = len(period_starts) - i
-                cycle_length = int(avg_cycle_length) if avg_cycle_length else 28
-                end_date_obj = start_date_obj + timedelta(days=cycle_length)
-                end_date = end_date_obj.strftime("%Y-%m-%d")
-                
-                # Get daily phase data
+
+            # Fetch period logs once (needed for correct "Period" override)
+            logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+            period_logs = logs_response.data or []
+
+            # Build overall range (from first period start to today + avg_cycle_length)
+            first_start = period_starts[0]["start_date"]
+            last_start = period_starts[-1]["start_date"]
+            first_start_dt = datetime.strptime(first_start, "%Y-%m-%d").date() if isinstance(first_start, str) else first_start
+            last_start_dt = datetime.strptime(last_start, "%Y-%m-%d").date() if isinstance(last_start, str) else last_start
+            today = datetime.now().date()
+            horizon_days = int(avg_cycle_length) if avg_cycle_length else 28
+            overall_start = first_start_dt.strftime("%Y-%m-%d")
+            overall_end = (max(today, last_start_dt) + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
+
+            # Normalize anchor last_period_date to string
+            anchor = last_period_date if isinstance(last_period_date, str) else last_period_date.strftime("%Y-%m-%d") if hasattr(last_period_date, "strftime") else None
+            if not anchor:
+                anchor = last_start_dt.strftime("%Y-%m-%d")
+
+            phase_rows = calculate_phase_for_date_range(
+                user_id=user_id,
+                last_period_date=anchor,
+                cycle_length=cycle_length,
+                period_logs=period_logs,
+                start_date=overall_start,
+                end_date=overall_end,
+            ) or []
+            phases_by_date = {str(r.get("date")): (r.get("phase") or "Follicular") for r in phase_rows if r.get("date")}
+
+            # Create cycle boundaries
+            start_dates = [datetime.strptime(ps["start_date"], "%Y-%m-%d").date() if isinstance(ps["start_date"], str) else ps["start_date"] for ps in period_starts]
+            for idx, start_dt in enumerate(start_dates):
+                is_last = idx == len(start_dates) - 1
+                end_dt = (start_dates[idx + 1]) if not is_last else (start_dt + timedelta(days=horizon_days))
+                cycle_len_days = (end_dt - start_dt).days
                 daily_phases = []
-                period_days = int(estimate_period_length(user_id, normalized=True))  # Use normalized for phase calculations
-                luteal_mean, luteal_sd = estimate_luteal(user_id)
-                ov_date_str, calculated_ovulation_sd, _ = predict_ovulation(
-                    start_date_obj.strftime("%Y-%m-%d"),
-                    float(cycle_length),
-                    luteal_mean,
-                    luteal_sd,
-                    cycle_start_sd=None,
-                    user_id=user_id
-                )
-                ovulation_date = datetime.strptime(ov_date_str, "%Y-%m-%d")
-                ovulation_days = select_ovulation_days(calculated_ovulation_sd, max_days=3)
-                
-                current_date = start_date_obj
-                for day in range(cycle_length):
-                    date_str = current_date.strftime("%Y-%m-%d")
-                    phase_data = get_user_phase_day(user_id, date_str)
-                    
-                    if phase_data and phase_data.get("phase"):
-                        phase = phase_data.get("phase")
-                    else:
-                        day_in_cycle = day + 1
-                        offset_from_ov = (current_date - ovulation_date).days
-                        
-                        if day_in_cycle <= period_days:
-                            phase = "Period"
-                        elif offset_from_ov in ovulation_days:
-                            phase = "Ovulation"
-                        elif current_date < ovulation_date:
-                            phase = "Follicular"
-                        else:
-                            phase = "Luteal"
-                    
-                    daily_phases.append({
-                        "date": date_str,
-                        "phase": phase,
-                        "day": day + 1
-                    })
-                    current_date += timedelta(days=1)
-                
+                cur = start_dt
+                for d in range(max(0, cycle_len_days)):
+                    date_str = cur.strftime("%Y-%m-%d")
+                    daily_phases.append({"date": date_str, "phase": phases_by_date.get(date_str, "Follicular"), "day": d + 1})
+                    cur += timedelta(days=1)
+
                 cycle_timeline.append({
-                    "cycle_number": cycle_number,
-                    "start_date": start_date_obj.strftime("%Y-%m-%d"),
-                    "end_date": end_date,
-                    "cycle_length": cycle_length,
-                    "status": "current" if i == len(period_starts) - 1 else "normal",
-                    "is_current": i == len(period_starts) - 1,
-                    "daily_phases": daily_phases
+                    "cycle_number": len(start_dates) - idx,
+                    "start_date": start_dt.strftime("%Y-%m-%d"),
+                    "end_date": end_dt.strftime("%Y-%m-%d"),
+                    "cycle_length": cycle_len_days,
+                    "status": "current" if is_last else "normal",
+                    "is_current": is_last,
+                    "daily_phases": daily_phases,
                 })
             
             # Get current phase and additional stats
@@ -545,8 +563,8 @@ async def cycle_health_check(
                         user_id=user_id
                     )
                     predicted_ovulation_date = predicted_ov_date_str
-            except Exception as e:
-                print(f"Error getting additional stats: {str(e)}")
+            except Exception:
+                logger.exception("Error getting additional stats")
             
             return {
                 "has_sufficient_data": False,
@@ -705,104 +723,50 @@ async def cycle_health_check(
             })
         
         # Build complete cycle timeline with dates and daily phase data
+        # PERFORMANCE: compute all phases in one pass, then slice per cycle.
+        logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+        period_logs = logs_response.data or []
+
+        start_dates = [datetime.strptime(ps["start_date"], "%Y-%m-%d").date() if isinstance(ps["start_date"], str) else ps["start_date"] for ps in period_starts]
+        today = datetime.now().date()
+        horizon_days = int(round(avg_cycle_length)) if avg_cycle_length else 28
+        overall_start = start_dates[0].strftime("%Y-%m-%d")
+        overall_end = (max(today, start_dates[-1]) + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
+
+        anchor = last_period_date if isinstance(last_period_date, str) else last_period_date.strftime("%Y-%m-%d") if hasattr(last_period_date, "strftime") else start_dates[-1].strftime("%Y-%m-%d")
+
+        phase_rows = calculate_phase_for_date_range(
+            user_id=user_id,
+            last_period_date=anchor,
+            cycle_length=cycle_length,
+            period_logs=period_logs,
+            start_date=overall_start,
+            end_date=overall_end,
+        ) or []
+        phases_by_date = {str(r.get("date")): (r.get("phase") or "Follicular") for r in phase_rows if r.get("date")}
+
         cycle_timeline = []
-        from cycle_utils import get_user_phase_day, estimate_period_length, predict_ovulation, estimate_luteal, select_ovulation_days
-        
-        for i, period_start in enumerate(period_starts):
-            start_date = period_start["start_date"]
-            
-            # Parse start date
-            if isinstance(start_date, str):
-                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
-            else:
-                start_date_obj = start_date
-            
-            cycle_number = len(period_starts) - i
-            cycle_length = None
-            end_date = None
-            status = "normal"
-            
-            # Calculate cycle length and end date
-            if i < len(period_starts) - 1:
-                next_start = period_starts[i + 1]["start_date"]
-                if isinstance(next_start, str):
-                    next_start_obj = datetime.strptime(next_start, "%Y-%m-%d")
-                else:
-                    next_start_obj = next_start
-                
-                cycle_length = (next_start_obj - start_date_obj).days
-                end_date = next_start_obj.strftime("%Y-%m-%d")
-                
-                if cycle_length < 21:
-                    status = "short"
-                elif cycle_length > 35:
-                    status = "long"
-            else:
-                # Last cycle - estimate end date
-                cycle_length = int(avg_cycle_length)
-                end_date_obj = start_date_obj + timedelta(days=cycle_length)
-                end_date = end_date_obj.strftime("%Y-%m-%d")
-                status = "current"
-            
-            # Get daily phase data for this cycle
+        for idx, start_dt in enumerate(start_dates):
+            is_last = idx == len(start_dates) - 1
+            end_dt = (start_dates[idx + 1]) if not is_last else (start_dt + timedelta(days=horizon_days))
+            cycle_len_days = (end_dt - start_dt).days
+            status = "current" if is_last else ("short" if cycle_len_days < 21 else "long" if cycle_len_days > 35 else "normal")
+
             daily_phases = []
-            period_days = int(estimate_period_length(user_id))
-            
-            # Calculate ovulation date for this cycle
-            luteal_mean, luteal_sd = estimate_luteal(user_id)
-            ov_date_str, calculated_ovulation_sd, _ = predict_ovulation(
-                start_date_obj.strftime("%Y-%m-%d"),
-                float(cycle_length),
-                luteal_mean,
-                luteal_sd,
-                cycle_start_sd=None,
-                user_id=user_id
-            )
-            ovulation_date = datetime.strptime(ov_date_str, "%Y-%m-%d")
-            
-            # Get ovulation window (fertile days) using calculated SD
-            ovulation_days = select_ovulation_days(calculated_ovulation_sd, max_days=3)
-            
-            # Generate phase for each day in the cycle
-            current_date = start_date_obj
-            for day in range(cycle_length):
-                date_str = current_date.strftime("%Y-%m-%d")
-                
-                # Try to get from database first
-                phase_data = get_user_phase_day(user_id, date_str)
-                
-                if phase_data and phase_data.get("phase"):
-                    phase = phase_data.get("phase")
-                else:
-                    # Calculate phase based on cycle day
-                    day_in_cycle = day + 1
-                    offset_from_ov = (current_date - ovulation_date).days
-                    
-                    if day_in_cycle <= period_days:
-                        phase = "Period"
-                    elif offset_from_ov in ovulation_days:
-                        phase = "Ovulation"
-                    elif current_date < ovulation_date:
-                        phase = "Follicular"
-                    else:
-                        phase = "Luteal"
-                
-                daily_phases.append({
-                    "date": date_str,
-                    "phase": phase,
-                    "day": day + 1
-                })
-                
-                current_date += timedelta(days=1)
-            
+            cur = start_dt
+            for d in range(max(0, cycle_len_days)):
+                date_str = cur.strftime("%Y-%m-%d")
+                daily_phases.append({"date": date_str, "phase": phases_by_date.get(date_str, "Follicular"), "day": d + 1})
+                cur += timedelta(days=1)
+
             cycle_timeline.append({
-                "cycle_number": cycle_number,
-                "start_date": start_date_obj.strftime("%Y-%m-%d"),
-                "end_date": end_date,
-                "cycle_length": cycle_length,
+                "cycle_number": len(start_dates) - idx,
+                "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date": end_dt.strftime("%Y-%m-%d"),
+                "cycle_length": cycle_len_days,
                 "status": status,
-                "is_current": i == len(period_starts) - 1,
-                "daily_phases": daily_phases  # Daily phase data for visual timeline
+                "is_current": is_last,
+                "daily_phases": daily_phases,
             })
         
         # Get current phase and additional stats for dashboard
@@ -848,8 +812,8 @@ async def cycle_health_check(
             else:
                 cycle_regularity = "Irregular"
         
-        except Exception as e:
-            print(f"Error getting additional stats: {str(e)}")
+        except Exception:
+            logger.exception("Error getting additional stats")
         
         return {
             "has_sufficient_data": True,
@@ -876,9 +840,7 @@ async def cycle_health_check(
         }
     
     except Exception as e:
-        print(f"Error in cycle health check: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error in cycle health check")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to analyze cycles: {str(e)}"
@@ -888,6 +850,11 @@ async def cycle_health_check(
 async def debug_cycle_data(current_user: dict = Depends(get_current_user)):
     """Debug endpoint to check cycle data for current user."""
     try:
+        debug_mode = str(os.getenv("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
+        if not debug_mode:
+            # Hide endpoint existence when not in debug mode
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
         user_id = current_user["id"]
         
         # Check period logs
@@ -900,7 +867,6 @@ async def debug_cycle_data(current_user: dict = Depends(get_current_user)):
         user_data = supabase.table("users").select("*").eq("id", user_id).execute()
         
         return {
-            "user_id": user_id,
             "period_logs_count": len(period_logs.data or []),
             "period_logs": period_logs.data or [],
             "cycle_days_count": len(cycle_days.data or []),
@@ -909,4 +875,7 @@ async def debug_cycle_data(current_user: dict = Depends(get_current_user)):
             "user_cycle_length": user_data.data[0].get("cycle_length") if user_data.data else None
         }
     except Exception as e:
-        return {"error": str(e)}
+        if isinstance(e, HTTPException):
+            raise
+        logger.exception("Error in debug_cycle_data")
+        return {"error": "debug_failed"}
