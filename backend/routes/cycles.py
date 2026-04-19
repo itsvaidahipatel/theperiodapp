@@ -244,6 +244,7 @@ async def get_phase_map(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     force_recalculate: bool = False,  # Kept for API compatibility but ignored
+    debug: bool = Query(False, description="If true, include a compact debug slice for the requested range"),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -352,6 +353,23 @@ async def get_phase_map(
                 out.setdefault("is_predicted", True)
                 out.setdefault("is_virtual", out.get("is_virtual", False))
                 result.append(out)
+
+        if debug:
+            debug_rows = []
+            for row in result or []:
+                debug_rows.append(
+                    {
+                        "date": row.get("date"),
+                        "phase": row.get("phase"),
+                        "phase_day_id": row.get("phase_day_id"),
+                        "fertility_prob": row.get("fertility_prob"),
+                        "is_predicted": row.get("is_predicted"),
+                        "is_virtual": row.get("is_virtual"),
+                        "is_fertile_window": row.get("is_fertile_window"),
+                        "is_ovulation_event": row.get("is_ovulation_event"),
+                    }
+                )
+            return {"phase_map": result, "debug_rows": debug_rows}
 
         return {"phase_map": result}
     

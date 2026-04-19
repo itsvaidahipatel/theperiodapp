@@ -121,6 +121,30 @@ def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
     return f"{prefix}{day_in_phase}"
 
 
+def _calendar_phase_day_id(phase: str, day_in_phase: int, *, ovulation_cap: int = 5) -> str:
+    """
+    Phase-day IDs for calendar/phase-map responses.
+
+    Unlike `generate_phase_day_id`, this intentionally does NOT cap ovulation at 3 days:
+    the calendar may represent a wider ovulation-uncertainty window (up to 5 days),
+    and collapsing those to `o3` causes repeated IDs in the UI.
+    """
+    phase_prefix = {
+        "Period": "p",
+        "Menstrual": "p",
+        "Follicular": "f",
+        "Ovulation": "o",
+        "Luteal": "l",
+    }
+    prefix = phase_prefix.get(phase, "p")
+    if prefix == "o":
+        cap = max(1, int(ovulation_cap))
+    else:
+        cap = PHASE_DAY_CAPS.get(phase, 14)
+    day = max(1, min(int(day_in_phase), cap))
+    return f"{prefix}{day}"
+
+
 def parse_phase_day_id(phase_day_id: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
     """Parse phase-day ID like 'f7' into phase prefix ('f') and day number (7)."""
     if not phase_day_id or len(phase_day_id) < 2:
@@ -2126,6 +2150,12 @@ def calculate_phase_for_date_range(
             if not isinstance(day_in_cycle, (int, float)) or day_in_cycle < 1:
                 day_in_cycle = 1
             phase = None
+            is_fertile_window = False
+            is_ovulation_event = False
+
+            # Fertile window: sperm can survive up to ~5 days; represent a 5-day window ending on ovulation day.
+            # We keep the calendar IDs o1..o5 for this window (o5 is the ovulation event day itself).
+            fertile_window_offsets = set(range(-4, 1))  # {-4,-3,-2,-1,0} => 5 days total
             
             # VALIDATION: Ensure day_in_cycle is reasonable (never negative or None)
             if day_in_cycle < 1:
@@ -2162,14 +2192,20 @@ def calculate_phase_for_date_range(
             # MEDICAL RULE: Only days 1-period_days can be Period phase in a cycle
             if 1 <= day_in_cycle <= period_days:
                 phase = "Period"
-            # 2. Ovulation Phase: strictly the days returned by select_ovulation_days (adaptive 3–5 day block)
-            elif offset_from_ov in ovulation_days:
+            # 2. Ovulation event: a single day (offset 0)
+            elif offset_from_ov == 0:
                 phase = "Ovulation"
+                is_ovulation_event = True
+                is_fertile_window = True
+            # 3. Fertile window: 5-day sperm survival window ending on ovulation day
+            elif offset_from_ov in fertile_window_offsets:
+                phase = "Fertile"
+                is_fertile_window = True
             # 3. Follicular Phase: After period, before ovulation block
-            elif day_in_cycle > period_days and (not ovulation_days or offset_from_ov < min(ovulation_days)):
+            elif day_in_cycle > period_days and offset_from_ov < min(fertile_window_offsets):
                 phase = "Follicular"
             # 4. Luteal Phase: After ovulation block until next period
-            elif day_in_cycle > period_days and ovulation_days and offset_from_ov > max(ovulation_days):
+            elif day_in_cycle > period_days and offset_from_ov > 0:
                 phase = "Luteal"
             else:
                 phase = "Follicular"  # Between period and ovulation start, or edge case
@@ -2227,10 +2263,22 @@ def calculate_phase_for_date_range(
                 day_in_phase = day_in_period
                 print(f"✅ OVERRIDE: Date {current_date_str} is in logged period, forcing Period phase (p{day_in_period})")
             else:
-                # Normal phase assignment - increment counter for current phase and get day_in_phase
-                phase_counters[phase] += 1
-                day_in_phase = phase_counters[phase]
-                phase_day_id = generate_phase_day_id(phase, day_in_phase)
+                # Normal phase assignment.
+                #
+                # IMPORTANT: Calendar "O*" IDs represent the *fertile window* (5-day sperm survival window).
+                # `o5` is the ovulation event day (offset 0). Window days are `o1..o4`.
+                if phase in ("Ovulation", "Fertile") and offset_from_ov in fertile_window_offsets:
+                    sorted_offsets = sorted(list(fertile_window_offsets))
+                    try:
+                        day_in_phase = sorted_offsets.index(offset_from_ov) + 1  # -4=>1 ... 0=>5
+                    except ValueError:
+                        day_in_phase = 1
+                    phase_day_id = _calendar_phase_day_id("Ovulation", day_in_phase, ovulation_cap=5)
+                    phase_counters["Ovulation"] = max(phase_counters.get("Ovulation", 0), day_in_phase)
+                else:
+                    phase_counters[phase] += 1
+                    day_in_phase = phase_counters[phase]
+                    phase_day_id = generate_phase_day_id(phase, day_in_phase)
             
             dates_processed += 1
             
@@ -2261,8 +2309,10 @@ def calculate_phase_for_date_range(
                 "source": "local",
                 "is_predicted": is_predicted_value,
                 "is_virtual": is_virtual_value,
+                "is_fertile_window": bool(is_fertile_window),
+                "is_ovulation_event": bool(is_ovulation_event),
                 "prediction_confidence": 0.6 if ovulation_sd > 4.0 else 0.8,
-                "fertility_prob": round(fert_prob, 3),
+                "fertility_prob": float(fert_prob),
                 "predicted_ovulation_date": ovulation_date_str,
                 "luteal_estimate": round(luteal_mean, 2),
                 "luteal_sd": round(luteal_sd, 2),
@@ -2287,6 +2337,43 @@ def calculate_phase_for_date_range(
                     "source": source or "Predicted",
                 })
             current_date += timedelta(days=1)
+
+        # Post-pass: enforce exactly one fertility peak per cycle.
+        #
+        # `fertility_probability` intentionally shapes peak around day -2/-1, which can yield
+        # ties at exactly 1.0. For UI/contract simplicity we guarantee a single peak day
+        # (fertility_prob == 1.0) per predicted ovulation date; other days are nudged below.
+        try:
+            by_ov_date: Dict[str, List[Dict[str, Any]]] = {}
+            for row in phase_mappings:
+                key = str(row.get("predicted_ovulation_date") or "")
+                if not key:
+                    continue
+                by_ov_date.setdefault(key, []).append(row)
+
+            for _ov_date, rows in by_ov_date.items():
+                if not rows:
+                    continue
+                # Choose max fertility_prob; if tie, prefer offset -1, then -2, then closest to 0.
+                def _tie_key(r: Dict[str, Any]) -> Tuple[float, int, int]:
+                    try:
+                        d = datetime.strptime(str(r.get("date")), "%Y-%m-%d")
+                        ov = datetime.strptime(str(r.get("predicted_ovulation_date")), "%Y-%m-%d")
+                        off = (d - ov).days
+                    except Exception:
+                        off = 999
+                    pref = 0 if off == -1 else 1 if off == -2 else 2
+                    return (float(r.get("fertility_prob") or 0.0), -pref, -abs(off))
+
+                peak_row = max(rows, key=_tie_key)
+                for r in rows:
+                    if r is peak_row:
+                        r["fertility_prob"] = 1.0
+                    else:
+                        # Ensure strictly below peak; keep 3dp-friendly values.
+                        r["fertility_prob"] = min(float(r.get("fertility_prob") or 0.0), 0.999)
+        except Exception:
+            logger.exception("Failed to enforce single fertility peak per cycle")
         
         # Build final list: include all dates in range (including virtual backward fill)
         by_date = {m["date"]: m for m in phase_mappings}
