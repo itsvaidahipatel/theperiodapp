@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { format, parseISO, differenceInDays, addDays } from 'date-fns'
 import { getPhaseMap, getPeriodLogs, getCycleStats } from '../utils/api'
+import { enrichPhaseMapItem } from '../utils/phaseMapSlim'
 import { useDataContext } from './DataContext'
 
 const CycleContext = createContext()
@@ -19,14 +20,27 @@ export const useCycleData = useCycleContext
 const PHASE_MAP_DAYS = 304
 const toDateKey = (d) => (typeof d === 'string' ? d.slice(0, 10) : format(d, 'yyyy-MM-dd'))
 
-function buildKeyedPhaseMap(phaseMapArray) {
+function enrichKeyedPhaseMap(raw, todayStr) {
+  const out = {}
+  if (!raw || typeof raw !== 'object') return out
+  Object.entries(raw).forEach(([k, v]) => {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      out[k] = enrichPhaseMapItem({ ...v, date: v.date || k }, todayStr)
+    } else {
+      out[k] = v
+    }
+  })
+  return out
+}
+
+function buildKeyedPhaseMap(phaseMapArray, todayStr) {
   const keyed = {}
   if (!Array.isArray(phaseMapArray)) return keyed
   phaseMapArray.forEach((item) => {
     const d = item?.date
     if (!d) return
     const dateKey = toDateKey(d)
-    if (dateKey.length === 10) keyed[dateKey] = item
+    if (dateKey.length === 10) keyed[dateKey] = enrichPhaseMapItem(item, todayStr)
   })
   return keyed
 }
@@ -99,27 +113,31 @@ export function CycleProvider({ children }) {
       return
     }
     const existingPhaseMap = dashboardDataRef.current?.phaseMap
+    const todayStrBootstrap = format(new Date(), 'yyyy-MM-dd')
     if (existingPhaseMap && Object.keys(existingPhaseMap).length > 0) {
-      setMasterPhaseMap(existingPhaseMap)
+      const enriched = enrichKeyedPhaseMap(existingPhaseMap, todayStrBootstrap)
+      setMasterPhaseMap(enriched)
       phaseMapFetchedAtRef.current = now
-      updatePhaseMapRef.current?.(existingPhaseMap)
+      updatePhaseMapRef.current?.(enriched)
     }
     fetchInProgressRef.current = true
 
     try {
       const nowDate = new Date()
+      const todayStr = format(nowDate, 'yyyy-MM-dd')
       const start = addDays(nowDate, -Math.floor(PHASE_MAP_DAYS / 2))
       const end = addDays(nowDate, Math.floor(PHASE_MAP_DAYS / 2))
       const startDate = format(start, 'yyyy-MM-dd')
       const endDate = format(end, 'yyyy-MM-dd')
 
-      let keyed = existingPhaseMap && Object.keys(existingPhaseMap).length > 0
-        ? existingPhaseMap
-        : null
+      let keyed =
+        existingPhaseMap && Object.keys(existingPhaseMap).length > 0
+          ? enrichKeyedPhaseMap(existingPhaseMap, todayStr)
+          : null
       if (!keyed) {
         const phaseMapResponse = await getPhaseMap(startDate, endDate).catch(() => ({ phase_map: [] }))
         const phaseMapArray = phaseMapResponse?.phase_map || []
-        keyed = buildKeyedPhaseMap(phaseMapArray)
+        keyed = buildKeyedPhaseMap(phaseMapArray, todayStr)
         phaseMapFetchedAtRef.current = Date.now()
         setMasterPhaseMap(keyed)
         updatePhaseMapRef.current?.(keyed)
@@ -140,10 +158,9 @@ export function CycleProvider({ children }) {
 
       const periodStarts = extractPeriodStarts(logs)
       const today = nowDate
-      const todayStr = format(today, 'yyyy-MM-dd')
 
       // Extract virtual cycle starts from phase map (backward-projected cycles before first log)
-      // Virtual cycles are marked with is_virtual=true; find the first Period day of each virtual cycle
+      // Slim phase-map has no is_virtual; treat Period days before first logged start as projected.
       const virtualStarts = []
       if (periodStarts.length > 0 && Object.keys(keyed).length > 0) {
         const firstRealStart = parseISO(periodStarts[0])
@@ -152,10 +169,10 @@ export function CycleProvider({ children }) {
         for (const dateKey of sortedDates) {
           const entry = keyed[dateKey]
           const phase = typeof entry === 'string' ? entry : entry?.phase
-          const isVirtual = typeof entry === 'object' ? (entry.is_virtual === true || entry.isVirtual === true) : false
           const entryDate = parseISO(dateKey)
           if (entryDate >= firstRealStart) break // Stop at first real period
-          if (phase === 'Period' && isVirtual) {
+          // Slim API has no is_virtual; any Period before first logged start is projected backward
+          if (phase === 'Period' && entryDate < firstRealStart) {
             // Check if this is the start of a new virtual cycle (gap from previous Period day)
             if (!lastVirtualPeriodDate || differenceInDays(entryDate, parseISO(lastVirtualPeriodDate)) >= 21) {
               virtualStarts.push(dateKey)

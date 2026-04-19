@@ -1,7 +1,9 @@
+import calendar
 from fastapi import APIRouter, HTTPException, Depends, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 import asyncio
 import logging
 import os
@@ -16,6 +18,28 @@ from cycle_utils import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _shift_calendar_months(d: date, months_delta: int) -> date:
+    """Move calendar date by whole months; clamp day to valid month end."""
+    total = d.year * 12 + (d.month - 1) + months_delta
+    y, m0 = divmod(total, 12)
+    m = m0 + 1
+    last = calendar.monthrange(y, m)[1]
+    return date(y, m, min(d.day, last))
+
+
+def _slim_phase_map_row(date_str: str, phase_day_id) -> Dict:
+    """Minimal payload for mobile cumulative cache: date + phase_day_id only."""
+    d = str(date_str).strip()[:10]
+    return {"date": d, "phase_day_id": phase_day_id}
+
+
+def _phase_map_json_response(body: Dict, cache_max_age: int = 3600) -> JSONResponse:
+    return JSONResponse(
+        content=body,
+        headers={"Cache-Control": f"max-age={cache_max_age}"},
+    )
 
 
 def _late_anchor_shift_days_from_user(user: dict) -> int:
@@ -250,18 +274,23 @@ async def get_phase_map(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     force_recalculate: bool = False,  # Kept for API compatibility but ignored
-    debug: bool = Query(False, description="If true, include a compact debug slice for the requested range"),
     client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Get phase mappings for a date range. Calculates on-demand in RAM.
-    
+
+    Response is slim for mobile caching: each row is only ``date`` and ``phase_day_id``.
+    ``Cache-Control: max-age=3600`` is set so clients may reuse the payload for one hour.
+
+    When ``start_date`` / ``end_date`` are omitted, the range defaults to three calendar
+    months before and after the resolved user "today" (six months total).
+
     NEW STATELESS ARCHITECTURE:
     - Fetches period_logs once (source of truth)
     - Calculates phases in RAM using calculate_phase_for_date_range()
     - Returns JSON immediately (no background tasks, no DB writes)
-    
+
     Args:
         start_date: Start date for phase map (YYYY-MM-DD)
         end_date: End date for phase map (YYYY-MM-DD)
@@ -282,7 +311,7 @@ async def get_phase_map(
         ).eq("id", user_id).execute()
         
         if not user_response.data or not user_response.data[0]:
-            return {"phase_map": []}
+            return _phase_map_json_response({"phase_map": []})
         
         user = user_response.data[0]
         last_period_date = user.get("last_period_date")
@@ -294,7 +323,7 @@ async def get_phase_map(
         
         # Log to See Data: no last_period_date -> empty phase map (onboarding collects it)
         if not last_period_date:
-            return {"phase_map": []}
+            return _phase_map_json_response({"phase_map": []})
         
         # Normalize last_period_date to string
         if hasattr(last_period_date, "strftime"):
@@ -333,13 +362,13 @@ async def get_phase_map(
                 datetime.strptime(str(end_date), "%Y-%m-%d")
         except Exception as date_error:
             logger.error("Invalid date format in phase-map request")
-            return {"phase_map": []}
+            return _phase_map_json_response({"phase_map": []})
 
-        # If client did not send a range, derive the default 3-month window from user_today
+        # Default: 6-month window (3 calendar months back, 3 forward) when range omitted
         if not start_date:
-            start_date = (user_today - timedelta(days=30)).strftime("%Y-%m-%d")
+            start_date = _shift_calendar_months(user_today, -3).strftime("%Y-%m-%d")
         if not end_date:
-            end_date = (user_today + timedelta(days=60)).strftime("%Y-%m-%d")
+            end_date = _shift_calendar_months(user_today, 3).strftime("%Y-%m-%d")
         
         # 4) Calculate phases (dynamic predictions)
         phase_mappings = calculate_phase_for_date_range(
@@ -353,48 +382,27 @@ async def get_phase_map(
             client_today_str=client_today,
         )
 
-        # 5) Override with stored phases where available (immutable past)
+        # 5) Override with stored phases where available (immutable past); slim JSON for caching
         result = []
         for m in phase_mappings or []:
             d = m.get("date")
-            if d and str(d) in stored_phases_by_date:
-                stored = stored_phases_by_date[str(d)]
-                out = dict(stored)
-                out.setdefault("is_predicted", False)
-                out.setdefault("is_virtual", False)
-                result.append(out)
+            if not d:
+                continue
+            dkey = str(d).strip()[:10]
+            if dkey in stored_phases_by_date:
+                stored = stored_phases_by_date[dkey]
+                result.append(_slim_phase_map_row(dkey, stored.get("phase_day_id")))
             else:
-                out = dict(m)
-                # Preserve is_predicted and is_virtual from calculate_phase_for_date_range
-                out.setdefault("is_predicted", True)
-                out.setdefault("is_virtual", out.get("is_virtual", False))
-                result.append(out)
+                result.append(_slim_phase_map_row(dkey, m.get("phase_day_id")))
 
-        if debug:
-            debug_rows = []
-            for row in result or []:
-                debug_rows.append(
-                    {
-                        "date": row.get("date"),
-                        "phase": row.get("phase"),
-                        "phase_day_id": row.get("phase_day_id"),
-                        "fertility_prob": row.get("fertility_prob"),
-                        "is_predicted": row.get("is_predicted"),
-                        "is_virtual": row.get("is_virtual"),
-                        "is_fertile_window": row.get("is_fertile_window"),
-                        "is_ovulation_event": row.get("is_ovulation_event"),
-                        "client_today": client_today,
-                        "server_now_utc": datetime.now(timezone.utc).isoformat(),
-                        "user_today": user_today.strftime("%Y-%m-%d"),
-                    }
-                )
-            return {"phase_map": result, "debug_rows": debug_rows}
-
-        return {"phase_map": result}
+        return _phase_map_json_response({"phase_map": result})
     
     except Exception:
         logger.exception("Error getting phase map")
-        return {"phase_map": []}
+        return JSONResponse(
+            content={"phase_map": []},
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 @router.get("/period-start-logs")

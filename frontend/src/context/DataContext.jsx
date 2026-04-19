@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { loadDashboardData, loadWellnessData, getCachedWellnessData, refreshAllData, preloadAllWellnessData } from '../utils/dataLoader'
+import { enrichPhaseMapItem } from '../utils/phaseMapSlim'
 import { shouldRefetch, clearCache } from '../utils/dataCache'
 import { getUserLanguage } from '../utils/userPreferences'
 
@@ -70,12 +71,13 @@ export const DataProvider = ({ children }) => {
       const data = dashboard || {}
       // Phase map comes from CycleContext (single /cycles/phase-map call). Only key from phase_map if we have data; otherwise keep existing phaseMap
       const dataArray = data.phase_map || []
+      const todayStrForPhase = new Date().toISOString().slice(0, 10)
       let keyedMap = {}
       dataArray.forEach(item => {
         const d = item?.date
         if (!d) return
         const dateKey = typeof d === 'string' ? d.slice(0, 10) : (d.toISOString?.()?.slice(0, 10) || String(d).slice(0, 10))
-        if (dateKey.length === 10) keyedMap[dateKey] = item
+        if (dateKey.length === 10) keyedMap[dateKey] = enrichPhaseMapItem(item, todayStrForPhase)
       })
       if (keyedMap && Object.keys(keyedMap).length > 0) lastPhaseMapFetchedAtRef.current = Date.now()
       setDashboardData(prev => {

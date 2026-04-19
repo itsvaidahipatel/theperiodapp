@@ -3,6 +3,7 @@ import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
 import { format } from 'date-fns'
 import { getPhaseMap } from '../utils/api'
+import { phaseDayIdToPhase } from '../utils/phaseMapSlim'
 
 const PhaseCalendar = ({ onDateClick, selectedDate }) => {
   const [phaseMap, setPhaseMap] = useState({})
@@ -52,7 +53,8 @@ const PhaseCalendar = ({ onDateClick, selectedDate }) => {
       const phaseData = phaseMap[dateStr]
       
       if (phaseData) {
-        return `rounded-full ${getPhaseColor(phaseData.phase)}`
+        const phase = phaseData.phase || phaseDayIdToPhase(phaseData.phase_day_id)
+        return `rounded-full ${getPhaseColor(phase)}`
       }
     }
     return null
