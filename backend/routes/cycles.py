@@ -29,16 +29,41 @@ def _shift_calendar_months(d: date, months_delta: int) -> date:
     return date(y, m, min(d.day, last))
 
 
-def _slim_phase_map_row(date_str: str, phase_day_id) -> Dict:
-    """Minimal payload for mobile cumulative cache: date + phase_day_id only."""
+def _infer_phase_name_from_day_id(phase_day_id) -> Optional[str]:
+    """Derive canonical phase label from phase_day_id prefix (p/f/o/l) when ``phase`` is absent."""
+    if not phase_day_id or not isinstance(phase_day_id, str):
+        return None
+    first = (phase_day_id[0] or "").lower()
+    if first == "p":
+        return "Period"
+    if first == "f":
+        return "Follicular"
+    if first == "o":
+        return "Ovulation"
+    if first == "l":
+        return "Luteal"
+    return None
+
+
+def _slim_phase_map_row(date_str: str, phase_day_id, phase: Optional[str] = None) -> Dict:
+    """
+    Lightweight row for calendar scrolling / HTTP cache: date, human-readable phase, id only.
+    No per-day diagnostics or probabilities.
+    """
     d = str(date_str).strip()[:10]
-    return {"date": d, "phase_day_id": phase_day_id}
+    pname = phase if (phase and isinstance(phase, str) and phase.strip()) else _infer_phase_name_from_day_id(
+        phase_day_id
+    )
+    out: Dict = {"date": d, "phase_day_id": phase_day_id}
+    if pname:
+        out["phase"] = pname
+    return out
 
 
 def _phase_map_json_response(body: Dict, cache_max_age: int = 3600) -> JSONResponse:
     return JSONResponse(
         content=body,
-        headers={"Cache-Control": f"max-age={cache_max_age}"},
+        headers={"Cache-Control": f"public, max-age={cache_max_age}"},
     )
 
 
@@ -280,8 +305,9 @@ async def get_phase_map(
     """
     Get phase mappings for a date range. Calculates on-demand in RAM.
 
-    Response is slim for mobile caching: each row is only ``date`` and ``phase_day_id``.
-    ``Cache-Control: max-age=3600`` is set so clients may reuse the payload for one hour.
+    Response is slim for mobile caching: each row has ``date``, optional ``phase`` (name),
+    and ``phase_day_id``. No heavy per-day fields.
+    ``Cache-Control: public, max-age=3600`` allows shared caches and Dio to reuse for one hour.
 
     When ``start_date`` / ``end_date`` are omitted, the range defaults to three calendar
     months before and after the resolved user "today" (six months total).
@@ -391,9 +417,11 @@ async def get_phase_map(
             dkey = str(d).strip()[:10]
             if dkey in stored_phases_by_date:
                 stored = stored_phases_by_date[dkey]
-                result.append(_slim_phase_map_row(dkey, stored.get("phase_day_id")))
+                result.append(
+                    _slim_phase_map_row(dkey, stored.get("phase_day_id"), stored.get("phase"))
+                )
             else:
-                result.append(_slim_phase_map_row(dkey, m.get("phase_day_id")))
+                result.append(_slim_phase_map_row(dkey, m.get("phase_day_id"), m.get("phase")))
 
         return _phase_map_json_response({"phase_map": result})
     
