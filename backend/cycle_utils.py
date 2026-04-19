@@ -402,8 +402,15 @@ def estimate_period_length(user_id: str, user_observations: Optional[List[float]
             period_logs_response = supabase.table("period_logs").select("date").eq("user_id", user_id).order("date", desc=True).limit(60).execute()
             
             if period_logs_response.data and len(period_logs_response.data) > 0:
-                # Group consecutive dates to form periods
-                dates = sorted([datetime.strptime(log["date"], "%Y-%m-%d") for log in period_logs_response.data if log.get("date")])
+                # Group consecutive dates to form periods (naive calendar midnights only).
+                dates: List[datetime] = []
+                for log in period_logs_response.data:
+                    ds = log.get("date")
+                    if not ds:
+                        continue
+                    d = datetime.strptime(str(ds).strip()[:10], "%Y-%m-%d").date()
+                    dates.append(datetime(d.year, d.month, d.day))
+                dates = sorted(set(dates))
                 
                 # Group consecutive dates into periods
                 periods = []
@@ -748,8 +755,15 @@ def estimate_cycle_start_sd(user_id: str, cycle_length_estimate: float) -> float
             # Not enough data, use base uncertainty
             return base_sd
         
-        # Group consecutive dates into periods (period starts)
-        dates = sorted([datetime.strptime(log["date"], "%Y-%m-%d") for log in period_logs_response.data if log.get("date")])
+        # Group consecutive dates into periods (period starts). Naive calendar-day only.
+        dates = []
+        for log in period_logs_response.data:
+            ds = log.get("date")
+            if not ds:
+                continue
+            d = datetime.strptime(str(ds).strip()[:10], "%Y-%m-%d").date()
+            dates.append(datetime(d.year, d.month, d.day))
+        dates = sorted(set(dates))
         
         if len(dates) < 2:
             return base_sd
@@ -1147,7 +1161,7 @@ def get_user_phase_day(user_id: str, date: Optional[str] = None, prefer_actual: 
         Dict with phase, phase_day_id, or None if not found
     """
     if date is None:
-        date = datetime.now().strftime("%Y-%m-%d")
+        date = get_user_today(None).strftime("%Y-%m-%d")
     
     try:
         # First, check if date is within a logged period (actual data)
@@ -1224,7 +1238,8 @@ def calculate_rolling_cycle_starts(last_period_date: str, cycle_length: float, s
     Returns:
         List of cycle start dates (datetime objects)
     """
-    last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
+    lp = datetime.strptime(str(last_period_date).strip()[:10], "%Y-%m-%d").date()
+    last_period = datetime(lp.year, lp.month, lp.day)
     cycle_starts = [last_period]
     
     # Generate cycles forward until we cover the end_date
@@ -1279,17 +1294,20 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
             # No period logs - use last_period_date and cycle_length from user table
             user_response = supabase.table("users").select("last_period_date, cycle_length").eq("id", user_id).execute()
             if user_response.data and user_response.data[0].get("last_period_date"):
-                last_period = datetime.strptime(user_response.data[0]["last_period_date"], "%Y-%m-%d")
+                lpd = datetime.strptime(
+                    str(user_response.data[0]["last_period_date"]).strip()[:10], "%Y-%m-%d"
+                ).date()
+                last_period = datetime(lpd.year, lpd.month, lpd.day)
                 cycle_length = float(user_response.data[0].get("cycle_length", 28))
                 
                 # Generate rolling predictions
-                today = datetime.now()
+                today_d = get_user_today(None)
                 if not start_date:
-                    start_date_obj = datetime(today.year, today.month - 1, 1)
+                    start_date_obj = datetime(today_d.year, today_d.month - 1, 1)
                 else:
                     start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
                 if not end_date:
-                    end_date_obj = datetime(today.year, today.month + 2, 0)
+                    end_date_obj = datetime(today_d.year, today_d.month + 2, 0)
                 else:
                     end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
                 
@@ -1302,8 +1320,15 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
                 )
             return []
         
-        # Group consecutive dates into periods (period starts)
-        dates = sorted([datetime.strptime(log["date"], "%Y-%m-%d") for log in period_logs_response.data if log.get("date")])
+        # Group consecutive dates into periods (period starts). Naive calendar-day only (no UTC).
+        dates: List[datetime] = []
+        for log in period_logs_response.data or []:
+            ds = log.get("date")
+            if not ds:
+                continue
+            d = datetime.strptime(str(ds).strip()[:10], "%Y-%m-%d").date()
+            dates.append(datetime(d.year, d.month, d.day))
+        dates = sorted(set(dates))
         
         if len(dates) < 1:
             return []
@@ -1455,14 +1480,14 @@ def predict_cycle_starts_from_period_logs(user_id: str, start_date: Optional[str
         # Most recent period start
         most_recent_period = period_starts[-1]
         
-        # Determine date range
-        today = datetime.now()
+        # Determine date range (device-first / IST fallback — never naive server clock)
+        today_d = get_user_today(None)
         if not start_date:
-            start_date_obj = datetime(today.year, today.month - 1, 1)
+            start_date_obj = datetime(today_d.year, today_d.month - 1, 1)
         else:
             start_date_obj = datetime.strptime(start_date, "%Y-%m-%d")
         if not end_date:
-            end_date_obj = datetime(today.year, today.month + 2, 0)
+            end_date_obj = datetime(today_d.year, today_d.month + 2, 0)
         else:
             end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
         
@@ -1768,17 +1793,20 @@ def calculate_phase_for_date_range(
         seen_dates = set()
         for log in period_logs or []:
             date_str = log.get("date")
-            if not date_str or date_str in seen_dates:
+            if not date_str:
+                continue
+            norm = str(date_str).strip()[:10]
+            if norm in seen_dates:
                 continue
             try:
                 # Naive calendar-day only: never attach tzinfo or parse as instant-in-time.
-                d = datetime.strptime(str(date_str).strip()[:10], "%Y-%m-%d").date()
+                d = datetime.strptime(norm, "%Y-%m-%d").date()
                 period_start_dates.append(datetime(d.year, d.month, d.day))
-                seen_dates.add(date_str)
+                seen_dates.add(norm)
             except Exception:
                 continue
         
-        # Assume period_logs was pre-sorted by caller (.order("date")); no redundant sort here.
+        period_start_dates.sort()
         
         # MEDICAL GUARDRAIL: 21-day minimum between cycle starts (ACOG).
         # Logs closer than 21 days are treated as Spotting / same cycle - ignored as new cycle start.
@@ -2485,7 +2513,7 @@ def detect_early_late_period(user_id: str, logged_period_date: str) -> Optional[
         print(f"Error detecting early/late period: {str(e)}")
         return None
 
-def calculate_today_phase_day_id(user_id: str) -> Optional[str]:
+def calculate_today_phase_day_id(user_id: str, client_today_str: Optional[str] = None) -> Optional[str]:
     """
     Calculate today's phase-day ID based on user's last_period_date and cycle_length.
     This is a fallback if cycle predictions haven't been generated yet.
@@ -2508,17 +2536,21 @@ def calculate_today_phase_day_id(user_id: str) -> Optional[str]:
             return None
         
         # Get predicted cycle starts from database (prevents drift)
-        today = datetime.now()
+        today = datetime(*get_user_today(client_today_str).timetuple()[:3])  # naive midnight of resolved today
         today_str = today.strftime("%Y-%m-%d")
         predicted_cycle_starts = get_predicted_cycle_starts_from_db(user_id, None, today_str)
         
         # Find which cycle today belongs to
-        last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
+        lp = datetime.strptime(str(last_period_date).strip()[:10], "%Y-%m-%d").date()
+        last_period = datetime(lp.year, lp.month, lp.day)
         current_cycle_start = None
         
         if predicted_cycle_starts:
             # Use predicted cycle starts (more accurate)
-            cycle_starts = [datetime.strptime(d, "%Y-%m-%d") for d in predicted_cycle_starts]
+            cycle_starts = []
+            for d in predicted_cycle_starts:
+                dd = datetime.strptime(str(d).strip()[:10], "%Y-%m-%d").date()
+                cycle_starts.append(datetime(dd.year, dd.month, dd.day))
             # Find the most recent cycle start <= today
             for cycle_start in cycle_starts:
                 if cycle_start <= today:
@@ -2560,7 +2592,7 @@ def calculate_today_phase_day_id(user_id: str) -> Optional[str]:
         # Calculate ovulation date for this cycle using actual cycle length
         ovulation_offset = actual_cycle_length - luteal_mean
         ovulation_date = current_cycle_start + timedelta(days=int(ovulation_offset))
-        today_date = datetime.now()
+        today_date = today
         
         # Calculate ovulation probability for today to determine ovulation window dynamically
         offset_from_ov = (today_date - ovulation_date).days

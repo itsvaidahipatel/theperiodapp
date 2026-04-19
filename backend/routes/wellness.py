@@ -1,6 +1,5 @@
 import json
 import logging
-from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +9,7 @@ from cycle_utils import (
     calculate_today_phase_day_id,
     get_previous_phase_day_ids,
     get_user_phase_day,
+    get_user_today,
     parse_hormone_value,
 )
 from database import supabase
@@ -141,12 +141,12 @@ class HormoneHistoryPoint(BaseModel):
     lh_label: Optional[str] = None
 
 
-def get_hormone_trends_summary_for_llm(user_id: str) -> str:
+def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[str] = None) -> str:
     """
     Short hormone trend summary for AI system prompts (same source as /wellness/hormones reference data).
     Safe to import from other modules; does not require a FastAPI request context.
     """
-    resolved = _resolve_phase_day_id(user_id, None)
+    resolved = _resolve_phase_day_id(user_id, None, client_today_str)
     if not resolved:
         return (
             "Hormone reference: no phase-day ID available for this user yet "
@@ -215,13 +215,18 @@ def get_hormone_trends_summary_for_llm(user_id: str) -> str:
     )
 
 
-def _resolve_phase_day_id(user_id: str, phase_day_id: Optional[str]) -> Optional[str]:
+def _resolve_phase_day_id(
+    user_id: str,
+    phase_day_id: Optional[str],
+    client_today_str: Optional[str] = None,
+) -> Optional[str]:
     if phase_day_id:
         return phase_day_id.strip().lower()
-    today_phase = get_user_phase_day(user_id, datetime.now().strftime("%Y-%m-%d"), prefer_actual=True)
+    today_str = get_user_today(client_today_str).strftime("%Y-%m-%d")
+    today_phase = get_user_phase_day(user_id, today_str, prefer_actual=True)
     if today_phase and today_phase.get("phase_day_id"):
         return str(today_phase["phase_day_id"]).strip().lower()
-    calculated = calculate_today_phase_day_id(user_id)
+    calculated = calculate_today_phase_day_id(user_id, client_today_str)
     return str(calculated).strip().lower() if calculated else None
 
 
@@ -314,6 +319,10 @@ def _empty_hormone_response(
 async def get_hormones(
     phase_day_id: Optional[str] = Query(None, description="Phase day ID (e.g., p1, f5, o2, l10). If not provided, uses today's phase-day ID"),
     days: int = Query(5, description="Number of days to fetch (default 5: last 4 days + today)"),
+    client_today: Optional[str] = Query(
+        None,
+        description="Device calendar date YYYY-MM-DD; preferred over server/IST for 'today'",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """Get hormone data for a specific phase day. Defaults to today's phase-day ID. Can fetch multiple days for graphs."""
@@ -321,7 +330,7 @@ async def get_hormones(
         user_id = current_user["id"]
         language = current_user.get("language", "en")
 
-        today_phase_day_id = _resolve_phase_day_id(user_id, phase_day_id)
+        today_phase_day_id = _resolve_phase_day_id(user_id, phase_day_id, client_today)
 
         if not today_phase_day_id:
             logger.info("Hormones requested but no phase_day_id could be resolved")
@@ -419,6 +428,10 @@ async def get_nutrition(
     phase_day_id: Optional[str] = Query(None, description="Phase day ID. If not provided, uses today's phase-day ID"),
     language: str = Query("en", description="Language code"),
     cuisine: Optional[str] = Query(None, description="Optional strict cuisine filter (query); falls back to all rows if no match"),
+    client_today: Optional[str] = Query(
+        None,
+        description="Device calendar date YYYY-MM-DD; preferred over server/IST for 'today'",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -431,7 +444,7 @@ async def get_nutrition(
     try:
         user_id = current_user["id"]
 
-        resolved = _resolve_phase_day_id(user_id, phase_day_id)
+        resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
             return {"recipes": [], "wholefoods": []}
 
@@ -475,6 +488,10 @@ async def get_exercises(
     phase_day_id: Optional[str] = Query(None, description="Phase day ID. If not provided, uses today's phase-day ID"),
     language: str = Query("en", description="Language code"),
     category: Optional[str] = Query(None, description="Optional category filter; falls back to all rows if no match"),
+    client_today: Optional[str] = Query(
+        None,
+        description="Device calendar date YYYY-MM-DD; preferred over server/IST for 'today'",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -487,7 +504,7 @@ async def get_exercises(
     try:
         user_id = current_user["id"]
 
-        resolved = _resolve_phase_day_id(user_id, phase_day_id)
+        resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
             return {"exercises": []}
 

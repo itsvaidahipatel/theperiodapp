@@ -1,10 +1,9 @@
 import logging
 import os
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import settings
 from database import supabase
@@ -147,6 +146,10 @@ def _extract_response_text(response: Any) -> str:
 class ChatRequest(BaseModel):
     message: str
     language: Optional[str] = None
+    client_today: Optional[str] = Field(
+        None,
+        description="Device calendar date YYYY-MM-DD for cycle context (preferred over server clock)",
+    )
 
 
 def get_gemini_response(
@@ -259,9 +262,9 @@ async def chat(
         current_phase = None
         phase_day = None
         try:
-            from cycle_utils import get_user_phase_day
+            from cycle_utils import get_user_phase_day, get_user_today
 
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = get_user_today(chat_request.client_today).strftime("%Y-%m-%d")
             phase_data = get_user_phase_day(user_id, today)
             if phase_data:
                 current_phase = phase_data.get("phase")
@@ -270,7 +273,7 @@ async def chat(
             logger.exception("Error resolving current phase for chat context")
 
         try:
-            hormone_context = get_hormone_trends_summary_for_llm(user_id)
+            hormone_context = get_hormone_trends_summary_for_llm(user_id, chat_request.client_today)
         except Exception:
             logger.exception("Hormone context for LLM failed; continuing without")
             hormone_context = "Hormone reference: unavailable."
