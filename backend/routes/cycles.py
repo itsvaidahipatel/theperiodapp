@@ -12,6 +12,7 @@ from database import supabase, async_supabase_call, retry_supabase_call
 from routes.auth import get_current_user
 from cycle_utils import (
     calculate_phase_for_date_range,
+    get_period_phase_day_from_logs,
     get_user_phase_day,
     group_logs_into_episodes,
 )
@@ -29,8 +30,41 @@ def _shift_calendar_months(d: date, months_delta: int) -> date:
     return date(y, m, min(d.day, last))
 
 
+CANONICAL_PHASE_NAMES = frozenset({"Period", "Follicular", "Ovulation", "Luteal"})
+
+
+def _canonical_phase_name(raw: Optional[str]) -> Optional[str]:
+    """
+    Map arbitrary backend/DB strings to one of Period, Follicular, Ovulation, Luteal (Flutter color keys).
+    Returns None if unknown — caller may fall back to phase_day_id inference.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    lower = s.lower()
+    if lower in ("period", "menstrual"):
+        return "Period"
+    if lower == "follicular":
+        return "Follicular"
+    if lower in ("ovulation", "fertile"):
+        return "Ovulation"
+    if lower == "luteal":
+        return "Luteal"
+    if s in CANONICAL_PHASE_NAMES:
+        return s
+    # Title-case match
+    for c in CANONICAL_PHASE_NAMES:
+        if s.lower() == c.lower():
+            return c
+    return None
+
+
 def _infer_phase_name_from_day_id(phase_day_id) -> Optional[str]:
-    """Derive canonical phase label from phase_day_id prefix (p/f/o/l) when ``phase`` is absent."""
+    """Derive canonical phase label from phase_day_id prefix (p/f/o/l)."""
     if not phase_day_id or not isinstance(phase_day_id, str):
         return None
     first = (phase_day_id[0] or "").lower()
@@ -45,19 +79,35 @@ def _infer_phase_name_from_day_id(phase_day_id) -> Optional[str]:
     return None
 
 
-def _slim_phase_map_row(date_str: str, phase_day_id, phase: Optional[str] = None) -> Dict:
+def _resolved_canonical_phase(phase_raw: Optional[str], phase_day_id) -> str:
+    """Always return one of the four canonical names for JSON clients."""
+    return (
+        _canonical_phase_name(phase_raw)
+        or _infer_phase_name_from_day_id(phase_day_id)
+        or "Follicular"
+    )
+
+
+def _slim_phase_map_row(
+    date_str: str,
+    phase_day_id,
+    *,
+    phase_raw: Optional[str] = None,
+    is_predicted: bool,
+) -> Dict:
     """
-    Lightweight row for calendar scrolling / HTTP cache: date, human-readable phase, id only.
-    No per-day diagnostics or probabilities.
+    Lightweight row for calendar / HTTP cache: stable keys for Flutter.
+
+    Keys: date, phase (canonical), phase_day_id, is_predicted (logged vs modeled).
     """
     d = str(date_str).strip()[:10]
-    pname = phase if (phase and isinstance(phase, str) and phase.strip()) else _infer_phase_name_from_day_id(
-        phase_day_id
-    )
-    out: Dict = {"date": d, "phase_day_id": phase_day_id}
-    if pname:
-        out["phase"] = pname
-    return out
+    pname = _resolved_canonical_phase(phase_raw, phase_day_id)
+    return {
+        "date": d,
+        "phase": pname,
+        "phase_day_id": phase_day_id,
+        "is_predicted": bool(is_predicted),
+    }
 
 
 def _phase_map_json_response(body: Dict, cache_max_age: int = 3600) -> JSONResponse:
@@ -177,8 +227,6 @@ async def get_current_phase(
     """Get current phase using the same logic as the calendar (calculate_phase_for_date_range).
     If the date is inside a period_log, phase is always Period (p1, p2, ...)."""
     try:
-        from cycle_utils import get_period_phase_day_from_logs, calculate_phase_for_date_range
-
         user_id = current_user["id"]
         from cycle_utils import get_user_today
 
@@ -241,6 +289,7 @@ async def get_current_phase(
                 "phase_day_id": period_day_id,
                 "date": check_date,
                 "is_actual": True,
+                "is_predicted": False,
             }
 
         # Log to See Data: no last_period_date -> no phase (do not default to today)
@@ -265,17 +314,18 @@ async def get_current_phase(
         )
         if phase_mappings and len(phase_mappings) >= 1:
             m = phase_mappings[0]
-            phase = m.get("phase") or "Follicular"
             phase_day_id = m.get("phase_day_id") or "f1"
+            canon_phase = _resolved_canonical_phase(m.get("phase"), phase_day_id)
             # Graceful auto-update: only update last_period_date for today or past, never future dates
             if phase_day_id.lower() == "p1" and check_date_obj <= today:
                 supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
                 logger.info("Auto-updated last_period_date due to p1 (calc)")
             return {
-                "phase": phase,
+                "phase": canon_phase,
                 "phase_day_id": phase_day_id,
                 "date": check_date,
                 "is_actual": False,
+                "is_predicted": bool(m.get("is_predicted", True)),
                 **{k: m[k] for k in ("fertility_prob", "predicted_ovulation_date", "luteal_estimate") if k in m},
             }
 
@@ -305,8 +355,9 @@ async def get_phase_map(
     """
     Get phase mappings for a date range. Calculates on-demand in RAM.
 
-    Response is slim for mobile caching: each row has ``date``, optional ``phase`` (name),
-    and ``phase_day_id``. No heavy per-day fields.
+    Response is slim for mobile caching: each row has ``date``, canonical ``phase`` (Period /
+    Follicular / Ovulation / Luteal), ``phase_day_id``, and ``is_predicted`` (false for logged
+    bleeding days and immutable snapshot days when marked actual). No heavy per-day fields.
     ``Cache-Control: public, max-age=3600`` allows shared caches and Dio to reuse for one hour.
 
     When ``start_date`` / ``end_date`` are omitted, the range defaults to three calendar
@@ -408,7 +459,8 @@ async def get_phase_map(
             client_today_str=client_today,
         )
 
-        # 5) Override with stored phases where available (immutable past); slim JSON for caching
+        # 5) Override with stored phases where available (immutable past); slim JSON for caching.
+        # Logged bleeding days use get_period_phase_day_from_logs (same source as GET /current-phase).
         result = []
         for m in phase_mappings or []:
             d = m.get("date")
@@ -417,11 +469,36 @@ async def get_phase_map(
             dkey = str(d).strip()[:10]
             if dkey in stored_phases_by_date:
                 stored = stored_phases_by_date[dkey]
+                pid = stored.get("phase_day_id")
+                ipred = bool(stored.get("is_predicted", False))
                 result.append(
-                    _slim_phase_map_row(dkey, stored.get("phase_day_id"), stored.get("phase"))
+                    _slim_phase_map_row(
+                        dkey,
+                        pid,
+                        phase_raw=stored.get("phase"),
+                        is_predicted=ipred,
+                    )
                 )
             else:
-                result.append(_slim_phase_map_row(dkey, m.get("phase_day_id"), m.get("phase")))
+                pid_logs = get_period_phase_day_from_logs(user_id, period_logs, dkey)
+                if pid_logs is not None:
+                    result.append(
+                        _slim_phase_map_row(
+                            dkey,
+                            pid_logs,
+                            phase_raw="Period",
+                            is_predicted=False,
+                        )
+                    )
+                else:
+                    result.append(
+                        _slim_phase_map_row(
+                            dkey,
+                            m.get("phase_day_id"),
+                            phase_raw=m.get("phase"),
+                            is_predicted=bool(m.get("is_predicted", True)),
+                        )
+                    )
 
         return _phase_map_json_response({"phase_map": result})
     
