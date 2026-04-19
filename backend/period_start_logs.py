@@ -120,11 +120,10 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
                     continue
 
         start_dates = sorted(set(start_dates))
-        # Naive-date model: treat stored YYYY-MM-DD strings as absolute truth.
-        # When deciding confirmed/past vs future, use IST as the default calendar day
-        # (or client-provided today via higher-level routes).
-        ist = timezone(timedelta(hours=5, minutes=30))
-        today = datetime.now(ist).date()
+        # Device-first, IST-fallback: background sync has no client_today, so we rely on resolver.
+        from cycle_utils import get_user_today
+
+        today = get_user_today(None)
         client = supabase_admin if supabase_admin else supabase
 
         preserved: Dict[str, Any] = {}

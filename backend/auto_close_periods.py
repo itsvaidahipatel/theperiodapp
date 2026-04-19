@@ -57,10 +57,10 @@ def auto_close_open_periods(user_id: str) -> List[Dict]:
         List of metadata dicts for periods that were auto-closed.
     """
     try:
-        # Naive-date model: use IST calendar day to decide how many days a period has been open.
-        # This avoids early-morning IST requests appearing as "yesterday" on UTC servers.
-        ist = timezone(timedelta(hours=5, minutes=30))
-        today = datetime.now(ist).date()
+        # Device-first, IST-fallback: this runs without client context, so rely on resolver.
+        from cycle_utils import get_user_today
+
+        today = get_user_today(None)
         open_periods = (
             supabase.table("period_logs")
             .select("*")

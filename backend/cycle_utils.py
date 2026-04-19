@@ -24,14 +24,22 @@ def get_user_today(client_today_str: Optional[str] = None) -> date:
     """
     Resolve "today" as a naive calendar date in the user's perspective.
 
-    Naive-date contract:
-    - If the client sends `YYYY-MM-DD`, that is treated as absolute truth.
-    - Otherwise, fall back to IST (UTC+05:30) *date* without ever using naive `datetime.now()`.
+    Device-first, IST-fallback contract:
+    - Priority 1: If the client sends `YYYY-MM-DD`, treat it as absolute truth.
+    - Priority 2 (last resort): Use Asia/Kolkata calendar day.
+
+    Prohibition: never use naive `datetime.now()` which depends on server timezone (often UTC).
     """
     if client_today_str:
         return datetime.strptime(str(client_today_str).strip()[:10], "%Y-%m-%d").date()
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).date()
+    try:
+        import pytz  # type: ignore
+
+        return datetime.now(pytz.timezone("Asia/Kolkata")).date()
+    except Exception:
+        # Fallback without external deps (Python stdlib offset). Kept as last resort.
+        ist = timezone(timedelta(hours=5, minutes=30))
+        return datetime.now(ist).date()
 
 
 def group_logs_into_episodes(
@@ -78,10 +86,8 @@ def group_logs_into_episodes(
     if not bleeding_days:
         return []
 
-    # Avoid server-local naive date.today(); default to IST calendar date for consistency
-    # with the app's naive-date model.
-    ist = timezone(timedelta(hours=5, minutes=30))
-    ref = reference_date if reference_date is not None else datetime.now(ist).date()
+    # Avoid server-local naive date.today(); default to device-first resolver.
+    ref = reference_date if reference_date is not None else get_user_today(None)
     episodes: List[Dict[str, Any]] = []
 
     current_start = bleeding_days[0]
