@@ -6,7 +6,7 @@ All calculations are performed locally without external API dependencies.
 
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 
 # Max day-in-phase bounds for phase_day_id (wellness agents expect these ranges)
 PHASE_DAY_CAPS = {"Period": 10, "Menstrual": 10, "Follicular": 14, "Ovulation": 3, "Luteal": 14}
+
+
+def get_user_today(client_today_str: Optional[str] = None) -> date:
+    """
+    Resolve "today" as a naive calendar date in the user's perspective.
+
+    Naive-date contract:
+    - If the client sends `YYYY-MM-DD`, that is treated as absolute truth.
+    - Otherwise, fall back to IST (UTC+05:30) *date* without ever using naive `datetime.now()`.
+    """
+    if client_today_str:
+        return datetime.strptime(str(client_today_str).strip()[:10], "%Y-%m-%d").date()
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).date()
 
 
 def group_logs_into_episodes(
@@ -64,7 +78,10 @@ def group_logs_into_episodes(
     if not bleeding_days:
         return []
 
-    ref = reference_date if reference_date is not None else date.today()
+    # Avoid server-local naive date.today(); default to IST calendar date for consistency
+    # with the app's naive-date model.
+    ist = timezone(timedelta(hours=5, minutes=30))
+    ref = reference_date if reference_date is not None else datetime.now(ist).date()
     episodes: List[Dict[str, Any]] = []
 
     current_start = bleeding_days[0]
@@ -1577,6 +1594,7 @@ def calculate_phase_for_date_range(
     end_date: Optional[str] = None,
     diagnostic_log: Optional[List[Dict[str, Any]]] = None,
     late_anchor_shift_days: int = 0,
+    client_today_str: Optional[str] = None,
 ) -> List[Dict]:
     """
     Calculate phase mappings for a date range using adaptive, medically credible algorithms.
@@ -1638,11 +1656,11 @@ def calculate_phase_for_date_range(
             print("📭 Zero data: no period_logs and no last_period_date - returning empty phase map")
             return []
 
-        # Default date range: 3 months around today
-        # Ensure start/end are always datetime for consistent comparison in the loop
-        today = datetime.now()
+        # Default date range: 3 months around "user today" (client-provided or IST fallback).
+        # IMPORTANT: never use naive datetime.now() for calendar-day decisions.
+        today_d = get_user_today(client_today_str)
         if not start_date:
-            start_date_obj = datetime(today.year, today.month - 1, 1)
+            start_date_obj = datetime(today_d.year, today_d.month - 1, 1)
         else:
             if isinstance(start_date, str):
                 start_date_obj = datetime.strptime(start_date[:10], "%Y-%m-%d")
@@ -1653,7 +1671,7 @@ def calculate_phase_for_date_range(
                 start_date_obj = datetime.strptime(str(start_date)[:10], "%Y-%m-%d")
 
         if not end_date:
-            end_date_obj = datetime(today.year, today.month + 2, 0)
+            end_date_obj = datetime(today_d.year, today_d.month + 2, 0)
         else:
             if isinstance(end_date, str):
                 end_date_obj = datetime.strptime(end_date[:10], "%Y-%m-%d")

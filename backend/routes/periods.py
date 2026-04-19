@@ -3,7 +3,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from auto_close_periods import auto_close_open_periods
@@ -231,6 +231,7 @@ class CycleStatsAPIResponse(BaseModel):
 @router.post("/log")
 async def log_period(
     log_data: PeriodLogRequest,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -243,7 +244,9 @@ async def log_period(
         user_id = current_user["id"]
         date_obj = parse_period_date(log_data.date)
 
-        today = datetime.now().date()
+        from cycle_utils import get_user_today
+
+        today = get_user_today(client_today)
         if date_obj > today:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -463,6 +466,7 @@ async def get_period_logs(current_user: dict = Depends(get_current_user)):
 @router.get("/predictions")
 async def get_predictions_endpoint(
     count: int = 6,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user),
 ):
     """Get predictions with confidence levels. Returns camelCase."""
@@ -470,7 +474,7 @@ async def get_predictions_endpoint(
         user_id = current_user["id"]
         language = current_user.get("language", "en")
 
-        pred_bundle = get_predictions(user_id, count=count, language=language)
+        pred_bundle = get_predictions(user_id, count=count, language=language, client_today_str=client_today)
         predictions = pred_bundle.get("predictions", [])
         is_late = bool(pred_bundle.get("is_late", False))
         rolling_average = calculate_rolling_average(user_id)
@@ -549,6 +553,7 @@ async def get_period_episodes(current_user: dict = Depends(get_current_user)):
 async def update_period_log(
     log_id: str,
     log_data: PeriodLogUpdate,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -574,7 +579,9 @@ async def update_period_log(
 
             new_date_obj = parse_period_date(new_date)
 
-            today = datetime.now().date()
+            from cycle_utils import get_user_today
+
+            today = get_user_today(client_today)
             if new_date_obj > today:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -733,6 +740,7 @@ async def delete_period_log(
 @router.post("/log-end")
 async def log_period_end(
     end_data: PeriodEndRequest,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user),
 ):
     """Log a period end date."""
@@ -741,7 +749,9 @@ async def log_period_end(
 
         end_date_obj = parse_period_date(end_data.date)
 
-        today = datetime.now().date()
+        from cycle_utils import get_user_today
+
+        today = get_user_today(client_today)
         if end_date_obj > today:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

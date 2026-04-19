@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 import logging
 import os
@@ -42,7 +42,9 @@ async def predict_cycles(
         from missing_period_handler import handle_missing_period
 
         handle_missing_period(user_id)
-        current_date = request.current_date or datetime.now().strftime("%Y-%m-%d")
+        from cycle_utils import get_user_today
+
+        current_date = request.current_date or get_user_today(None).strftime("%Y-%m-%d")
         
         # Get user data
         user_response = supabase.table("users").select(
@@ -120,6 +122,7 @@ async def predict_cycles(
 @router.get("/current-phase")
 async def get_current_phase(
     date: Optional[str] = None,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user)
 ):
     """Get current phase using the same logic as the calendar (calculate_phase_for_date_range).
@@ -128,8 +131,10 @@ async def get_current_phase(
         from cycle_utils import get_period_phase_day_from_logs, calculate_phase_for_date_range
 
         user_id = current_user["id"]
-        check_date = str(date or datetime.now().strftime("%Y-%m-%d"))
-        today = datetime.now().date()
+        from cycle_utils import get_user_today
+
+        today = get_user_today(client_today)
+        check_date = str(date or today.strftime("%Y-%m-%d"))
 
         from missing_period_handler import handle_missing_period_async
 
@@ -207,6 +212,7 @@ async def get_current_phase(
             start_date=check_date,
             end_date=check_date,
             late_anchor_shift_days=_late_anchor_shift_days_from_user(user),
+            client_today_str=client_today,
         )
         if phase_mappings and len(phase_mappings) >= 1:
             m = phase_mappings[0]
@@ -245,6 +251,7 @@ async def get_phase_map(
     end_date: Optional[str] = None,
     force_recalculate: bool = False,  # Kept for API compatibility but ignored
     debug: bool = Query(False, description="If true, include a compact debug slice for the requested range"),
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -262,6 +269,8 @@ async def get_phase_map(
     """
     try:
         user_id = current_user["id"]
+        from cycle_utils import get_user_today
+        user_today = get_user_today(client_today)
 
         from missing_period_handler import handle_missing_period_async
 
@@ -325,6 +334,12 @@ async def get_phase_map(
         except Exception as date_error:
             logger.error("Invalid date format in phase-map request")
             return {"phase_map": []}
+
+        # If client did not send a range, derive the default 3-month window from user_today
+        if not start_date:
+            start_date = (user_today - timedelta(days=30)).strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = (user_today + timedelta(days=60)).strftime("%Y-%m-%d")
         
         # 4) Calculate phases (dynamic predictions)
         phase_mappings = calculate_phase_for_date_range(
@@ -335,6 +350,7 @@ async def get_phase_map(
             start_date=start_date,
             end_date=end_date,
             late_anchor_shift_days=_late_anchor_shift_days_from_user(user),
+            client_today_str=client_today,
         )
 
         # 5) Override with stored phases where available (immutable past)
@@ -367,6 +383,9 @@ async def get_phase_map(
                         "is_virtual": row.get("is_virtual"),
                         "is_fertile_window": row.get("is_fertile_window"),
                         "is_ovulation_event": row.get("is_ovulation_event"),
+                        "client_today": client_today,
+                        "server_now_utc": datetime.now(timezone.utc).isoformat(),
+                        "user_today": user_today.strftime("%Y-%m-%d"),
                     }
                 )
             return {"phase_map": result, "debug_rows": debug_rows}
@@ -448,7 +467,9 @@ async def cycle_health_check(
                 else:
                     last_period_date_only = last_period
                 
-                today = datetime.now().date()
+                from cycle_utils import get_user_today
+
+                today = get_user_today(None)
                 days_since_period = (today - last_period_date_only).days
                 
                 # Get period logs to calculate period length
@@ -567,7 +588,9 @@ async def cycle_health_check(
             last_start = period_starts[-1]["start_date"]
             first_start_dt = datetime.strptime(first_start, "%Y-%m-%d").date() if isinstance(first_start, str) else first_start
             last_start_dt = datetime.strptime(last_start, "%Y-%m-%d").date() if isinstance(last_start, str) else last_start
-            today = datetime.now().date()
+            from cycle_utils import get_user_today
+
+            today = get_user_today(None)
             horizon_days = int(avg_cycle_length) if avg_cycle_length else 28
             overall_start = first_start_dt.strftime("%Y-%m-%d")
             overall_end = (max(today, last_start_dt) + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
@@ -619,7 +642,9 @@ async def cycle_health_check(
             
             try:
                 from cycle_utils import get_user_phase_day
-                today_str = datetime.now().strftime("%Y-%m-%d")
+                from cycle_utils import get_user_today
+
+                today_str = get_user_today(None).strftime("%Y-%m-%d")
                 phase_data = get_user_phase_day(user_id, today_str)
                 
                 if phase_data:
@@ -806,7 +831,9 @@ async def cycle_health_check(
         period_logs = logs_response.data or []
 
         start_dates = [datetime.strptime(ps["start_date"], "%Y-%m-%d").date() if isinstance(ps["start_date"], str) else ps["start_date"] for ps in period_starts]
-        today = datetime.now().date()
+        from cycle_utils import get_user_today
+
+        today = get_user_today(None)
         horizon_days = int(round(avg_cycle_length)) if avg_cycle_length else 28
         overall_start = start_dates[0].strftime("%Y-%m-%d")
         overall_end = (max(today, start_dates[-1]) + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
@@ -857,7 +884,9 @@ async def cycle_health_check(
         try:
             # Get current phase
             from cycle_utils import get_user_phase_day
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            from cycle_utils import get_user_today
+
+            today_str = get_user_today(None).strftime("%Y-%m-%d")
             phase_data = get_user_phase_day(user_id, today_str)
             
             if phase_data:

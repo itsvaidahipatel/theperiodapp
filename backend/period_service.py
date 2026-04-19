@@ -135,7 +135,12 @@ def calculate_ovulation_day(user_id: str, cycle_length: int) -> int:
     return ovulation_day
 
 
-def calculate_prediction_confidence(user_id: str, language: str = "en") -> Dict:
+def calculate_prediction_confidence(
+    user_id: str,
+    language: str = "en",
+    *,
+    client_today_str: Optional[str] = None,
+) -> Dict:
     """
     Calculate confidence level (High/Medium/Low) based on:
     - Number of logged cycles (more = higher confidence)
@@ -235,7 +240,10 @@ def calculate_prediction_confidence(user_id: str, language: str = "en") -> Dict:
                 last_period = datetime.strptime(last_period_str, "%Y-%m-%d").date()
             else:
                 last_period = last_period_str
-            days_since = (datetime.now(timezone.utc).date() - last_period).days
+            from cycle_utils import get_user_today
+
+            today = get_user_today(client_today_str)
+            days_since = (today - last_period).days
             if days_since <= 45:
                 recency_score = 20
             elif days_since <= 90:
@@ -300,7 +308,13 @@ def calculate_prediction_confidence(user_id: str, language: str = "en") -> Dict:
         }
 
 
-def get_predictions(user_id: str, count: int = 6, language: str = "en") -> Dict[str, Any]:
+def get_predictions(
+    user_id: str,
+    count: int = 6,
+    language: str = "en",
+    *,
+    client_today_str: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Generate predictions for next N cycles.
     Each prediction includes:
@@ -338,12 +352,14 @@ def get_predictions(user_id: str, count: int = 6, language: str = "en") -> Dict[
 
         cycle_int = int(round(avg_cycle_length))
         cycle_int = max(MIN_CYCLE_DAYS, min(cycle_int, MAX_CYCLE_DAYS))
-        today = datetime.now(timezone.utc).date()
+        from cycle_utils import get_user_today
+
+        today = get_user_today(client_today_str)
         days_since_last = (today - last_period).days
         is_late = days_since_last > cycle_int + 5
 
         # Get confidence
-        confidence = calculate_prediction_confidence(user_id, language=language)
+        confidence = calculate_prediction_confidence(user_id, language=language, client_today_str=client_today_str)
 
         # Validate count
         count = max(1, min(count, 12))  # Limit to 1-12 predictions
