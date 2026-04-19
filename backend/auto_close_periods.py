@@ -6,7 +6,7 @@ periods that have been open for more than 10 days to prevent "runaway periods"
 from breaking cycle statistics.
 
 Threshold: If current_date > start_date + 10 days and end_date is still NULL:
-Action: Auto-fill end_date with start_date + estimated_period_length (capped at today, UTC).
+Action: Auto-fill end_date with start_date + estimated_period_length (capped at resolved "today": client_today or IST fallback).
 
 TODO: Move this job to a nightly Supabase Edge Function (or pg_cron) so period logging
 requests avoid even this bounded round-trip; keep this module callable from the API for
@@ -15,7 +15,7 @@ immediate consistency when users log periods.
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from cycle_utils import estimate_period_length
 from database import supabase
@@ -44,7 +44,7 @@ def _apply_auto_close_batch(user_id: str, payloads: List[Dict[str, Any]]) -> Non
             logger.exception("Per-row auto-close failed for period id=%s", row.get("id"))
 
 
-def auto_close_open_periods(user_id: str) -> List[Dict]:
+def auto_close_open_periods(user_id: str, client_today_str: Optional[str] = None) -> List[Dict]:
     """
     Auto-close periods that have been open for more than THRESHOLD_DAYS days.
 
@@ -60,7 +60,7 @@ def auto_close_open_periods(user_id: str) -> List[Dict]:
         # Device-first, IST-fallback: this runs without client context, so rely on resolver.
         from cycle_utils import get_user_today
 
-        today = get_user_today(None)
+        today = get_user_today(client_today_str)
         open_periods = (
             supabase.table("period_logs")
             .select("*")

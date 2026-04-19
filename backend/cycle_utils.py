@@ -1771,8 +1771,9 @@ def calculate_phase_for_date_range(
             if not date_str or date_str in seen_dates:
                 continue
             try:
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                period_start_dates.append(date_obj)
+                # Naive calendar-day only: never attach tzinfo or parse as instant-in-time.
+                d = datetime.strptime(str(date_str).strip()[:10], "%Y-%m-%d").date()
+                period_start_dates.append(datetime(d.year, d.month, d.day))
                 seen_dates.add(date_str)
             except Exception:
                 continue
@@ -1813,14 +1814,16 @@ def calculate_phase_for_date_range(
         # COLD START: If period_logs is empty but user.last_period_date exists, use as Real anchor
         # Treat as 'Real' for forward predictions (Persist Fallback)
         if not validated_period_starts and has_last_period:
-            anchor_date = datetime.strptime(str(last_period_date).strip()[:10], "%Y-%m-%d")
+            ad = datetime.strptime(str(last_period_date).strip()[:10], "%Y-%m-%d").date()
+            anchor_date = datetime(ad.year, ad.month, ad.day)
             cycle_starts_raw.append(anchor_date)
             cycle_sources[anchor_date] = "real"
             print(f"📌 Cold start: using last_period_date {last_period_date} as Real anchor for projections")
         
         # Set last_period for backward-reference paths
         if has_last_period:
-            last_period = datetime.strptime(last_period_date, "%Y-%m-%d")
+            lp = datetime.strptime(str(last_period_date).strip()[:10], "%Y-%m-%d").date()
+            last_period = datetime(lp.year, lp.month, lp.day)
         elif validated_period_starts:
             last_period = validated_period_starts[0]
         
@@ -2142,7 +2145,8 @@ def calculate_phase_for_date_range(
             ovulation_date_str = cycle_meta["ovulation_date_str"]
             ovulation_sd = cycle_meta["ovulation_sd"]
             ovulation_days = cycle_meta["ovulation_days"]
-            ovulation_date = datetime.strptime(ovulation_date_str, "%Y-%m-%d")
+            _ov = datetime.strptime(str(ovulation_date_str).strip()[:10], "%Y-%m-%d").date()
+            ovulation_date = datetime(_ov.year, _ov.month, _ov.day)
             
             # Calculate offset from ovulation
             offset_from_ov = (current_date - ovulation_date).days
@@ -2199,7 +2203,8 @@ def calculate_phase_for_date_range(
                                 cycle_meta = cycle_metadata_cache.get(list(cycle_metadata_cache.keys())[0])
                             if cycle_meta:
                                 ovulation_date_str = cycle_meta["ovulation_date_str"]
-                                ovulation_date = datetime.strptime(ovulation_date_str, "%Y-%m-%d")
+                                _ov2 = datetime.strptime(str(ovulation_date_str).strip()[:10], "%Y-%m-%d").date()
+                                ovulation_date = datetime(_ov2.year, _ov2.month, _ov2.day)
                                 offset_from_ov = (current_date - ovulation_date).days
                                 ovulation_days = cycle_meta.get("ovulation_days", {-1, 0, 1})
                             break

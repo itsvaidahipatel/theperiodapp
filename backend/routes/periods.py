@@ -279,7 +279,7 @@ async def log_period(
                 reason = validation.get("reason") or "Cannot log period for this date."
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
-        auto_closed = auto_close_open_periods(user_id)
+        auto_closed = auto_close_open_periods(user_id, client_today_str=client_today)
         if auto_closed:
             logger.info("Auto-closed %s open period(s) before new log", len(auto_closed))
 
@@ -367,7 +367,7 @@ async def log_period(
         saved = response.data[0]
         logger.info("Period log saved start=%s end=%s manual_end=%s", log_data.date, end_date_value, is_manual_end_value)
 
-        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
         update_user_cycle_stats(user_id, period_starts=period_starts)
 
         logged_date = parse_period_date(log_data.date)
@@ -663,7 +663,7 @@ async def update_period_log(
                     detail="Failed to update period log",
                 )
 
-            period_starts = sync_period_start_logs_from_period_logs(user_id)
+            period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
             update_user_cycle_stats(user_id, period_starts=period_starts)
 
             if new_date == old_date or new_date > old_date:
@@ -707,6 +707,7 @@ async def update_period_log(
 @router.delete("/log/{log_id}")
 async def delete_period_log(
     log_id: str,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) for snapshot sync"),
     current_user: dict = Depends(get_current_user),
 ):
     """Delete a period log entry. Recalculates predictions."""
@@ -723,7 +724,7 @@ async def delete_period_log(
 
         supabase.table("period_logs").delete().eq("id", log_id).execute()
 
-        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
         update_user_cycle_stats(user_id, period_starts=period_starts)
 
         return {"message": "Period log deleted"}
@@ -809,7 +810,7 @@ async def log_period_end(
                 detail="Failed to update period log with end date.",
             )
 
-        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
         update_user_cycle_stats(user_id, period_starts=period_starts)
 
         return {
@@ -831,6 +832,7 @@ async def log_period_end(
 @router.patch("/log/{log_id}/anomaly")
 async def toggle_anomaly(
     log_id: str,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) for snapshot sync"),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -849,7 +851,7 @@ async def toggle_anomaly(
             )
 
         start_str = check.data[0]["date"]
-        sync_period_start_logs_from_period_logs(user_id)
+        sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
 
         ps = (
             supabase.table("period_start_logs")

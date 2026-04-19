@@ -43,7 +43,12 @@ def _log_user_id_safe(msg: str, user_id: str, *args: Any) -> None:
 
 
 def _build_cycle_data_json_payload(
-    user_id: str, cycle_start_str: str, cycle_end_str: str, period_logs: List[Dict]
+    user_id: str,
+    cycle_start_str: str,
+    cycle_end_str: str,
+    period_logs: List[Dict],
+    *,
+    client_today_str: Optional[str] = None,
 ) -> Optional[List[Dict]]:
     """
     Build phase rows for a completed cycle (no database writes).
@@ -65,6 +70,7 @@ def _build_cycle_data_json_payload(
             start_date=cycle_start_str,
             end_date=last_day_of_cycle,
             late_anchor_shift_days=0,
+            client_today_str=client_today_str,
         )
         if not phase_mappings:
             return None
@@ -80,7 +86,10 @@ def _build_cycle_data_json_payload(
         return None
 
 
-def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
+def sync_period_start_logs_from_period_logs(
+    user_id: str,
+    client_today_str: Optional[str] = None,
+) -> List[Dict]:
     """
     Sync PeriodStartLogs from period_logs.
 
@@ -120,10 +129,10 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
                     continue
 
         start_dates = sorted(set(start_dates))
-        # Device-first, IST-fallback: background sync has no client_today, so we rely on resolver.
+        # Device-first when client_today is passed from the API; else IST fallback via resolver.
         from cycle_utils import get_user_today
 
-        today = get_user_today(None)
+        today = get_user_today(client_today_str)
         client = supabase_admin if supabase_admin else supabase
 
         preserved: Dict[str, Any] = {}
@@ -176,7 +185,13 @@ def sync_period_start_logs_from_period_logs(user_id: str) -> List[Dict]:
             elif idx < len(start_dates) - 1:
                 next_str = start_dates[idx + 1].strftime("%Y-%m-%d")
                 if sd_str not in preserved:
-                    payload = _build_cycle_data_json_payload(user_id, sd_str, next_str, period_logs_full)
+                    payload = _build_cycle_data_json_payload(
+                        user_id,
+                        sd_str,
+                        next_str,
+                        period_logs_full,
+                        client_today_str=client_today_str,
+                    )
                     if payload is not None:
                         row["cycle_data_json"] = payload
             insert_data.append(row)
