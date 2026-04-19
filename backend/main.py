@@ -78,7 +78,12 @@ async def lifespan(app: FastAPI):
             logger.warning("Error stopping notification scheduler: %s", e)
 
 
-app = FastAPI(title="PeriodCycle.AI API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="PeriodCycle.AI API",
+    version="1.0.0",
+    lifespan=lifespan,
+    redirect_slashes=False,
+)
 
 app.add_middleware(
     CORSMiddleware,

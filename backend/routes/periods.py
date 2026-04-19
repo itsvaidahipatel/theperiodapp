@@ -23,6 +23,7 @@ from period_service import (
 from prediction_cache import hard_invalidate_predictions_from_date, schedule_regenerate_predictions
 from period_start_logs import get_period_start_logs, sync_period_start_logs_from_period_logs
 from routes.auth import get_current_user
+from missing_period_handler import handle_missing_period_async
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -228,25 +229,25 @@ class CycleStatsAPIResponse(BaseModel):
     bleedingEpisodes: List[Any] = Field(default_factory=list)
 
 
-@router.post("/log")
-async def log_period(
+async def record_period_log(
     log_data: PeriodLogRequest,
-    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
-    current_user: dict = Depends(get_current_user),
-):
+    client_today: Optional[str],
+    current_user: dict,
+) -> Dict[str, Any]:
     """
-    Log a period entry.
+    Shared implementation for POST /periods/log and POST /cycles/period-start-logs.
 
-    Idempotency: same start date replay within a few seconds returns the same success payload
-    without duplicating writes. Overlap inside an existing bleed window returns 409 MEDICAL_OVERLAP.
+    Inserts/updates ``period_logs``, syncs anchors, updates ``users.last_period_date``, and runs
+    late-anchor / missing-period handling after a successful write.
     """
+    user_id = current_user["id"]
+    date_obj = parse_period_date(log_data.date)
+
+    from cycle_utils import get_user_today
+
+    today = get_user_today(client_today)
+
     try:
-        user_id = current_user["id"]
-        date_obj = parse_period_date(log_data.date)
-
-        from cycle_utils import get_user_today
-
-        today = get_user_today(client_today)
         if date_obj > today:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -269,6 +270,15 @@ async def log_period(
             estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
             estimated_end_date = date_obj + timedelta(days=estimated_days - 1)
             logger.info("Returning idempotent /log response (recent duplicate submit)")
+            try:
+                await handle_missing_period_async(
+                    user_id, get_user_today(client_today).strftime("%Y-%m-%d")
+                )
+            except Exception:
+                logger.warning(
+                    "handle_missing_period_async failed after idempotent period log (non-blocking)",
+                    exc_info=True,
+                )
             return await _parallel_fetch_post_log_bundle(
                 user_id, existing_row, is_anomaly, estimated_end_date
             )
@@ -420,6 +430,16 @@ async def log_period(
         estimated_days = int(round(max(3.0, min(8.0, rolling_period_avg))))
         display_estimated_end = date_obj + timedelta(days=estimated_days - 1)
 
+        try:
+            await handle_missing_period_async(
+                user_id, get_user_today(client_today).strftime("%Y-%m-%d")
+            )
+        except Exception:
+            logger.warning(
+                "handle_missing_period_async after period log failed (non-blocking)",
+                exc_info=True,
+            )
+
         return await _parallel_fetch_post_log_bundle(
             user_id, saved, is_anomaly, display_estimated_end, cache_invalidation=hard_inv
         )
@@ -431,6 +451,21 @@ async def log_period(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to log period: {str(e)}",
         )
+
+
+@router.post("/log")
+async def log_period(
+    log_data: PeriodLogRequest,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD) to avoid UTC drift"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Log a period entry.
+
+    Idempotency: same start date replay within a few seconds returns the same success payload
+    without duplicating writes. Overlap inside an existing bleed window returns 409 MEDICAL_OVERLAP.
+    """
+    return await record_period_log(log_data, client_today, current_user)
 
 
 @router.get("/logs")

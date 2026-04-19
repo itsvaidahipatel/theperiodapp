@@ -1,7 +1,7 @@
 import calendar
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 from datetime import date, datetime, timedelta
 import asyncio
@@ -129,6 +129,19 @@ def _late_anchor_shift_days_from_user(user: dict) -> int:
 class CyclePredictionRequest(BaseModel):
     past_cycle_data: List[Dict]
     current_date: Optional[str] = None
+
+
+class PeriodStartLogCreate(BaseModel):
+    """Flutter/mobile body for POST /cycles/period-start-logs (same semantics as POST /periods/log)."""
+
+    period_start_date: str = Field(..., description="First bleeding day YYYY-MM-DD")
+    bleeding_days: Optional[int] = Field(
+        None,
+        ge=2,
+        le=8,
+        description="Bleeding duration in days (optional; defaults match /periods/log)",
+    )
+
 
 @router.post("/predict")
 async def predict_cycles(
@@ -525,6 +538,25 @@ async def get_period_start_logs_endpoint(
     user_id = current_user["id"]
     logs = get_period_start_logs(user_id, confirmed_only=confirmed_only)
     return {"period_start_logs": logs}
+
+
+@router.post("/period-start-logs")
+async def post_period_start_logs(
+    body: PeriodStartLogCreate,
+    client_today: Optional[str] = Query(None, description="Client local today (YYYY-MM-DD)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Create a period log from the mobile app (same pipeline as POST /periods/log).
+
+    Inserts into ``period_logs``, syncs anchors, updates ``users.last_period_date``, and runs
+    missing-period / late-anchor logic.
+    """
+    from routes.periods import PeriodLogRequest, record_period_log
+
+    date_str = str(body.period_start_date).strip()[:10]
+    req = PeriodLogRequest(date=date_str, bleeding_days=body.bleeding_days)
+    return await record_period_log(req, client_today, current_user)
 
 
 @router.get("/health-check")
