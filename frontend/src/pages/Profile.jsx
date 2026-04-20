@@ -28,7 +28,7 @@ const Profile = () => {
     confirm_password: '',
   })
   const [notificationData, setNotificationData] = useState({
-    email_notifications_enabled: true,
+    push_notifications_enabled: true,
     upcoming_reminders: true,
     logging_reminders: true,
     health_alerts: true,
@@ -69,7 +69,7 @@ const Profile = () => {
       const prefs = await getNotificationPreferences()
       const notificationPrefs = prefs.notification_preferences || {}
       setNotificationData({
-        email_notifications_enabled: prefs.email_notifications_enabled ?? true,
+        push_notifications_enabled: prefs.push_notifications_enabled ?? true,
         upcoming_reminders: notificationPrefs.upcoming_reminders ?? true,
         logging_reminders: notificationPrefs.logging_reminders ?? true,
         health_alerts: notificationPrefs.health_alerts ?? true,
@@ -165,7 +165,7 @@ const Profile = () => {
     
     try {
       await updateNotificationPreferences({
-        email_notifications_enabled: notificationData.email_notifications_enabled,
+        push_notifications_enabled: notificationData.push_notifications_enabled,
         upcoming_reminders: notificationData.upcoming_reminders,
         logging_reminders: notificationData.logging_reminders,
         health_alerts: notificationData.health_alerts,
@@ -487,7 +487,7 @@ const Profile = () => {
           <form onSubmit={handleNotificationSubmit} className="bg-white rounded-lg shadow-lg p-6 space-y-6">
             <div>
               <p className="text-sm text-gray-600 mb-6">
-                Choose what email notifications you'd like to receive. You can unsubscribe at any time.
+                Choose what push notifications you'd like to receive. You can disable these at any time.
               </p>
             </div>
             
@@ -496,17 +496,17 @@ const Profile = () => {
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Email Notifications
+                    Push Notifications
                   </label>
                   <p className="text-xs text-gray-500">
-                    Master switch for all email notifications. Turn this off to unsubscribe from all emails.
+                    Master switch for all push notifications. Turn this off to disable all reminders and alerts.
                   </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
                     type="checkbox"
-                    name="email_notifications_enabled"
-                    checked={notificationData.email_notifications_enabled}
+                    name="push_notifications_enabled"
+                    checked={notificationData.push_notifications_enabled}
                     onChange={handleNotificationChange}
                     className="sr-only peer"
                   />
@@ -515,7 +515,7 @@ const Profile = () => {
               </div>
             </div>
             
-            {/* Email Type Options */}
+            {/* Push Type Options */}
             <div className="space-y-4">
               <div className="text-sm font-semibold text-gray-700 mb-3">What would you like to receive?</div>
               
@@ -535,10 +535,10 @@ const Profile = () => {
                     name="upcoming_reminders"
                     checked={notificationData.upcoming_reminders}
                     onChange={handleNotificationChange}
-                    disabled={!notificationData.email_notifications_enabled}
+                    disabled={!notificationData.push_notifications_enabled}
                     className="sr-only peer"
                   />
-                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.email_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
+                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.push_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
                 </label>
               </div>
               
@@ -558,10 +558,10 @@ const Profile = () => {
                     name="logging_reminders"
                     checked={notificationData.logging_reminders}
                     onChange={handleNotificationChange}
-                    disabled={!notificationData.email_notifications_enabled}
+                    disabled={!notificationData.push_notifications_enabled}
                     className="sr-only peer"
                   />
-                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.email_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
+                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.push_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
                 </label>
               </div>
               
@@ -581,10 +581,10 @@ const Profile = () => {
                     name="health_alerts"
                     checked={notificationData.health_alerts}
                     onChange={handleNotificationChange}
-                    disabled={!notificationData.email_notifications_enabled}
+                    disabled={!notificationData.push_notifications_enabled}
                     className="sr-only peer"
                   />
-                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.email_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
+                  <div className={`w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-period-pink/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-period-pink ${!notificationData.push_notifications_enabled ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
                 </label>
               </div>
             </div>
@@ -592,8 +592,7 @@ const Profile = () => {
             {/* Unsubscribe Notice */}
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
               <p className="text-xs text-gray-600">
-                <strong>Unsubscribe:</strong> To unsubscribe from all emails, turn off "Email Notifications" above. 
-                You can also unsubscribe by clicking the link in any email you receive.
+                <strong>Disable Push:</strong> To turn off all reminders and alerts, disable "Push Notifications" above.
               </p>
             </div>
 

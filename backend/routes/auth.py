@@ -47,6 +47,10 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+
+class UpdateFcmTokenRequest(BaseModel):
+    fcm_token: str
+
 @retry_supabase_call(max_retries=3, initial_delay=0.5, backoff_factor=2.0)
 def _fetch_user_from_db(user_id: str):
     """Helper function to fetch user from database with retry logic."""
@@ -324,6 +328,42 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     """Get current user information."""
     current_user.pop("password_hash", None)
     return current_user
+
+
+@router.post("/update-fcm-token")
+async def update_fcm_token(
+    request: UpdateFcmTokenRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update authenticated user's FCM token for push notifications."""
+    token = (request.fcm_token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="fcm_token is required",
+        )
+
+    try:
+        user_id = current_user["id"]
+        response = (
+            supabase.table("users")
+            .update({"fcm_token": token, "updated_at": datetime.utcnow().isoformat()})
+            .eq("id", user_id)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update FCM token",
+            )
+        return {"msg": "FCM token updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update FCM token: {str(e)}",
+        )
 
 @router.post("/logout")
 async def logout():

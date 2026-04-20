@@ -26,10 +26,11 @@ CREATE TABLE IF NOT EXISTS users (
     luteal_mean DOUBLE PRECISION,
     luteal_sd DOUBLE PRECISION,
     -- Notifications
-    email_notifications_enabled BOOLEAN DEFAULT TRUE,
+    push_notifications_enabled BOOLEAN DEFAULT TRUE,
+    fcm_token TEXT,
     notification_preferences JSONB DEFAULT '{}'::jsonb,
-    last_email_sent_date DATE,
-    last_anomaly_email_cycle_start DATE,
+    last_notification_sent_date DATE,
+    last_anomaly_notification_cycle_start DATE,
     -- Late-period anchor shift (stateless calendar)
     late_period_anchor_shift_days INTEGER NOT NULL DEFAULT 0,
     late_period_last_shift_at TIMESTAMPTZ,

@@ -162,6 +162,13 @@ export const logout = async () => {
   return { msg: 'logged out' }
 }
 
+export const updateFcmToken = async (fcmToken) => {
+  return apiRequest('/auth/update-fcm-token', {
+    method: 'POST',
+    body: JSON.stringify({ fcm_token: fcmToken }),
+  })
+}
+
 // User API functions
 export const updateUserProfile = async (profileData) => {
   const data = await apiRequest('/user/profile', {

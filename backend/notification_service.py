@@ -1,23 +1,22 @@
 """
-Clean Email Notification Service
-Implements 3 email types:
+Clean Push Notification Service
+Implements 3 push types:
 1. Upcoming Period Reminder (7 days before, 3 days before - optional, max 1-2 per cycle)
 2. Period Logging Reminder (during predicted period, once per day, stops when logged)
 3. Health/Anomaly Alert (rare, max 1 per cycle)
 
 Rules:
-- Max 1 email per day per user
+- Max 1 push notification per day per user
 - Auto-cancel on period log
 - Respect user preferences
 - Never send duplicates
 """
-import asyncio
-from datetime import datetime, timedelta, date
-from typing import Optional, Dict, List
+from datetime import datetime, timedelta
+from typing import Dict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from database import supabase
-from email_service import email_service
+from push_notification_service import send_push_notification
 from cycle_utils import predict_cycle_starts_from_period_logs
 from period_start_logs import get_last_confirmed_period_start
 from cycle_stats import get_cycle_stats
@@ -27,7 +26,7 @@ import json
 scheduler = AsyncIOScheduler(timezone="UTC")
 
 class NotificationService:
-    """Service for managing clean email notifications."""
+    """Service for managing clean push notifications."""
     
     def __init__(self):
         self.scheduler = scheduler
@@ -40,61 +39,55 @@ class NotificationService:
             self.scheduler.add_job(
                 self.check_all_notifications,
                 trigger=CronTrigger(hour=9, minute=0),  # 9 AM UTC daily
-                id="daily_email_check",
+                id="daily_push_check",
                 replace_existing=True
             )
             self.scheduler.start()
             self.running = True
-            print("✅ Email notification scheduler started")
+            print("✅ Push notification scheduler started")
     
     def stop(self):
         """Stop the notification scheduler."""
         if self.running:
             self.scheduler.shutdown()
             self.running = False
-            print("🛑 Email notification scheduler stopped")
+            print("🛑 Push notification scheduler stopped")
     
     async def check_all_notifications(self):
         """Check and send notifications for all users who have them enabled."""
         try:
-            print(f"🔔 Running daily email check at {datetime.now()}")
+            print(f"🔔 Running daily push check at {datetime.now()}")
             
-            # Get all users with email notifications enabled
+            # Get all users with push notifications enabled
             response = supabase.table("users").select(
-                "id, name, email, email_notifications_enabled, notification_preferences, "
-                "last_email_sent_date, last_anomaly_email_cycle_start, language"
-            ).eq("email_notifications_enabled", True).execute()
+                "id, name, push_notifications_enabled, notification_preferences, "
+                "last_notification_sent_date, last_anomaly_notification_cycle_start, language"
+            ).eq("push_notifications_enabled", True).execute()
             
             if not response.data:
-                print("No users with email notifications enabled")
+                print("No users with push notifications enabled")
                 return
             
             users = response.data
-            print(f"Found {len(users)} users with email notifications enabled")
+            print(f"Found {len(users)} users with push notifications enabled")
             
             for user in users:
                 try:
-                    await self.check_user_emails(user)
+                    await self.check_user_notifications(user)
                 except Exception as e:
-                    print(f"❌ Error checking emails for user {user.get('id')}: {str(e)}")
+                    print(f"❌ Error checking notifications for user {user.get('id')}: {str(e)}")
                     continue
             
-            print(f"✅ Email check completed for {len(users)} users")
+            print(f"✅ Push check completed for {len(users)} users")
             
         except Exception as e:
-            print(f"❌ Error in daily email check: {str(e)}")
+            print(f"❌ Error in daily push check: {str(e)}")
             import traceback
             traceback.print_exc()
     
-    async def check_user_emails(self, user: Dict):
-        """Check and send emails for a specific user."""
+    async def check_user_notifications(self, user: Dict):
+        """Check and send push notifications for a specific user."""
         user_id = user.get("id")
-        email = user.get("email")
-        name = user.get("name", "User")
-        language = user.get("language", "en")
-        
-        if not email:
-            return
         
         # Parse notification preferences
         preferences = user.get("notification_preferences", {})
@@ -105,18 +98,18 @@ class NotificationService:
                 preferences = {}
         
         
-        # Enforce max 1 email per day
-        last_email_date = user.get("last_email_sent_date")
+        # Enforce max 1 push per day
+        last_notification_date = user.get("last_notification_sent_date")
         today = datetime.now().date()
         
-        if last_email_date:
-            if isinstance(last_email_date, str):
-                last_email_date_obj = datetime.strptime(last_email_date, "%Y-%m-%d").date()
+        if last_notification_date:
+            if isinstance(last_notification_date, str):
+                last_notification_date_obj = datetime.strptime(last_notification_date, "%Y-%m-%d").date()
             else:
-                last_email_date_obj = last_email_date
+                last_notification_date_obj = last_notification_date
             
-            if last_email_date_obj == today:
-                print(f"⏸️ Already sent email today for user {user_id}")
+            if last_notification_date_obj == today:
+                print(f"⏸️ Already sent push today for user {user_id}")
                 return
         
         # Check upcoming period reminder
@@ -135,9 +128,7 @@ class NotificationService:
         """Check if user needs an upcoming period reminder (7 days or 3 days before)."""
         try:
             user_id = user.get("id")
-            email = user.get("email")
             name = user.get("name", "User")
-            language = user.get("language", "en")
             
             # Get next predicted period start
             predicted_starts = predict_cycle_starts_from_period_logs(user_id, max_cycles=3)
@@ -177,17 +168,16 @@ class NotificationService:
                 should_send = True
             
             if should_send:
-                success = email_service.send_upcoming_period_reminder_email(
-                    to_email=email,
-                    user_name=name,
-                    predicted_date=next_period.strftime("%Y-%m-%d"),
-                    days_until=days_until,
-                    language=language
+                success = send_push_notification(
+                    user_id=user_id,
+                    title="Upcoming Reminder",
+                    body=f"Hi {name}, your next period is expected around {next_period.strftime('%Y-%m-%d')} ({days_until} day(s) away).",
+                    category="upcoming_reminders",
                 )
                 
                 if success:
-                    self._update_last_email_date(user_id)
-                    print(f"✅ Upcoming period reminder sent to {email} ({days_until} days before)")
+                    self._update_last_notification_date(user_id)
+                    print(f"✅ Upcoming period push sent to user {user_id} ({days_until} days before)")
         
         except Exception as e:
             print(f"❌ Error checking upcoming period reminder for user {user.get('id')}: {str(e)}")
@@ -196,9 +186,7 @@ class NotificationService:
         """Check if user needs a period logging reminder (during predicted period window)."""
         try:
             user_id = user.get("id")
-            email = user.get("email")
             name = user.get("name", "User")
-            language = user.get("language", "en")
             
             # Get predicted period starts
             predicted_starts = predict_cycle_starts_from_period_logs(user_id, max_cycles=3)
@@ -245,16 +233,16 @@ class NotificationService:
                 return
             
             # Send reminder (once per day during predicted period)
-            success = email_service.send_period_logging_reminder_email(
-                to_email=email,
-                user_name=name,
-                predicted_date=predicted_start_date.strftime("%Y-%m-%d"),
-                language=language
+            success = send_push_notification(
+                user_id=user_id,
+                title="Logging Reminder",
+                body=f"Hi {name}, don't forget to log your period if it started today.",
+                category="logging_reminders",
             )
             
             if success:
-                self._update_last_email_date(user_id)
-                print(f"✅ Period logging reminder sent to {email}")
+                self._update_last_notification_date(user_id)
+                print(f"✅ Period logging push sent to user {user_id}")
         
         except Exception as e:
             print(f"❌ Error checking period logging reminder for user {user.get('id')}: {str(e)}")
@@ -265,12 +253,10 @@ class NotificationService:
         """Check if user needs a health anomaly alert (rare, max 1 per cycle)."""
         try:
             user_id = user.get("id")
-            email = user.get("email")
             name = user.get("name", "User")
-            language = user.get("language", "en")
             
-            # Get last anomaly email cycle start
-            last_anomaly_cycle_start = user.get("last_anomaly_email_cycle_start")
+            # Get last anomaly notification cycle start
+            last_anomaly_cycle_start = user.get("last_anomaly_notification_cycle_start")
             
             # Get current cycle start
             current_cycle_start = get_last_confirmed_period_start(user_id)
@@ -283,7 +269,7 @@ class NotificationService:
             else:
                 current_cycle_start_date = current_cycle_start
             
-            # Check if we already sent anomaly email for this cycle
+            # Check if we already sent anomaly notification for this cycle
             if last_anomaly_cycle_start:
                 if isinstance(last_anomaly_cycle_start, str):
                     last_anomaly_date = datetime.strptime(last_anomaly_cycle_start, "%Y-%m-%d").date()
@@ -295,7 +281,7 @@ class NotificationService:
                     return
             
             # Get cycle stats to detect anomalies
-            # Notification emails should use user's language when available.
+            # Health alert copy can still use user's language when available.
             language = user.get("language", "en") if isinstance(user, dict) else "en"
             stats = get_cycle_stats(user_id, language=language)
             
@@ -337,36 +323,35 @@ class NotificationService:
                 anomaly_description = f"It's been {days_since_last} days since your last period. This is longer than typical."
             
             if anomaly_detected:
-                success = email_service.send_health_anomaly_alert_email(
-                    to_email=email,
-                    user_name=name,
-                    anomaly_type=anomaly_type,
-                    anomaly_description=anomaly_description,
-                    language=language
+                success = send_push_notification(
+                    user_id=user_id,
+                    title="Health Alert",
+                    body=f"Hi {name}, {anomaly_description}",
+                    category="health_alerts",
                 )
                 
                 if success:
-                    self._update_last_email_date(user_id)
-                    # Update last anomaly email cycle start
+                    self._update_last_notification_date(user_id)
+                    # Update last anomaly notification cycle start
                     supabase.table("users").update({
-                        "last_anomaly_email_cycle_start": current_cycle_start_date.strftime("%Y-%m-%d")
+                        "last_anomaly_notification_cycle_start": current_cycle_start_date.strftime("%Y-%m-%d")
                     }).eq("id", user_id).execute()
-                    print(f"✅ Health anomaly alert sent to {email} ({anomaly_type})")
+                    print(f"✅ Health anomaly push sent to user {user_id} ({anomaly_type})")
         
         except Exception as e:
             print(f"❌ Error checking health anomaly alert for user {user.get('id')}: {str(e)}")
             import traceback
             traceback.print_exc()
     
-    def _update_last_email_date(self, user_id: str):
-        """Update last_email_sent_date to today."""
+    def _update_last_notification_date(self, user_id: str):
+        """Update last_notification_sent_date to today."""
         try:
             today = datetime.now().date().strftime("%Y-%m-%d")
             supabase.table("users").update({
-                "last_email_sent_date": today
+                "last_notification_sent_date": today
             }).eq("id", user_id).execute()
         except Exception as e:
-            print(f"⚠️ Error updating last_email_sent_date: {str(e)}")
+            print(f"⚠️ Error updating last_notification_sent_date: {str(e)}")
 
 # Create singleton instance
 notification_service = NotificationService()

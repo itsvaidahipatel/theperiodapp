@@ -74,7 +74,7 @@ class ProfileUpdate(BaseModel):
     interests: Optional[list] = None
 
 
-class NotificationPreferencesPayload(BaseModel):
+class NotificationPreferencesDto(BaseModel):
     """Validated shape for users.notification_preferences (JSONB)."""
 
     model_config = ConfigDict(extra="ignore")
@@ -115,7 +115,7 @@ class NotificationPreferencesPayload(BaseModel):
 
 
 class NotificationPreferencesUpdate(BaseModel):
-    email_notifications_enabled: Optional[bool] = None
+    push_notifications_enabled: Optional[bool] = None
     notification_preferences: Optional[Dict[str, Any]] = None
     upcoming_reminders: Optional[bool] = None
     logging_reminders: Optional[bool] = None
@@ -256,21 +256,21 @@ async def remove_item(
         )
 
 
-def _coerce_notification_preferences(raw: Any) -> NotificationPreferencesPayload:
+def _coerce_notification_preferences(raw: Any) -> NotificationPreferencesDto:
     """Normalize DB JSONB (dict or legacy JSON string) via Pydantic."""
-    return NotificationPreferencesPayload.model_validate(raw)
+    return NotificationPreferencesDto.model_validate(raw)
 
 
 @router.get("/notification-preferences")
 async def get_notification_preferences(current_user: dict = Depends(get_current_user)):
     """Get user's notification preferences."""
     try:
-        email_enabled = current_user.get("email_notifications_enabled", True)
+        push_enabled = current_user.get("push_notifications_enabled", True)
         raw_prefs = current_user.get("notification_preferences")
         prefs = _coerce_notification_preferences(raw_prefs if raw_prefs is not None else {})
 
         return {
-            "email_notifications_enabled": email_enabled,
+            "push_notifications_enabled": push_enabled,
             "notification_preferences": prefs.model_dump(),
         }
 
@@ -291,8 +291,8 @@ async def update_notification_preferences(
         user_id = current_user["id"]
         update_data: Dict[str, Any] = {}
 
-        if preferences.email_notifications_enabled is not None:
-            update_data["email_notifications_enabled"] = preferences.email_notifications_enabled
+        if preferences.push_notifications_enabled is not None:
+            update_data["push_notifications_enabled"] = preferences.push_notifications_enabled
 
         current_prefs = _coerce_notification_preferences(
             current_user.get("notification_preferences")
@@ -332,7 +332,7 @@ async def update_notification_preferences(
         logger.info("Notification preferences updated for user")
         return {
             "message": "Notification preferences updated successfully",
-            "email_notifications_enabled": updated_user.get("email_notifications_enabled", True),
+            "push_notifications_enabled": updated_user.get("push_notifications_enabled", True),
             "notification_preferences": final_prefs.model_dump(),
         }
 
