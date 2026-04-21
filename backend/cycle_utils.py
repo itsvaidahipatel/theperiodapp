@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 
 # Deprecated RapidAPI stubs moved to legacy_utils.py. All cycle predictions use calculate_phase_for_date_range().
 
-# Max day-in-phase bounds for phase_day_id (wellness agents expect these ranges)
-PHASE_DAY_CAPS = {"Period": 10, "Menstrual": 10, "Follicular": 14, "Ovulation": 3, "Luteal": 14}
+# Max day-in-phase bounds for phase_day_id (calendar + wellness: p1–p10, f1–f14, o1–o5, l1–l14).
+# Ovulation uses five IDs (o1–o5) for the uncertainty / pre-ovulation window aligned with the calendar.
+PHASE_DAY_CAPS = {"Period": 10, "Follicular": 14, "Ovulation": 5, "Luteal": 14}
 
 
 def get_user_today(client_today_str: Optional[str] = None) -> date:
@@ -129,14 +130,13 @@ def group_logs_into_episodes(
 def generate_phase_day_id(phase: str, day_in_phase: int) -> str:
     """
     Generate phase-day ID based on phase and day.
-    Capped to match wellness DB (p1-p10, f1-f14, o1-o3, l1-l14).
+    Canonical phases only: Period, Follicular, Ovulation, Luteal (p1–p10, f1–f14, o1–o5, l1–l14).
     """
     phase_prefix = {
         "Period": "p",
-        "Menstrual": "p",
         "Follicular": "f",
         "Ovulation": "o",
-        "Luteal": "l"
+        "Luteal": "l",
     }
     prefix = phase_prefix.get(phase, "p")
     cap = PHASE_DAY_CAPS.get(phase, 14)
@@ -148,20 +148,19 @@ def _calendar_phase_day_id(phase: str, day_in_phase: int, *, ovulation_cap: int 
     """
     Phase-day IDs for calendar/phase-map responses.
 
-    Unlike `generate_phase_day_id`, this intentionally does NOT cap ovulation at 3 days:
-    the calendar may represent a wider ovulation-uncertainty window (up to 5 days),
-    and collapsing those to `o3` causes repeated IDs in the UI.
+    Ovulation uses o1–o5 by default (ovulation_cap=5) so the five-day window maps to distinct IDs
+    without collapsing early days into o3.
     """
     phase_prefix = {
         "Period": "p",
-        "Menstrual": "p",
         "Follicular": "f",
         "Ovulation": "o",
         "Luteal": "l",
     }
     prefix = phase_prefix.get(phase, "p")
     if prefix == "o":
-        cap = max(1, int(ovulation_cap))
+        max_o = PHASE_DAY_CAPS.get("Ovulation", 5)
+        cap = max(1, min(int(ovulation_cap), max_o))
     else:
         cap = PHASE_DAY_CAPS.get(phase, 14)
     day = max(1, min(int(day_in_phase), cap))
@@ -2254,9 +2253,9 @@ def calculate_phase_for_date_range(
                 phase = "Ovulation"
                 is_ovulation_event = True
                 is_fertile_window = True
-            # 3. Fertile window: 5-day sperm survival window ending on ovulation day
+            # 3. Pre-ovulation window (same canonical phase as peak day): o1–o4 before o5 peak
             elif offset_from_ov in fertile_window_offsets:
-                phase = "Fertile"
+                phase = "Ovulation"
                 is_fertile_window = True
             # 3. Follicular Phase: After period, before ovulation block
             elif day_in_cycle > period_days and offset_from_ov < min(fertile_window_offsets):
@@ -2324,7 +2323,7 @@ def calculate_phase_for_date_range(
                 #
                 # IMPORTANT: Calendar "O*" IDs represent the *fertile window* (5-day sperm survival window).
                 # `o5` is the ovulation event day (offset 0). Window days are `o1..o4`.
-                if phase in ("Ovulation", "Fertile") and offset_from_ov in fertile_window_offsets:
+                if phase == "Ovulation" and offset_from_ov in fertile_window_offsets:
                     sorted_offsets = sorted(list(fertile_window_offsets))
                     try:
                         day_in_phase = sorted_offsets.index(offset_from_ov) + 1  # -4=>1 ... 0=>5

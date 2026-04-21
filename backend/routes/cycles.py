@@ -80,12 +80,19 @@ def _infer_phase_name_from_day_id(phase_day_id) -> Optional[str]:
 
 
 def _resolved_canonical_phase(phase_raw: Optional[str], phase_day_id) -> str:
-    """Always return one of the four canonical names for JSON clients."""
-    return (
+    """
+    Always return exactly one of: Period, Follicular, Ovulation, Luteal (strict Title-Case).
+    No alternate spellings or lowercase variants reach clients.
+    """
+    resolved = (
         _canonical_phase_name(phase_raw)
         or _infer_phase_name_from_day_id(phase_day_id)
         or "Follicular"
     )
+    for canonical in ("Period", "Follicular", "Ovulation", "Luteal"):
+        if isinstance(resolved, str) and resolved.lower() == canonical.lower():
+            return canonical
+    return "Follicular"
 
 
 def _slim_phase_map_row(
@@ -370,7 +377,7 @@ async def get_phase_map(
 
     Response is slim for mobile caching: each row has ``date``, canonical ``phase`` (Period /
     Follicular / Ovulation / Luteal), ``phase_day_id``, and ``is_predicted`` (false for logged
-    bleeding days and immutable snapshot days when marked actual). No heavy per-day fields.
+    bleeding days). Phases are always from RAM calculation, not stored cycle snapshots. No heavy per-day fields.
     ``Cache-Control: public, max-age=3600`` allows shared caches and Dio to reuse for one hour.
 
     When ``start_date`` / ``end_date`` are omitted, the range defaults to three calendar
@@ -429,19 +436,10 @@ async def get_phase_map(
         logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
         period_logs = logs_response.data or []
 
-        # 2b) Fetch stored cycle_data_json from period_start_logs (immutable past)
-        from period_start_logs import get_period_start_logs
-        period_starts_with_cycle = get_period_start_logs(user_id, confirmed_only=False)
-        stored_phases_by_date = {}  # date_str -> {phase, phase_day_id, is_predicted: False, ...}
-        for ps in period_starts_with_cycle or []:
-            cycle_json = ps.get("cycle_data_json")
-            if cycle_json and isinstance(cycle_json, list):
-                for entry in cycle_json:
-                    d = entry.get("date")
-                    if d:
-                        stored_phases_by_date[str(d)] = dict(entry)
-                        stored_phases_by_date[str(d)]["is_predicted"] = False
-        
+        # Single source of truth: phases come from calculate_phase_for_date_range in RAM only.
+        # Stored snapshots in period_start_logs.cycle_data_json are intentionally NOT merged here
+        # so settings changes (e.g. cycle_length) reflect immediately on the calendar.
+
         # 3) Validate dates
         logger.info("Phase map requested")
         try:
@@ -472,46 +470,33 @@ async def get_phase_map(
             client_today_str=client_today,
         )
 
-        # 5) Override with stored phases where available (immutable past); slim JSON for caching.
-        # Logged bleeding days use get_period_phase_day_from_logs (same source as GET /current-phase).
+        # 5) Fresh RAM phases only; logged bleeding days still use get_period_phase_day_from_logs
+        # (same source as GET /current-phase) so explicit logs stay Period on those dates.
         result = []
         for m in phase_mappings or []:
             d = m.get("date")
             if not d:
                 continue
             dkey = str(d).strip()[:10]
-            if dkey in stored_phases_by_date:
-                stored = stored_phases_by_date[dkey]
-                pid = stored.get("phase_day_id")
-                ipred = bool(stored.get("is_predicted", False))
+            pid_logs = get_period_phase_day_from_logs(user_id, period_logs, dkey)
+            if pid_logs is not None:
                 result.append(
                     _slim_phase_map_row(
                         dkey,
-                        pid,
-                        phase_raw=stored.get("phase"),
-                        is_predicted=ipred,
+                        pid_logs,
+                        phase_raw="Period",
+                        is_predicted=False,
                     )
                 )
             else:
-                pid_logs = get_period_phase_day_from_logs(user_id, period_logs, dkey)
-                if pid_logs is not None:
-                    result.append(
-                        _slim_phase_map_row(
-                            dkey,
-                            pid_logs,
-                            phase_raw="Period",
-                            is_predicted=False,
-                        )
+                result.append(
+                    _slim_phase_map_row(
+                        dkey,
+                        m.get("phase_day_id"),
+                        phase_raw=m.get("phase"),
+                        is_predicted=bool(m.get("is_predicted", True)),
                     )
-                else:
-                    result.append(
-                        _slim_phase_map_row(
-                            dkey,
-                            m.get("phase_day_id"),
-                            phase_raw=m.get("phase"),
-                            is_predicted=bool(m.get("is_predicted", True)),
-                        )
-                    )
+                )
 
         return _phase_map_json_response({"phase_map": result})
     
