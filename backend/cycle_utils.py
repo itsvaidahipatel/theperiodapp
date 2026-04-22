@@ -1719,9 +1719,6 @@ def calculate_phase_for_date_range(
         phase_mappings = []
         current_date = start_date_obj
         
-        # Initialize phase counters dictionary for tracking phase days per cycle
-        phase_counters_by_cycle = {}
-        
         # last_period is only needed when we have no logs (for fallback path we exit early) or for backward ref; set after we have validated_period_starts
         last_period = None
         
@@ -2145,14 +2142,6 @@ def calculate_phase_for_date_range(
             cycle_start_str = current_cycle_start.strftime("%Y-%m-%d")
             metadata_key = use_metadata_from_cycle_str if use_metadata_from_cycle_str else cycle_start_str
             
-            # Phase counters are per-cycle (keyed by cycle_start_str). When date moves to a new
-            # anchor (e.g. predicted cycle in a gap), this lookup creates a new counter set at 0,
-            # so the cycle starts over at P1 -> F1 -> O1 -> L1.
-            if cycle_start_str not in phase_counters_by_cycle:
-                phase_counters_by_cycle[cycle_start_str] = {
-                    "Period": 0, "Follicular": 0, "Ovulation": 0, "Luteal": 0
-                }
-            
             # Get cached cycle metadata (when projecting backward/virtual, use nearest real cycle's metadata if available)
             cycle_meta = cycle_metadata_cache.get(metadata_key)
             # If virtual cycle has no metadata, use first real cycle's metadata as fallback
@@ -2206,17 +2195,6 @@ def calculate_phase_for_date_range(
             if ovulation_sd > 4.0:
                 fert_prob *= 0.7
             
-            # Get phase counters for this cycle
-            phase_counters = phase_counters_by_cycle[cycle_start_str]
-            
-            # Explicitly reset phase counters at cycle boundary
-            # This prevents counters from continuing from previous cycle if phases are skipped
-            if current_date == current_cycle_start:
-                phase_counters["Period"] = 0
-                phase_counters["Follicular"] = 0
-                phase_counters["Ovulation"] = 0
-                phase_counters["Luteal"] = 0
-            
             # MEDICALLY ACCURATE PHASE CALCULATION (inspired by reference code)
             # This ensures fast, accurate phase assignment based on cycle day
             day_in_cycle = days_in_current_cycle if days_in_current_cycle is not None else 1
@@ -2226,9 +2204,11 @@ def calculate_phase_for_date_range(
             is_fertile_window = False
             is_ovulation_event = False
 
-            # Fertile window: sperm can survive up to ~5 days; represent a 5-day window ending on ovulation day.
-            # We keep the calendar IDs o1..o5 for this window (o5 is the ovulation event day itself).
-            fertile_window_offsets = set(range(-4, 1))  # {-4,-3,-2,-1,0} => 5 days total
+            # Phase boundaries use absolute cycle day offsets to keep phase IDs continuous
+            # across month boundaries (e.g. L4 on Apr 30 -> L5 on May 1).
+            period_end_day = min(5, max(1, int(actual_cycle_length) if actual_cycle_length else 5))
+            ovulation_window_start_day = max(period_end_day + 1, int(fertile_window_start))
+            ovulation_window_end_day = min(int(actual_cycle_length), max(ovulation_window_start_day, int(fertile_window_end)))
             
             # VALIDATION: Ensure day_in_cycle is reasonable (never negative or None)
             if day_in_cycle < 1:
@@ -2262,34 +2242,29 @@ def calculate_phase_for_date_range(
                 print(f"⚠️ WARNING: day_in_cycle < 1 for date {current_date.strftime('%Y-%m-%d')}, cycle start {current_cycle_start.strftime('%Y-%m-%d')}. Setting to 1.")
                 day_in_cycle = 1
             
-            # 1. Period Phase: Days 1 to period_days (IDs: p1-p12)
-            # MEDICAL RULE: Only days 1-period_days can be Period phase in a cycle
-            if 1 <= day_in_cycle <= period_days:
+            # 1. Period Phase: fixed Days 1-5
+            if 1 <= day_in_cycle <= period_end_day:
                 phase = "Period"
-            # 2. Ovulation event: a single day (offset 0)
-            elif offset_from_ov == 0:
-                phase = "Ovulation"
-                is_ovulation_event = True
-                is_fertile_window = True
-            # 3. Pre-ovulation window (same canonical phase as peak day): o1–o4 before o5 peak
-            elif offset_from_ov in fertile_window_offsets:
+            # 2. Ovulation window: map to o1..oN by position within fertile window days
+            elif ovulation_window_start_day <= day_in_cycle <= ovulation_window_end_day:
                 phase = "Ovulation"
                 is_fertile_window = True
-            # 3. Follicular Phase: After period, before ovulation block
-            elif day_in_cycle > period_days and offset_from_ov < min(fertile_window_offsets):
+                is_ovulation_event = (offset_from_ov == 0)
+            # 3. Follicular Phase: after Period and before ovulation window
+            elif period_end_day < day_in_cycle < ovulation_window_start_day:
                 phase = "Follicular"
-            # 4. Luteal Phase: After ovulation block until next period
-            elif day_in_cycle > period_days and offset_from_ov > 0:
+            # 4. Luteal Phase: after ovulation window
+            elif day_in_cycle > ovulation_window_end_day:
                 phase = "Luteal"
             else:
-                phase = "Follicular"  # Between period and ovulation start, or edge case
+                phase = "Follicular"  # Edge-case fallback
             
-            # MEDICAL VALIDATION: Period only on days 1–period_days
-            if phase == "Period" and (day_in_cycle < 1 or day_in_cycle > period_days):
-                print(f"❌ ERROR: Attempted to assign Period phase to day {day_in_cycle} (valid range: 1-{period_days}). Fixing to correct phase.")
-                if offset_from_ov in ovulation_days:
+            # MEDICAL VALIDATION: Period only on days 1-5
+            if phase == "Period" and (day_in_cycle < 1 or day_in_cycle > period_end_day):
+                print(f"❌ ERROR: Attempted to assign Period phase to day {day_in_cycle} (valid range: 1-{period_end_day}). Fixing to correct phase.")
+                if ovulation_window_start_day <= day_in_cycle <= ovulation_window_end_day:
                     phase = "Ovulation"
-                elif ovulation_days and offset_from_ov > max(ovulation_days):
+                elif day_in_cycle > ovulation_window_end_day:
                     phase = "Luteal"
                 else:
                     phase = "Follicular"
@@ -2332,27 +2307,23 @@ def calculate_phase_for_date_range(
                 # Date is in a logged period - override phase to Period (cap for wellness DB)
                 phase = "Period"
                 phase_day_id = f"p{min(day_in_period, PHASE_DAY_CAPS.get('Period', 10))}"
-                # Reset Period counter for this cycle to match logged period day
-                phase_counters["Period"] = day_in_period
                 day_in_phase = day_in_period
                 print(f"✅ OVERRIDE: Date {current_date_str} is in logged period, forcing Period phase (p{day_in_period})")
             else:
-                # Normal phase assignment.
-                #
-                # IMPORTANT: Calendar "O*" IDs represent the *fertile window* (5-day sperm survival window).
-                # `o5` is the ovulation event day (offset 0). Window days are `o1..o4`.
-                if phase == "Ovulation" and offset_from_ov in fertile_window_offsets:
-                    sorted_offsets = sorted(list(fertile_window_offsets))
-                    try:
-                        day_in_phase = sorted_offsets.index(offset_from_ov) + 1  # -4=>1 ... 0=>5
-                    except ValueError:
-                        day_in_phase = 1
-                    phase_day_id = _calendar_phase_day_id("Ovulation", day_in_phase, ovulation_cap=5)
-                    phase_counters["Ovulation"] = max(phase_counters.get("Ovulation", 0), day_in_phase)
+                # Build stable phase day IDs directly from absolute day_in_cycle offsets.
+                if phase == "Period":
+                    day_in_phase = day_in_cycle
+                    phase_day_id = generate_phase_day_id("Period", day_in_phase)
+                elif phase == "Ovulation":
+                    day_in_phase = (day_in_cycle - ovulation_window_start_day) + 1
+                    ovulation_window_length = max(1, (ovulation_window_end_day - ovulation_window_start_day) + 1)
+                    phase_day_id = _calendar_phase_day_id("Ovulation", day_in_phase, ovulation_cap=ovulation_window_length)
+                elif phase == "Follicular":
+                    day_in_phase = max(1, day_in_cycle - period_end_day)
+                    phase_day_id = generate_phase_day_id("Follicular", day_in_phase)
                 else:
-                    phase_counters[phase] += 1
-                    day_in_phase = phase_counters[phase]
-                    phase_day_id = generate_phase_day_id(phase, day_in_phase)
+                    day_in_phase = max(1, day_in_cycle - ovulation_window_end_day)
+                    phase_day_id = generate_phase_day_id("Luteal", day_in_phase)
             
             dates_processed += 1
             
@@ -2364,9 +2335,15 @@ def calculate_phase_for_date_range(
             
             # Ensure phase_day_id is set if phase exists
             if phase and not phase_day_id:
-                # Increment counter for the phase and generate phase_day_id
-                phase_counters[phase] += 1
-                day_in_phase = phase_counters[phase]
+                # Fallback: derive from cycle-day math, never from mutable counters.
+                if phase == "Period":
+                    day_in_phase = max(1, day_in_cycle)
+                elif phase == "Ovulation":
+                    day_in_phase = max(1, day_in_cycle - ovulation_window_start_day + 1)
+                elif phase == "Follicular":
+                    day_in_phase = max(1, day_in_cycle - period_end_day)
+                else:
+                    day_in_phase = max(1, day_in_cycle - ovulation_window_end_day)
                 phase_day_id = generate_phase_day_id(phase, day_in_phase)
                 print(f"⚠️ Catch-all: Generated phase_day_id {phase_day_id} for date {current_date.strftime('%Y-%m-%d')}")
             
