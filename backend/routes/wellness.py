@@ -117,7 +117,7 @@ def _rank_rows_by_score(
 # Explicit columns for hormones_data_v2 schema.
 _HORMONES_DATA_SELECT = (
     "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
-    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type, brain_note, created_at"
+    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type"
 )
 
 
@@ -257,14 +257,10 @@ def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any
         "best_work_type": best_work_type_obj,
         # Compatibility extras
         "phase_day_id": phase_day_id_from_db,
-        "brain_note": hormone_data.get("brain_note"),
         "energy_level": hormone_data.get("energy", {}).get("level")
         if isinstance(hormone_data.get("energy"), dict)
         else hormone_data.get("energy_level"),
         "emotional_summary": mood_obj.get("summary") if isinstance(mood_obj, dict) else None,
-        "physical_summary": hormone_data.get("brain_note", {}).get("summary")
-        if isinstance(hormone_data.get("brain_note"), dict)
-        else None,
     }
 
 
