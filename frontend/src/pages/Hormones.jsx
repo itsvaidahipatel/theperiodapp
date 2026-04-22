@@ -246,14 +246,6 @@ const Hormones = () => {
               )}
             </div>
 
-            {/* Brain Note - Full Width Below */}
-            {todayData.brain_note && (
-              <div className="bg-yellow-50 rounded-lg p-6 border-l-4 border-yellow-400">
-                <h3 className="text-lg font-semibold mb-3 text-yellow-800">{t('hormones.brainNote')}</h3>
-                <p className="text-gray-700">{getLocalizedText(todayData.brain_note, language) || 'N/A'}</p>
-              </div>
-            )}
-
             {/* Today's Hormone Values with Trends */}
             <div className="grid md:grid-cols-2 gap-6">
               {[

@@ -404,7 +404,39 @@ export const getHormonesData = async (phaseDayId = null, days = 5) => {
   const url = phaseDayId 
     ? `/wellness/hormones?phase_day_id=${phaseDayId}&days=${days}`
     : `/wellness/hormones?days=${days}`
-  return apiRequest(url)
+  const normalizeHormoneRow = (row) => {
+    const safe = row && typeof row === 'object' ? row : {}
+    const toObj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {})
+    return {
+      ...safe,
+      id: safe.id ?? null,
+      estrogen: safe.estrogen ?? null,
+      estrogen_trend: safe.estrogen_trend ?? null,
+      progesterone: safe.progesterone ?? null,
+      progesterone_trend: safe.progesterone_trend ?? null,
+      fsh: safe.fsh ?? null,
+      fsh_trend: safe.fsh_trend ?? null,
+      lh: safe.lh ?? null,
+      lh_trend: safe.lh_trend ?? null,
+      mood: toObj(safe.mood),
+      energy: safe.energy ?? null,
+      best_work_type: toObj(safe.best_work_type),
+    }
+  }
+  try {
+    const data = await apiRequest(url)
+    const safeData = data && typeof data === 'object' ? data : {}
+    return {
+      ...safeData,
+      today: safeData.today ? normalizeHormoneRow(safeData.today) : safeData.today,
+      history: Array.isArray(safeData.history)
+        ? safeData.history.map((item) => normalizeHormoneRow(item))
+        : safeData.history,
+    }
+  } catch (error) {
+    console.warn('getHormonesData normalization fallback due to error:', error?.message || error)
+    throw error
+  }
 }
 
 export const getNutritionData = async (phaseDayId = null, language = 'en', cuisine = null) => {

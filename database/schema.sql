@@ -134,38 +134,34 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 
 -- ---------------------------------------------------------------------------
--- hormones_data — reference rows keyed by phase_day_id string (e.g. p1, f5, l10)
+-- hormones_data_v2 — reference rows keyed by phase_day_id string (e.g. p1, f5, l10)
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS hormones_data (
-    id TEXT PRIMARY KEY,
-    phase_id VARCHAR(32),
-    day_number INTEGER,
-    energy_level VARCHAR(50),
-    estrogen DECIMAL(10, 2),
-    progesterone DECIMAL(10, 2),
-    fsh DECIMAL(10, 2),
-    lh DECIMAL(10, 2),
-    estrogen_text VARCHAR(32),
-    progesterone_text VARCHAR(32),
-    fsh_text VARCHAR(32),
-    lh_text VARCHAR(32),
-    estrogen_trend VARCHAR(16),
-    progesterone_trend VARCHAR(16),
-    fsh_trend VARCHAR(16),
-    lh_trend VARCHAR(16),
-    mood JSONB,
-    energy JSONB,
-    best_work_type TEXT,
-    brain_note JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+CREATE TABLE IF NOT EXISTS public.hormones_data_v2 (
+    id TEXT NOT NULL,
+    phase_id INTEGER NULL,
+    day_number INTEGER NULL,
+    estrogen TEXT NULL,
+    estrogen_trend TEXT NULL,
+    progesterone TEXT NULL,
+    progesterone_trend TEXT NULL,
+    fsh TEXT NULL,
+    fsh_trend TEXT NULL,
+    lh TEXT NULL,
+    lh_trend TEXT NULL,
+    mood JSONB NULL,
+    energy TEXT NULL,
+    best_work_type JSONB NULL,
+    created_at TIMESTAMP WITH TIME ZONE NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NULL DEFAULT NOW(),
+    CONSTRAINT hormones_data_v2_pkey PRIMARY KEY (id)
+) TABLESPACE pg_default;
 
 -- ---------------------------------------------------------------------------
--- nutrition_* / exercises_* — content keyed by hormone_id -> hormones_data(id)
+-- nutrition_* / exercises_* — content keyed by hormone_id -> hormones_data_v2(id)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS nutrition_en (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
     cuisine VARCHAR(100),
     recipe_name VARCHAR(255) NOT NULL,
     image_url TEXT,
@@ -177,7 +173,7 @@ CREATE TABLE IF NOT EXISTS nutrition_en (
 
 CREATE TABLE IF NOT EXISTS nutrition_hi (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
     cuisine VARCHAR(100),
     recipe_name VARCHAR(255) NOT NULL,
     image_url TEXT,
@@ -189,7 +185,7 @@ CREATE TABLE IF NOT EXISTS nutrition_hi (
 
 CREATE TABLE IF NOT EXISTS nutrition_gu (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
     cuisine VARCHAR(100),
     recipe_name VARCHAR(255) NOT NULL,
     image_url TEXT,
@@ -201,7 +197,7 @@ CREATE TABLE IF NOT EXISTS nutrition_gu (
 
 CREATE TABLE IF NOT EXISTS exercises_en (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
     category VARCHAR(100) NOT NULL,
     exercise_name VARCHAR(255) NOT NULL,
     image_url TEXT,
@@ -213,7 +209,7 @@ CREATE TABLE IF NOT EXISTS exercises_en (
 
 CREATE TABLE IF NOT EXISTS exercises_hi (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
     category VARCHAR(100) NOT NULL,
     exercise_name VARCHAR(255) NOT NULL,
     image_url TEXT,
@@ -225,7 +221,7 @@ CREATE TABLE IF NOT EXISTS exercises_hi (
 
 CREATE TABLE IF NOT EXISTS exercises_gu (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
     category VARCHAR(100) NOT NULL,
     exercise_name VARCHAR(255) NOT NULL,
     image_url TEXT,
