@@ -14,8 +14,8 @@ optional_supabase_bearer = HTTPBearer(auto_error=False)
 
 def _post_registration_sync(user_id: str) -> None:
     """
-    Background work after registration.
-    Keeps /auth/register fast by moving heavy sync + stats out of request path.
+    Sync period anchors + stats after registration.
+    This runs inline so login cannot proceed before anchors exist.
     """
     try:
         from period_start_logs import sync_period_start_logs_from_period_logs
@@ -28,6 +28,7 @@ def _post_registration_sync(user_id: str) -> None:
         import traceback
         print(f"⚠️ Post-registration sync failed for user {user_id}: {str(e)}")
         print(traceback.format_exc())
+        raise
 
 
 class RegisterRequest(BaseModel):
@@ -218,16 +219,25 @@ async def register(
                     "notes": None
                 }
                 
-                supabase.table("period_logs").insert(period_log_entry).execute()
+                period_log_insert = supabase.table("period_logs").insert(period_log_entry).execute()
+                if not period_log_insert.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to insert initial period log during registration",
+                    )
                 print(f"✅ Created period_logs entry for registration: start={request.last_period_date}, end={end_date_value}")
 
-                # OPTION B: Move heavy sync + stats to background (keeps register fast)
-                background_tasks.add_task(_post_registration_sync, user["id"])
+                # Run sync inline: user should not proceed/login until anchors are fully synced.
+                _post_registration_sync(user["id"])
             except Exception as period_log_error:
-                # Don't fail registration if period log creation fails, but log it
+                # Registration must fail when initial period log/sync cannot be completed.
                 import traceback
                 print(f"⚠️ Warning: Failed to create period_logs entry during registration: {str(period_log_error)}")
                 print(traceback.format_exc())
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Registration failed during initial period setup: {str(period_log_error)}",
+                )
         
         # Create access token
         access_token = create_access_token(data={"sub": user["id"]})

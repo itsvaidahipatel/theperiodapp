@@ -182,7 +182,7 @@ async def predict_cycles(
             cycle_length = int(user.get("cycle_length", 28) or 28)
         except (TypeError, ValueError):
             cycle_length = 28
-        
+
         if not last_period_date:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -417,6 +417,13 @@ async def get_phase_map(
             cycle_length = int(user.get("cycle_length", 28) or 28)
         except (TypeError, ValueError):
             cycle_length = 28
+
+        # API diagnostics for each /phase-map request.
+        from period_start_logs import get_period_start_logs
+        anchor_count = len(get_period_start_logs(user_id, confirmed_only=False) or [])
+        print(
+            f"📡 /phase-map request user_id={user_id} cycle_length={cycle_length} anchors={anchor_count}"
+        )
         
         # Log to See Data: no last_period_date -> empty phase map (onboarding collects it)
         if not last_period_date:

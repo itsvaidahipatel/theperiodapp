@@ -2025,7 +2025,9 @@ def calculate_phase_for_date_range(
             
             # LUTEAL ANCHORING: Calculate ONCE per cycle (not per day)
             # Formula: Predicted Ovulation = Next Period Start - avg(Last 3 Luteal Phases)
-            calculated_ovulation_day = max(period_days + 1, actual_cycle_length - luteal_mean)
+            # Guardrail: keep >=7 full Follicular days after Period ends and never before Day 10.
+            min_ovulation_day = max(10, int(period_days) + 8)
+            calculated_ovulation_day = max(min_ovulation_day, actual_cycle_length - luteal_mean)
             
             # Fertile window calculation
             fertile_window_start = max(period_days + 1, calculated_ovulation_day - 3)
@@ -2048,6 +2050,18 @@ def calculate_phase_for_date_range(
                 cycle_start_sd=None,
                 user_id=user_id
             )
+            try:
+                predicted_ovulation_dt = datetime.strptime(str(ovulation_date_str).strip()[:10], "%Y-%m-%d").date()
+                predicted_ovulation_day = (predicted_ovulation_dt - cycle_start.date()).days + 1
+                if predicted_ovulation_day < min_ovulation_day:
+                    forced_ovulation_dt = cycle_start.date() + timedelta(days=min_ovulation_day - 1)
+                    ovulation_date_str = forced_ovulation_dt.strftime("%Y-%m-%d")
+                    print(
+                        f"🛡️ Ovulation guard applied for {cycle_start_str}: "
+                        f"predicted day {predicted_ovulation_day} -> day {min_ovulation_day}"
+                    )
+            except Exception:
+                pass
             
             # Adaptive window: 3 days for regular cycles, up to 5 for irregular (ovulation_sd)
             max_ov_days = 5 if ovulation_sd >= 2.5 else 3
@@ -2153,12 +2167,16 @@ def calculate_phase_for_date_range(
             if not cycle_meta:
                 # Should not happen - all cycles should have metadata
                 print(f"⚠️ WARNING: No metadata for cycle {cycle_start_str}, using fallback")
+                min_ovulation_day = max(10, int(period_days) + 8)
+                fallback_ovulation_day = max(min_ovulation_day, int(cycle_length - 14))
                 cycle_meta = {
                     "actual_cycle_length": float(cycle_length),
-                    "calculated_ovulation_day": cycle_length - 14,
-                    "fertile_window_start": max(period_days + 1, (cycle_length - 14) - 3),
-                    "fertile_window_end": min(int(cycle_length), cycle_length - 14),
-                    "ovulation_date_str": (current_cycle_start + timedelta(days=int(cycle_length - 14))).strftime("%Y-%m-%d"),
+                    "calculated_ovulation_day": fallback_ovulation_day,
+                    "fertile_window_start": max(period_days + 1, fallback_ovulation_day - 3),
+                    "fertile_window_end": min(int(cycle_length), fallback_ovulation_day),
+                    "ovulation_date_str": (
+                        current_cycle_start + timedelta(days=fallback_ovulation_day - 1)
+                    ).strftime("%Y-%m-%d"),
                     "ovulation_sd": 2.0,
                     "ovulation_days": {-1, 0, 1},
                     "luteal_mean": 14.0
