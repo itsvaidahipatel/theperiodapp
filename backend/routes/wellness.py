@@ -114,13 +114,6 @@ def _rank_rows_by_score(
     keyed.sort(key=lambda t: (t[0], t[1]))
     return [t[2] for t in keyed]
 
-# Explicit columns for hormones_data_v2 schema.
-_HORMONES_DATA_SELECT = (
-    "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
-    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type"
-)
-
-
 class HormoneHistoryPoint(BaseModel):
     """One day in /wellness/hormones?days>1 history."""
 
@@ -334,7 +327,10 @@ async def get_hormones(
             try:
                 hormone_response = (
                     supabase.table("hormones_data_v2")
-                    .select(_HORMONES_DATA_SELECT)
+                    .select(
+                        "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
+                        "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type"
+                    )
                     .in_("id", unique_ids)
                     .execute()
                 )
@@ -379,7 +375,10 @@ async def get_hormones(
         try:
             response = (
                 supabase.table("hormones_data_v2")
-                .select(_HORMONES_DATA_SELECT)
+                .select(
+                    "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
+                    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type"
+                )
                 .eq("id", today_phase_day_id)
                 .execute()
             )
