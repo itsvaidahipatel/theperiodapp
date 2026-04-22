@@ -11,10 +11,10 @@ Cycle length = gap between consecutive period starts
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
-from cycle_utils import get_phase_bounds_for_dots, group_logs_into_episodes
+from cycle_utils import calculate_phase_for_date_range, get_phase_bounds_for_dots, group_logs_into_episodes
 from database import supabase
 from period_service import (
     MIN_CYCLE_DAYS,
@@ -413,6 +413,82 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
 
         all_cycles.reverse()
 
+        # Build 31-day, P1-anchored phase maps per cycle history card.
+        phase_by_date: Dict[str, str] = {}
+        today = datetime.now().date()
+
+        def _to_date(v):
+            if isinstance(v, str):
+                return datetime.strptime(v, "%Y-%m-%d").date()
+            return v
+
+        cycle_start_dates: List[date] = []
+        for c in all_cycles:
+            sd = c.get("startDate")
+            if not sd:
+                continue
+            try:
+                cycle_start_dates.append(_to_date(sd))
+            except Exception:
+                continue
+
+        if cycle_start_dates and period_starts:
+            min_start = min(cycle_start_dates)
+            max_end = max(sd + timedelta(days=30) for sd in cycle_start_dates)
+            phase_start_date = min_start.strftime("%Y-%m-%d")
+            phase_end_date = max_end.strftime("%Y-%m-%d")
+            phase_period_logs = [{"date": ps["start_date"]} for ps in period_starts if ps.get("start_date")]
+            last_period_for_phase = period_starts[-1].get("start_date")
+            cycle_length_for_phase = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(round(avg_cycle_length))))
+
+            phase_rows = calculate_phase_for_date_range(
+                user_id=user_id,
+                last_period_date=last_period_for_phase,
+                cycle_length=cycle_length_for_phase,
+                period_logs=phase_period_logs,
+                start_date=phase_start_date,
+                end_date=phase_end_date,
+            )
+            phase_by_date = {str(r.get("date")): str(r.get("phase") or "Follicular") for r in (phase_rows or [])}
+
+            def _daily_map_for_cycle(start_dt: date, cycle_len: int, is_current: bool) -> List[str]:
+                safe_cycle_len = max(0, int(cycle_len))
+                out: List[str] = []
+                for day_offset in range(31):
+                    d = start_dt + timedelta(days=day_offset)
+                    if is_current and d > today:
+                        out.append("Future")
+                    elif day_offset < safe_cycle_len:
+                        out.append(phase_by_date.get(d.strftime("%Y-%m-%d"), "Follicular"))
+                    else:
+                        out.append("NextCycle")
+                # P1 anchor contract: map starts at cycle start day.
+                if out:
+                    out[0] = "Period"
+                return out
+
+            for c in all_cycles:
+                sd = c.get("startDate")
+                if not sd:
+                    c["daily_phase_map"] = []
+                    continue
+                try:
+                    sd_date = _to_date(sd)
+                    c_len = c.get("length")
+                    if c_len is None:
+                        c_len = int(round(avg_cycle_length))
+                    c["daily_phase_map"] = _daily_map_for_cycle(
+                        sd_date, int(c_len), bool(c.get("isCurrent"))
+                    )
+                    c["isVirtual"] = bool(c.get("isVirtual", False))
+                except Exception:
+                    c["daily_phase_map"] = []
+        else:
+            for c in all_cycles:
+                c["daily_phase_map"] = ["NextCycle"] * 31
+                if c["daily_phase_map"]:
+                    c["daily_phase_map"][0] = "Period"
+                c["isVirtual"] = bool(c.get("isVirtual", False))
         from i18n import t
 
         insights: List[str] = []
