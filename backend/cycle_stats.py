@@ -10,11 +10,12 @@ Cycle length = gap between consecutive period starts
 
 import logging
 import math
+from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Dict, List, Optional
 
-from cycle_utils import get_phase_bounds_for_dots, group_logs_into_episodes
+from cycle_utils import calculate_phase_for_date_range, get_phase_bounds_for_dots, group_logs_into_episodes
 from database import supabase
 from period_service import (
     MIN_CYCLE_DAYS,
@@ -405,6 +406,112 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
             all_cycles.append(current_cycle_obj)
 
         all_cycles.reverse()
+
+        # Build continuous daily phase maps per month for cycle history cards.
+        phase_by_date: Dict[str, str] = {}
+        today = datetime.now().date()
+
+        def _to_date(v):
+            if isinstance(v, str):
+                return datetime.strptime(v, "%Y-%m-%d").date()
+            return v
+
+        month_dates: List[date] = []
+        for c in all_cycles:
+            sd = c.get("startDate")
+            if not sd:
+                continue
+            try:
+                sd_date = _to_date(sd)
+            except Exception:
+                continue
+            month_dates.append(date(sd_date.year, sd_date.month, 1))
+
+        if month_dates and period_starts:
+            min_month = min(month_dates)
+            max_month = max(month_dates)
+            max_month_last_day = monthrange(max_month.year, max_month.month)[1]
+            phase_start_date = min_month.strftime("%Y-%m-%d")
+            phase_end_date = date(max_month.year, max_month.month, max_month_last_day).strftime("%Y-%m-%d")
+            phase_period_logs = [{"date": ps["start_date"]} for ps in period_starts if ps.get("start_date")]
+            last_period_for_phase = period_starts[-1].get("start_date")
+            cycle_length_for_phase = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(round(avg_cycle_length))))
+
+            phase_rows = calculate_phase_for_date_range(
+                user_id=user_id,
+                last_period_date=last_period_for_phase,
+                cycle_length=cycle_length_for_phase,
+                period_logs=phase_period_logs,
+                start_date=phase_start_date,
+                end_date=phase_end_date,
+            )
+            phase_by_date = {str(r.get("date")): str(r.get("phase") or "Follicular") for r in (phase_rows or [])}
+
+            def _daily_map_for_month(y: int, m: int) -> List[str]:
+                days_in_month = monthrange(y, m)[1]
+                out: List[str] = []
+                for day in range(1, days_in_month + 1):
+                    d = date(y, m, day)
+                    if d > today:
+                        out.append("Future")
+                    else:
+                        out.append(phase_by_date.get(d.strftime("%Y-%m-%d"), "Follicular"))
+                return out
+
+            existing_month_keys = set()
+            for c in all_cycles:
+                sd = c.get("startDate")
+                if not sd:
+                    c["daily_phase_map"] = []
+                    continue
+                try:
+                    sd_date = _to_date(sd)
+                    c["daily_phase_map"] = _daily_map_for_month(sd_date.year, sd_date.month)
+                    c["isVirtual"] = bool(c.get("isVirtual", False))
+                    existing_month_keys.add((sd_date.year, sd_date.month))
+                except Exception:
+                    c["daily_phase_map"] = []
+
+            # Fill missing months between logged months with virtual entries for unbroken history timeline.
+            virtual_entries: List[Dict] = []
+            cursor = min_month
+            while cursor <= max_month:
+                key = (cursor.year, cursor.month)
+                if key not in existing_month_keys:
+                    period_len_v, ov_day_v, ov_start_v, ov_end_v = get_phase_bounds_for_dots(
+                        user_id, int(round(avg_cycle_length)), period_length_days
+                    )
+                    virtual_entries.append(
+                        {
+                            "cycleNumber": None,
+                            "startDate": cursor.strftime("%Y-%m-%d"),
+                            "endDate": None,
+                            "length": int(round(avg_cycle_length)),
+                            "isCurrent": False,
+                            "isAnomaly": False,
+                            "isVirtual": True,
+                            "periodLength": period_len_v,
+                            "ovulationDay": ov_day_v,
+                            "ovulationStart": ov_start_v,
+                            "ovulationEnd": ov_end_v,
+                            "daily_phase_map": _daily_map_for_month(cursor.year, cursor.month),
+                        }
+                    )
+                if cursor.month == 12:
+                    cursor = date(cursor.year + 1, 1, 1)
+                else:
+                    cursor = date(cursor.year, cursor.month + 1, 1)
+
+            if virtual_entries:
+                all_cycles.extend(virtual_entries)
+                all_cycles.sort(
+                    key=lambda c: _to_date(c["startDate"]) if c.get("startDate") else date.min,
+                    reverse=True,
+                )
+        else:
+            for c in all_cycles:
+                c["daily_phase_map"] = []
+                c["isVirtual"] = bool(c.get("isVirtual", False))
 
         from i18n import t
 
