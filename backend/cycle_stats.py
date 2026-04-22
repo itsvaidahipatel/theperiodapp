@@ -89,12 +89,14 @@ def compute_cycle_stats_from_period_starts(user_id: str, period_starts: Optional
                 variance = POPULATION_PRIOR_SD**2
         else:
             mean = mean_raw
+            # Mathematical safety: sample variance is only defined for n > 1.
+            # When only one cycle exists, default to conservative population prior.
             if n > 1:
                 variance = sum((x - mean) ** 2 for x in cycle_lengths) / (n - 1)
                 sd = math.sqrt(variance)
             else:
-                variance = 0.0
-                sd = 0.0
+                sd = POPULATION_PRIOR_SD
+                variance = POPULATION_PRIOR_SD**2
 
         return {
             "cycle_length_mean": mean,
@@ -230,6 +232,7 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
             avg_cycle_length = fut_avg.result()
             avg_period_length = fut_plen.result()
             confidence = fut_conf.result()
+        period_length_days = int(round(max(3.0, min(8.0, avg_period_length))))
 
         valid_cycles = [
             c
@@ -334,7 +337,7 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
                         continue
 
                     period_len, ov_day, ov_start, ov_end = get_phase_bounds_for_dots(
-                        user_id, cycle_length, avg_period_length
+                        user_id, int(round(avg_cycle_length)), period_length_days
                     )
                     flagged_outlier = bool(period_starts[i].get("is_outlier", False))
                     cycle_obj = {
@@ -371,18 +374,8 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
                 )
                 current_cycle_length = 0
 
-            est_length = avg_cycle_length
-            if valid_cycles:
-                lengths = [c["length"] for c in valid_cycles[-6:] if 21 <= c["length"] <= 45]
-                if lengths:
-                    s = sorted(lengths)
-                    est_length = (
-                        s[len(s) // 2]
-                        if len(s) % 2
-                        else (s[len(s) // 2 - 1] + s[len(s) // 2]) / 2
-                    )
             period_len_curr, ov_day_curr, ov_start_curr, ov_end_curr = get_phase_bounds_for_dots(
-                user_id, int(est_length), avg_period_length
+                user_id, int(round(avg_cycle_length)), period_length_days
             )
             current_cycle_obj = {
                 "cycleNumber": 0,
@@ -457,13 +450,13 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
             if len(lens) == 3:
                 a, b, c = lens[0], lens[1], lens[2]
                 d1, d2 = b - a, c - b
-                if d1 < -3 and d2 < -3:
+                if d1 < -2 and d2 < -2:
                     tkey = "insight.trend_detected"
                     tparams = {"trend": "progressively shorter"}
                     insights.append(t(tkey, language, tparams))
                     insight_keys.append(tkey)
                     insight_params.append(tparams)
-                elif d1 > 3 and d2 > 3:
+                elif d1 > 2 and d2 > 2:
                     tkey = "insight.trend_detected"
                     tparams = {"trend": "progressively longer"}
                     insights.append(t(tkey, language, tparams))
@@ -475,7 +468,7 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
             insights.append(t(key, language))
             insight_keys.append(key)
             insight_params.append({})
-        elif avg_cycle_length > 35:
+        elif avg_cycle_length > 38:
             key = "insight.avg_cycle_long"
             insights.append(t(key, language))
             insight_keys.append(key)
@@ -492,7 +485,7 @@ def get_cycle_stats(user_id: str, language: str = "en") -> Dict:
             "averageCycleLength": round(avg_cycle_length, 1),
             "averagePeriodLength": round(avg_period_length, 1),
             "averagePeriodLengthRaw": round(avg_period_length, 1),
-            "averagePeriodLengthNormalized": round(max(3.0, min(8.0, avg_period_length)), 1),
+            "averagePeriodLengthNormalized": round(float(period_length_days), 1),
             "isPeriodLengthOutsideRange": is_period_length_outside_range,
             "periodLengthHealthAlert": bool(is_period_length_outside_range),
             "healthAlerts": health_alerts,
