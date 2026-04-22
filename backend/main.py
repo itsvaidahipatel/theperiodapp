@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from routes import ai_chat, auth, cycles, debug, feedback, periods, user, wellness
+from routes import ai_chat, auth, cycles, debug, feedback, meta, periods, user, wellness
 
 logger = logging.getLogger("periodcycle_ai.main")
 
@@ -113,6 +113,7 @@ app.include_router(cycles.router, prefix="/cycles", tags=["Cycles"])
 app.include_router(wellness.router, prefix="/wellness", tags=["Wellness"])
 app.include_router(feedback.router, prefix="/feedback", tags=["Feedback"])
 app.include_router(debug.router, prefix="/debug", tags=["Debug"])
+app.include_router(meta.router, prefix="/app-info", tags=["App Info"])
 
 
 @app.get("/")
