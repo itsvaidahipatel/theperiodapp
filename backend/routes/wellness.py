@@ -10,7 +10,6 @@ from cycle_utils import (
     get_previous_phase_day_ids,
     get_user_phase_day,
     get_user_today,
-    parse_hormone_value,
 )
 from database import supabase
 from routes.auth import get_current_user
@@ -115,30 +114,31 @@ def _rank_rows_by_score(
     keyed.sort(key=lambda t: (t[0], t[1]))
     return [t[2] for t in keyed]
 
-# Explicit columns for hormones_data (numeric levels + text labels + directional trends).
+# Explicit columns for hormones_data_v2 schema.
 _HORMONES_DATA_SELECT = (
-    "id, phase_id, day_number, energy_level, "
-    "estrogen, progesterone, fsh, lh, "
-    "estrogen_text, progesterone_text, fsh_text, lh_text, "
-    "estrogen_trend, progesterone_trend, fsh_trend, lh_trend, "
-    "mood, energy, best_work_type, brain_note, created_at"
+    "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
+    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type, brain_note, created_at"
 )
 
 
 class HormoneHistoryPoint(BaseModel):
-    """One day in /wellness/hormones?days>1 history (charts + labels)."""
+    """One day in /wellness/hormones?days>1 history."""
 
     model_config = ConfigDict(extra="ignore")
 
     phase_day_id: str
-    estrogen_value: float = Field(0.0, description="Numeric level for charts; 0.0 if not backfilled yet")
-    progesterone_value: float = 0.0
-    fsh_value: float = 0.0
-    lh_value: float = 0.0
-    estrogen_label: Optional[str] = Field(None, description="Display text e.g. Low/High from estrogen_text")
-    progesterone_label: Optional[str] = None
-    fsh_label: Optional[str] = None
-    lh_label: Optional[str] = None
+    id: Optional[str] = None
+    estrogen: Optional[str] = None
+    estrogen_trend: Optional[str] = None
+    progesterone: Optional[str] = None
+    progesterone_trend: Optional[str] = None
+    fsh: Optional[str] = None
+    fsh_trend: Optional[str] = None
+    lh: Optional[str] = None
+    lh_trend: Optional[str] = None
+    mood: Dict[str, Any] = Field(default_factory=dict)
+    energy: Optional[Any] = None
+    best_work_type: Dict[str, Any] = Field(default_factory=dict)
 
 
 def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[str] = None) -> str:
@@ -154,18 +154,17 @@ def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[
         )
     try:
         r = (
-            supabase.table("hormones_data")
+            supabase.table("hormones_data_v2")
             .select(
-                "id, estrogen, progesterone, fsh, lh, "
-                "estrogen_text, progesterone_text, fsh_text, lh_text, "
-                "estrogen_trend, progesterone_trend, fsh_trend, lh_trend"
+                "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
+                "fsh, fsh_trend, lh, lh_trend"
             )
             .eq("id", resolved)
             .limit(1)
             .execute()
         )
     except Exception:
-        logger.exception("hormones_data lookup for LLM context failed")
+        logger.exception("hormones_data_v2 lookup for LLM context failed")
         return f"Hormone reference: could not load trend data for phase day {resolved}."
 
     if not r.data:
@@ -173,13 +172,13 @@ def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[
 
     h = r.data[0]
     parts: List[str] = []
-    for text_key, trend_key, label in (
-        ("estrogen_text", "estrogen_trend", "Estrogen"),
-        ("progesterone_text", "progesterone_trend", "Progesterone"),
-        ("fsh_text", "fsh_trend", "FSH"),
-        ("lh_text", "lh_trend", "LH"),
+    for val_key, trend_key, label in (
+        ("estrogen", "estrogen_trend", "Estrogen"),
+        ("progesterone", "progesterone_trend", "Progesterone"),
+        ("fsh", "fsh_trend", "FSH"),
+        ("lh", "lh_trend", "LH"),
     ):
-        ttxt = h.get(text_key)
+        ttxt = h.get(val_key)
         lab = str(ttxt).strip() if ttxt is not None and str(ttxt).strip() else None
         tr = h.get(trend_key)
         trend_s = str(tr).strip() if tr is not None and str(tr).strip() else None
@@ -189,20 +188,6 @@ def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[
             parts.append(f"{label}: trend {trend_s}")
         elif lab:
             parts.append(f"{label}: {lab}")
-
-    nums = []
-    for label, col in (
-        ("E", "estrogen"),
-        ("P", "progesterone"),
-        ("FSH", "fsh"),
-        ("LH", "lh"),
-    ):
-        v = parse_hormone_value(h.get(col))
-        if v != 0.0:
-            nums.append(f"{label}={v:.2f}")
-
-    if nums:
-        parts.append("reference scale (numeric): " + ", ".join(nums))
 
     if not parts:
         return f"Hormone reference for phase day {resolved}: trend/label fields empty in reference data."
@@ -230,52 +215,53 @@ def _resolve_phase_day_id(
     return str(calculated).strip().lower() if calculated else None
 
 
-def _optional_hormone_label(raw: Any) -> Optional[str]:
+def _to_optional_text(raw: Any) -> Optional[str]:
     if raw is None:
         return None
     s = str(raw).strip()
     return s if s else None
 
 
+def _coerce_json_object(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return {}
+        try:
+            parsed = json.loads(s)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Build API dict: *_label from *_text columns; *_value from numeric columns (0.0 if null)."""
+    """Build API dict for hormones_data_v2 (TEXT hormone fields + JSONB objects)."""
     phase_day_id_from_db = hormone_data.get("id")
-    e_val = parse_hormone_value(hormone_data.get("estrogen"))
-    p_val = parse_hormone_value(hormone_data.get("progesterone"))
-    f_val = parse_hormone_value(hormone_data.get("fsh"))
-    l_val = parse_hormone_value(hormone_data.get("lh"))
+    mood_obj = _coerce_json_object(hormone_data.get("mood"))
+    best_work_type_obj = _coerce_json_object(hormone_data.get("best_work_type"))
     return {
         "id": phase_day_id_from_db,
-        "phase_day_id": phase_day_id_from_db,
-        "phase_id": hormone_data.get("phase_id"),
-        "day_number": hormone_data.get("day_number"),
-        "estrogen_label": _optional_hormone_label(hormone_data.get("estrogen_text")),
-        "progesterone_label": _optional_hormone_label(hormone_data.get("progesterone_text")),
-        "fsh_label": _optional_hormone_label(hormone_data.get("fsh_text")),
-        "lh_label": _optional_hormone_label(hormone_data.get("lh_text")),
-        "estrogen_value": e_val,
-        "progesterone_value": p_val,
-        "fsh_value": f_val,
-        "lh_value": l_val,
-        # Backward compatibility: same numeric series pre-*_value keys
-        "estrogen": e_val,
-        "progesterone": p_val,
-        "fsh": f_val,
-        "lh": l_val,
-        "estrogen_trend": hormone_data.get("estrogen_trend"),
-        "progesterone_trend": hormone_data.get("progesterone_trend"),
-        "fsh_trend": hormone_data.get("fsh_trend"),
-        "lh_trend": hormone_data.get("lh_trend"),
-        "mood": hormone_data.get("mood"),
+        "estrogen": _to_optional_text(hormone_data.get("estrogen")),
+        "estrogen_trend": _to_optional_text(hormone_data.get("estrogen_trend")),
+        "progesterone": _to_optional_text(hormone_data.get("progesterone")),
+        "progesterone_trend": _to_optional_text(hormone_data.get("progesterone_trend")),
+        "fsh": _to_optional_text(hormone_data.get("fsh")),
+        "fsh_trend": _to_optional_text(hormone_data.get("fsh_trend")),
+        "lh": _to_optional_text(hormone_data.get("lh")),
+        "lh_trend": _to_optional_text(hormone_data.get("lh_trend")),
+        "mood": mood_obj,
         "energy": hormone_data.get("energy"),
-        "best_work_type": hormone_data.get("best_work_type"),
+        "best_work_type": best_work_type_obj,
+        # Compatibility extras
+        "phase_day_id": phase_day_id_from_db,
         "brain_note": hormone_data.get("brain_note"),
         "energy_level": hormone_data.get("energy", {}).get("level")
         if isinstance(hormone_data.get("energy"), dict)
         else hormone_data.get("energy_level"),
-        "emotional_summary": hormone_data.get("mood", {}).get("summary")
-        if isinstance(hormone_data.get("mood"), dict)
-        else None,
+        "emotional_summary": mood_obj.get("summary") if isinstance(mood_obj, dict) else None,
         "physical_summary": hormone_data.get("brain_note", {}).get("summary")
         if isinstance(hormone_data.get("brain_note"), dict)
         else None,
@@ -285,14 +271,18 @@ def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any
 def _history_point_from_row(hormone_data: Dict[str, Any], phase_day_id: str) -> Dict[str, Any]:
     row = HormoneHistoryPoint(
         phase_day_id=phase_day_id,
-        estrogen_value=parse_hormone_value(hormone_data.get("estrogen")),
-        progesterone_value=parse_hormone_value(hormone_data.get("progesterone")),
-        fsh_value=parse_hormone_value(hormone_data.get("fsh")),
-        lh_value=parse_hormone_value(hormone_data.get("lh")),
-        estrogen_label=_optional_hormone_label(hormone_data.get("estrogen_text")),
-        progesterone_label=_optional_hormone_label(hormone_data.get("progesterone_text")),
-        fsh_label=_optional_hormone_label(hormone_data.get("fsh_text")),
-        lh_label=_optional_hormone_label(hormone_data.get("lh_text")),
+        id=_to_optional_text(hormone_data.get("id")),
+        estrogen=_to_optional_text(hormone_data.get("estrogen")),
+        estrogen_trend=_to_optional_text(hormone_data.get("estrogen_trend")),
+        progesterone=_to_optional_text(hormone_data.get("progesterone")),
+        progesterone_trend=_to_optional_text(hormone_data.get("progesterone_trend")),
+        fsh=_to_optional_text(hormone_data.get("fsh")),
+        fsh_trend=_to_optional_text(hormone_data.get("fsh_trend")),
+        lh=_to_optional_text(hormone_data.get("lh")),
+        lh_trend=_to_optional_text(hormone_data.get("lh_trend")),
+        mood=_coerce_json_object(hormone_data.get("mood")),
+        energy=hormone_data.get("energy"),
+        best_work_type=_coerce_json_object(hormone_data.get("best_work_type")),
     )
     return row.model_dump()
 
@@ -347,13 +337,13 @@ async def get_hormones(
 
             try:
                 hormone_response = (
-                    supabase.table("hormones_data")
+                    supabase.table("hormones_data_v2")
                     .select(_HORMONES_DATA_SELECT)
                     .in_("id", unique_ids)
                     .execute()
                 )
             except Exception:
-                logger.exception("hormones_data batch query failed")
+                logger.exception("hormones_data_v2 batch query failed")
                 raise
 
             rows = hormone_response.data or []
@@ -377,7 +367,7 @@ async def get_hormones(
             else:
                 today_data = {}
                 msg = "No data for this specific day"
-                logger.info("No hormones_data row for phase_day_id=%s (multi-day response)", today_phase_day_id)
+                logger.info("No hormones_data_v2 row for phase_day_id=%s (multi-day response)", today_phase_day_id)
 
             out: Dict[str, Any] = {
                 "today": today_data,
@@ -392,13 +382,13 @@ async def get_hormones(
 
         try:
             response = (
-                supabase.table("hormones_data")
+                supabase.table("hormones_data_v2")
                 .select(_HORMONES_DATA_SELECT)
                 .eq("id", today_phase_day_id)
                 .execute()
             )
         except Exception:
-            logger.exception("hormones_data single lookup failed")
+            logger.exception("hormones_data_v2 single lookup failed")
             raise
 
         if response.data:
@@ -409,7 +399,7 @@ async def get_hormones(
                 "phase_day_id": today_phase_day_id,
             }
 
-        logger.info("No hormones_data row for phase_day_id=%s", today_phase_day_id)
+        logger.info("No hormones_data_v2 row for phase_day_id=%s", today_phase_day_id)
         return {
             "today": {},
             "phase_day_id": today_phase_day_id,
