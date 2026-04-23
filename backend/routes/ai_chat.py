@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from functools import wraps
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -208,6 +209,34 @@ def _is_resource_exhausted_error(err: Exception) -> bool:
     return status_code == 429 or code == 429
 
 
+def _retry_on_429(max_retries: int = 3, base_delay_seconds: int = 2):
+    """Retry decorator for transient Gemini 429/quota sync windows."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if not _is_resource_exhausted_error(e):
+                        raise
+                    if attempt >= max_retries:
+                        raise GeminiResourceExhaustedError(BUSY_MESSAGE) from e
+                    wait_seconds = base_delay_seconds * (2**attempt)
+                    logger.warning(
+                        "Gemini 429 RESOURCE_EXHAUSTED; retry %s/%s in %ss",
+                        attempt + 1,
+                        max_retries,
+                        wait_seconds,
+                    )
+                    time.sleep(wait_seconds)
+
+        return wrapper
+
+    return decorator
+
+
 def get_gemini_response(
     user_message: str,
     user_context: Dict[str, Any],
@@ -235,9 +264,6 @@ def get_gemini_response(
     # Deduplicate while preserving order.
     models_to_try = list(dict.fromkeys(models_to_try))
 
-    max_429_retries = 3
-    backoff_base_seconds = 2
-
     for model_name in models_to_try:
         try:
             model_kwargs: Dict[str, Any] = {
@@ -245,32 +271,18 @@ def get_gemini_response(
                 "system_instruction": system_instruction,
             }
             contents = _build_generate_contents(gemini_history, user_message)
-            retry_count = 0
-            while True:
-                try:
-                    response = _GENAI_CLIENT.models.generate_content(
-                        model=model_kwargs["model"],
-                        contents=contents,
-                        config={"system_instruction": model_kwargs["system_instruction"]},
-                    )
-                    text = _extract_response_text(response)
-                    return _append_disclaimer(text)
-                except Exception as e:
-                    if _is_resource_exhausted_error(e):
-                        if retry_count >= max_429_retries:
-                            raise GeminiResourceExhaustedError(BUSY_MESSAGE) from e
-                        wait_seconds = backoff_base_seconds * (2**retry_count)
-                        logger.warning(
-                            "Gemini 429 RESOURCE_EXHAUSTED on model %s; retry %s/%s in %ss",
-                            model_name,
-                            retry_count + 1,
-                            max_429_retries,
-                            wait_seconds,
-                        )
-                        time.sleep(wait_seconds)
-                        retry_count += 1
-                        continue
-                    raise
+
+            @_retry_on_429(max_retries=3, base_delay_seconds=2)
+            def _generate_once() -> Any:
+                return _GENAI_CLIENT.models.generate_content(
+                    model=model_kwargs["model"],
+                    contents=contents,
+                    config={"system_instruction": model_kwargs["system_instruction"]},
+                )
+
+            response = _generate_once()
+            text = _extract_response_text(response)
+            return _append_disclaimer(text)
         except Exception as e:
             if _is_resource_exhausted_error(e):
                 raise GeminiResourceExhaustedError(str(e)) from e
