@@ -15,9 +15,9 @@ router = APIRouter()
 logger = logging.getLogger("periodcycle_ai.ai_chat")
 
 # Primary / fallback models (override via env if needed)
-GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
-GEMINI_MODEL_FALLBACK = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-1.5-flash")
-GEMINI_MODEL_COMPLEX = os.getenv("GEMINI_MODEL_COMPLEX", "gemini-1.5-pro")
+GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+GEMINI_MODEL_FALLBACK = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-3.1-flash-preview")
+GEMINI_MODEL_COMPLEX = os.getenv("GEMINI_MODEL_COMPLEX", "gemini-3.1-flash-preview")
 
 RESPONSE_DISCLAIMER = (
     "\n\n---\n"
@@ -26,6 +26,7 @@ RESPONSE_DISCLAIMER = (
 BUSY_MESSAGE = "The AI is a bit busy, please wait a moment before your next message."
 
 _GENAI_CONFIGURED = False
+_GENAI_CLIENT: Optional[Any] = None
 
 
 class GeminiResourceExhaustedError(RuntimeError):
@@ -34,19 +35,19 @@ class GeminiResourceExhaustedError(RuntimeError):
 
 def configure_genai_on_startup() -> None:
     """Call once from app startup (and lazily before first chat). Idempotent."""
-    global _GENAI_CONFIGURED
+    global _GENAI_CONFIGURED, _GENAI_CLIENT
     if _GENAI_CONFIGURED:
         return
     try:
-        import google.generativeai as genai
+        from google import genai
     except ImportError:
-        logger.warning("google.generativeai not installed")
+        logger.warning("google-genai SDK not installed")
         _GENAI_CONFIGURED = True
         return
 
     if settings.GEMINI_API_KEY:
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        logger.info("Gemini client configured (genai.configure)")
+        _GENAI_CLIENT = genai.Client(api_key=settings.GEMINI_API_KEY)
+        logger.info("Gemini client configured (google.genai.Client)")
     else:
         logger.warning("GEMINI_API_KEY not set; chat will fail until configured")
     _GENAI_CONFIGURED = True
@@ -55,40 +56,6 @@ def configure_genai_on_startup() -> None:
 def _ensure_genai_configured() -> None:
     if not _GENAI_CONFIGURED:
         configure_genai_on_startup()
-
-
-def _build_safety_settings() -> Optional[List[Dict[str, Any]]]:
-    try:
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-    except ImportError:
-        return None
-
-    settings_list: List[Dict[str, Any]] = [
-        {
-            "category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-            "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-        {
-            "category": HarmCategory.HARM_CATEGORY_HARASSMENT,
-            "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-        {
-            "category": HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-            "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-        {
-            "category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-            "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-    ]
-    for attr in ("HARM_CATEGORY_MEDICAL_ADVICE", "HARM_CATEGORY_MEDICAL"):
-        med = getattr(HarmCategory, attr, None)
-        if med is not None:
-            settings_list.append(
-                {"category": med, "threshold": HarmBlockThreshold.BLOCK_ONLY_HIGH}
-            )
-            break
-    return settings_list
 
 
 def _fetch_recent_chat_rows(user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -110,7 +77,7 @@ def _fetch_recent_chat_rows(user_id: str, limit: int = 5) -> List[Dict[str, Any]
 
 
 def _rows_to_gemini_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Convert DB rows to Gemini start_chat history (user/model turns)."""
+    """Convert DB rows into normalized role/message history."""
     history: List[Dict[str, Any]] = []
     for row in rows:
         role = row.get("role")
@@ -128,6 +95,23 @@ def _rows_to_gemini_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     while history and history[-1]["role"] == "user":
         history.pop()
     return history
+
+
+def _build_generate_contents(gemini_history: List[Dict[str, Any]], user_message: str) -> str:
+    """Build compact conversation transcript for generate_content API."""
+    lines: List[str] = []
+    for h in gemini_history:
+        role = h.get("role")
+        parts = h.get("parts") or []
+        text = str(parts[0]).strip() if parts else ""
+        if not text:
+            continue
+        if role == "user":
+            lines.append(f"User: {text}")
+        elif role == "model":
+            lines.append(f"Assistant: {text}")
+    lines.append(f"User: {user_message.strip()}")
+    return "\n".join(lines)
 
 
 def _append_disclaimer(text: str) -> str:
@@ -233,15 +217,14 @@ def get_gemini_response(
     complex_query: bool = False,
 ) -> str:
     """Generate AI reply using Gemini with conversation history and safety settings."""
+    global _GENAI_CLIENT
     _ensure_genai_configured()
-    import google.generativeai as genai
 
-    if not settings.GEMINI_API_KEY:
+    if not settings.GEMINI_API_KEY or _GENAI_CLIENT is None:
         raise ValueError("GEMINI_API_KEY is not configured")
 
     system_instruction = _build_master_system_instruction(user_context, language, hormone_context)
 
-    safety = _build_safety_settings()
     last_error: Optional[Exception] = None
 
     models_to_try = [GEMINI_MODEL_PRIMARY]
@@ -258,18 +241,18 @@ def get_gemini_response(
     for model_name in models_to_try:
         try:
             model_kwargs: Dict[str, Any] = {
-                "model_name": model_name,
+                "model": model_name,
                 "system_instruction": system_instruction,
             }
-            if safety:
-                model_kwargs["safety_settings"] = safety
-
-            model = genai.GenerativeModel(**model_kwargs)
-            chat = model.start_chat(history=gemini_history)
+            contents = _build_generate_contents(gemini_history, user_message)
             retry_count = 0
             while True:
                 try:
-                    response = chat.send_message(user_message)
+                    response = _GENAI_CLIENT.models.generate_content(
+                        model=model_kwargs["model"],
+                        contents=contents,
+                        config={"system_instruction": model_kwargs["system_instruction"]},
+                    )
                     text = _extract_response_text(response)
                     return _append_disclaimer(text)
                 except Exception as e:
