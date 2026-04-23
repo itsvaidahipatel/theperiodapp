@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -50,28 +50,20 @@ def _validate_new_password_strength(new_password: str) -> None:
         )
 
 
-def _now_iso_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _merge_user_update_payload(base: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Attach users.updated_at when the column exists (see database/schema.sql).
-    If your deployment lacks this column, remove the line or add a DB trigger — see TODO below.
-    """
-    # TODO: Alternatively rely on a Postgres trigger: BEFORE UPDATE ON users SET NEW.updated_at = NOW()
-    merged = {**base, "updated_at": _now_iso_utc()}
-    return merged
+    """Shallow copy for user table updates. Timestamps are left to the database/Supabase."""
+    return dict(base)
 
 
 class ProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     name: Optional[str] = None
-    avg_bleeding_days: Optional[int] = None
-    allergies: Optional[list] = None
     language: Optional[str] = None
+    cycle_length: Optional[int] = None
+    avg_bleeding_days: Optional[int] = None
     favorite_cuisine: Optional[str] = None
     favorite_exercise: Optional[str] = None
-    interests: Optional[list] = None
 
 
 class NotificationPreferencesDto(BaseModel):
@@ -138,6 +130,16 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
     return _strip_auth_secrets(current_user)
 
 
+_PROFILE_UPDATE_KEYS = (
+    "name",
+    "language",
+    "cycle_length",
+    "avg_bleeding_days",
+    "favorite_cuisine",
+    "favorite_exercise",
+)
+
+
 @router.post("/profile")
 async def update_profile(
     profile_data: ProfileUpdate,
@@ -146,9 +148,19 @@ async def update_profile(
     """Update user profile."""
     try:
         user_id = current_user["id"]
-        update_data = profile_data.model_dump(exclude_unset=True)
+        raw = profile_data.model_dump(exclude_unset=True)
+        update_data: Dict[str, Any] = {
+            k: raw[k] for k in _PROFILE_UPDATE_KEYS if k in raw
+        }
+        if "cycle_length" in update_data and update_data["cycle_length"] is not None:
+            update_data["cycle_length"] = int(update_data["cycle_length"])
         if "avg_bleeding_days" in update_data and update_data["avg_bleeding_days"] is not None:
             update_data["avg_bleeding_days"] = max(2, min(8, int(update_data["avg_bleeding_days"])))
+        if not update_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No profile fields provided to update",
+            )
 
         payload = _merge_user_update_payload(update_data)
         response = supabase.table("users").update(payload).eq("id", user_id).execute()
