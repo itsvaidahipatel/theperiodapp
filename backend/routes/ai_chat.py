@@ -17,7 +17,7 @@ router = APIRouter()
 logger = logging.getLogger("periodcycle_ai.ai_chat")
 
 # Primary / fallback models (override via env if needed)
-GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 GEMINI_MODEL_FALLBACK = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-3.1-flash-preview")
 GEMINI_MODEL_COMPLEX = os.getenv("GEMINI_MODEL_COMPLEX", "gemini-3.1-flash-preview")
 
@@ -282,7 +282,7 @@ def get_gemini_response(
     gemini_history: List[Dict[str, Any]],
     complex_query: bool = False,
 ) -> str:
-    """Generate AI reply using Gemini with conversation history and safety settings."""
+    """Generate AI reply using Gemini with explicit retry/backoff on 429."""
     global _GENAI_CLIENT
     _ensure_genai_configured()
 
@@ -304,6 +304,7 @@ def get_gemini_response(
     # Deduplicate while preserving order.
     models_to_try = list(dict.fromkeys(models_to_try))
 
+    retry_delays = [2, 4, 8]
     for model_name in models_to_try:
         try:
             model_kwargs: Dict[str, Any] = {
@@ -311,23 +312,27 @@ def get_gemini_response(
                 "system_instruction": system_instruction,
             }
             contents = _build_generate_contents(gemini_history, user_message)
-
-            @_retry_on_429(max_retries=3, base_delay_seconds=2)
-            def _generate_once() -> Any:
-                return _GENAI_CLIENT.models.generate_content_stream(
-                    model=model_kwargs["model"],
-                    contents=contents,
-                    config={"system_instruction": model_kwargs["system_instruction"]},
-                )
-
-            stream = _generate_once()
-            chunks: List[str] = []
-            for chunk in stream:
-                ctext = _extract_response_text(chunk)
-                if ctext:
-                    chunks.append(ctext)
-            text = "".join(chunks).strip()
-            return _append_disclaimer(text)
+            for idx in range(len(retry_delays) + 1):
+                try:
+                    response = _GENAI_CLIENT.models.generate_content(
+                        model=model_kwargs["model"],
+                        contents=contents,
+                        config={"system_instruction": model_kwargs["system_instruction"]},
+                    )
+                    text = _extract_response_text(response)
+                    return _append_disclaimer(text)
+                except Exception as e:
+                    if not _is_resource_exhausted_error(e):
+                        raise
+                    if idx >= len(retry_delays):
+                        raise GeminiResourceExhaustedError(BUSY_MESSAGE) from e
+                    wait_seconds = retry_delays[idx]
+                    logger.warning(
+                        "Gemini 429 RESOURCE_EXHAUSTED on model %s; retry in %ss",
+                        model_name,
+                        wait_seconds,
+                    )
+                    time.sleep(wait_seconds)
         except Exception as e:
             if _is_resource_exhausted_error(e):
                 raise GeminiResourceExhaustedError(str(e)) from e
