@@ -149,8 +149,8 @@ class ChatRequest(BaseModel):
         description="Device calendar date YYYY-MM-DD for cycle context (preferred over server clock)",
     )
     stream: bool = Field(
-        False,
-        description="If true, returns streaming text chunks for immediate UI rendering.",
+        True,
+        description="Streaming enabled by default for immediate UI rendering.",
     )
 
 
@@ -416,24 +416,27 @@ async def chat(
         history_rows = _fetch_recent_chat_rows(user_id, limit=10)
         gemini_history = _rows_to_gemini_history(history_rows)
 
+        intent = _classify_query_intent(chat_request.message)
         current_phase = None
         phase_day = None
-        try:
-            from cycle_utils import get_user_phase_day, get_user_today
+        hormone_context = "Hormone reference: omitted for general query."
+        if intent == "personal":
+            try:
+                from cycle_utils import get_user_phase_day, get_user_today
 
-            today = get_user_today(chat_request.client_today).strftime("%Y-%m-%d")
-            phase_data = get_user_phase_day(user_id, today)
-            if phase_data:
-                current_phase = phase_data.get("phase")
-                phase_day = phase_data.get("phase_day_id")
-        except Exception:
-            logger.exception("Error resolving current phase for chat context")
+                today = get_user_today(chat_request.client_today).strftime("%Y-%m-%d")
+                phase_data = get_user_phase_day(user_id, today)
+                if phase_data:
+                    current_phase = phase_data.get("phase")
+                    phase_day = phase_data.get("phase_day_id")
+            except Exception:
+                logger.exception("Error resolving current phase for chat context")
 
-        try:
-            hormone_context = get_hormone_trends_summary_for_llm(user_id, chat_request.client_today)
-        except Exception:
-            logger.exception("Hormone context for LLM failed; continuing without")
-            hormone_context = "Hormone reference: unavailable."
+            try:
+                hormone_context = get_hormone_trends_summary_for_llm(user_id, chat_request.client_today)
+            except Exception:
+                logger.exception("Hormone context for LLM failed; continuing without")
+                hormone_context = "Hormone reference: unavailable."
 
         user_context = {
             "name": current_user.get("name"),
@@ -446,44 +449,34 @@ async def chat(
         }
 
         try:
-            if chat_request.stream:
-                def _event_stream() -> Iterator[str]:
-                    collected: List[str] = []
+            def _event_stream() -> Iterator[str]:
+                collected: List[str] = []
+                try:
+                    for chunk in get_gemini_response_stream(
+                        chat_request.message.strip(),
+                        user_context,
+                        language,
+                        hormone_context,
+                        gemini_history,
+                        complex_query=chat_request.complex,
+                    ):
+                        collected.append(chunk)
+                        yield chunk
+                finally:
+                    # Save full exchange after stream completes.
+                    full_text = _append_disclaimer("".join(collected).strip()) if collected else ""
                     try:
-                        for chunk in get_gemini_response_stream(
-                            chat_request.message.strip(),
-                            user_context,
-                            language,
-                            hormone_context,
-                            gemini_history,
-                            complex_query=chat_request.complex,
-                        ):
-                            collected.append(chunk)
-                            yield chunk
-                    finally:
-                        # Save full exchange after stream completes.
-                        full_text = _append_disclaimer("".join(collected).strip()) if collected else ""
-                        try:
+                        supabase.table("chat_history").insert(
+                            {"user_id": user_id, "message": chat_request.message, "role": "user"}
+                        ).execute()
+                        if full_text:
                             supabase.table("chat_history").insert(
-                                {"user_id": user_id, "message": chat_request.message, "role": "user"}
+                                {"user_id": user_id, "message": full_text, "role": "assistant"}
                             ).execute()
-                            if full_text:
-                                supabase.table("chat_history").insert(
-                                    {"user_id": user_id, "message": full_text, "role": "assistant"}
-                                ).execute()
-                        except Exception:
-                            logger.exception("Database error saving streaming chat history")
+                    except Exception:
+                        logger.exception("Database error saving streaming chat history")
 
-                return StreamingResponse(_event_stream(), media_type="text/plain; charset=utf-8")
-
-            ai_response = get_gemini_response(
-                chat_request.message.strip(),
-                user_context,
-                language,
-                hormone_context,
-                gemini_history,
-                complex_query=chat_request.complex,
-            )
+            return StreamingResponse(_event_stream(), media_type="text/plain; charset=utf-8")
         except ValueError as e:
             logger.error("Gemini configuration error: %s", e)
             raise HTTPException(
@@ -502,18 +495,6 @@ async def chat(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"AI service error: {str(e)}",
             ) from e
-
-        try:
-            supabase.table("chat_history").insert(
-                {"user_id": user_id, "message": chat_request.message, "role": "user"}
-            ).execute()
-            supabase.table("chat_history").insert(
-                {"user_id": user_id, "message": ai_response, "role": "assistant"}
-            ).execute()
-        except Exception:
-            logger.exception("Database error saving chat history")
-
-        return {"response": ai_response}
 
     except HTTPException:
         raise
