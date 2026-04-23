@@ -14,8 +14,9 @@ router = APIRouter()
 logger = logging.getLogger("periodcycle_ai.ai_chat")
 
 # Primary / fallback models (override via env if needed)
-GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-GEMINI_MODEL_FALLBACK = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
+GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
+GEMINI_MODEL_FALLBACK = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-1.5-flash")
+GEMINI_MODEL_COMPLEX = os.getenv("GEMINI_MODEL_COMPLEX", "gemini-1.5-pro")
 
 RESPONSE_DISCLAIMER = (
     "\n\n---\n"
@@ -23,6 +24,10 @@ RESPONSE_DISCLAIMER = (
 )
 
 _GENAI_CONFIGURED = False
+
+
+class GeminiResourceExhaustedError(RuntimeError):
+    """Raised when Gemini quota/rate budget is exhausted (HTTP 429)."""
 
 
 def configure_genai_on_startup() -> None:
@@ -146,26 +151,19 @@ def _extract_response_text(response: Any) -> str:
 class ChatRequest(BaseModel):
     message: str
     language: Optional[str] = None
+    complex: bool = Field(
+        False,
+        description="If true, use higher-capability fallback model for complex prompts.",
+    )
     client_today: Optional[str] = Field(
         None,
         description="Device calendar date YYYY-MM-DD for cycle context (preferred over server clock)",
     )
 
 
-def get_gemini_response(
-    user_message: str,
-    user_context: Dict[str, Any],
-    language: str,
-    hormone_context: str,
-    gemini_history: List[Dict[str, Any]],
+def _build_master_system_instruction(
+    user_context: Dict[str, Any], language: str, hormone_context: str
 ) -> str:
-    """Generate AI reply using Gemini with conversation history and safety settings."""
-    _ensure_genai_configured()
-    import google.generativeai as genai
-
-    if not settings.GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY is not configured")
-
     user_name = user_context.get("name", "User")
     phase_info = ""
     if user_context.get("current_phase"):
@@ -189,40 +187,68 @@ def get_gemini_response(
     else:
         language_instruction = "\nIMPORTANT: Respond in simple, clear English."
 
-    system_instruction = f"""You are an expert medical information assistant for women's health. Provide comprehensive, evidence-aware educational information.
+    return f"""You are an expert women's-health medical education assistant.
 
 CRITICAL RULES:
-1. ONLY medically sound, evidence-based educational information; avoid definitive diagnoses or prescriptions.
-2. If you cannot give a safe educational answer, say you don't have a reliable answer and suggest consulting a healthcare professional.
-3. NEVER guess or fabricate medical facts.
-4. ALWAYS address {user_name} by name.
-5. RESPOND IN THE USER'S SELECTED LANGUAGE: {language.upper()}{language_instruction}
+1. Give medically sound, evidence-aware educational information only.
+2. Do not diagnose, prescribe, or provide medication dosages.
+3. If uncertain, say so and recommend consulting a qualified clinician.
+4. Never fabricate facts.
+5. Always address the user by name: {user_name}.
+6. RESPOND IN THE USER'S SELECTED LANGUAGE: {language.upper()}{language_instruction}
 
-User profile (context only): {user_name} | Language: {language} | Typical cycle length: {user_context.get('cycle_length', 28)} days{phase_info}
-Allergies (for lifestyle tips only): {allergies_text}
-Interests (optional context): {interests_text}
+User context:
+- Name: {user_name}
+- Typical cycle length: {user_context.get('cycle_length', 28)} days{phase_info}
+- Allergies: {allergies_text}
+- Interests: {interests_text}
 
-Hormone pattern context (educational mapping for today, NOT lab results):
+Hormone mapping context for today (educational reference, NOT lab values):
 {hormone_context}
 
-Medical safety:
-- Give general education: symptoms, self-care ideas that are widely considered safe, when to seek care.
-- For diagnosis, treatment decisions, or medications: direct the user to a qualified clinician.
-- Do not provide specific dosages, prescription advice, or emergency instructions; urge urgent care/ER when appropriate.
-
-Response format:
-- Start: "Hi {user_name}," or "{user_name},"
-- Use bullet points with * (not the word "bullet")
-- Keep to 2–4 short paragraphs plus bullets where helpful
-- Use **bold** for key terms when useful
+Safety behavior:
+- Provide self-care and symptom education.
+- For urgent red flags, advise urgent care/ER.
+- Keep answers concise and practical.
 """
+
+
+def _is_resource_exhausted_error(err: Exception) -> bool:
+    raw = str(err).lower()
+    if "resource_exhausted" in raw or "quota" in raw or "429" in raw:
+        return True
+    status_code = getattr(err, "status_code", None)
+    code = getattr(err, "code", None)
+    return status_code == 429 or code == 429
+
+
+def get_gemini_response(
+    user_message: str,
+    user_context: Dict[str, Any],
+    language: str,
+    hormone_context: str,
+    gemini_history: List[Dict[str, Any]],
+    complex_query: bool = False,
+) -> str:
+    """Generate AI reply using Gemini with conversation history and safety settings."""
+    _ensure_genai_configured()
+    import google.generativeai as genai
+
+    if not settings.GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is not configured")
+
+    system_instruction = _build_master_system_instruction(user_context, language, hormone_context)
 
     safety = _build_safety_settings()
     last_error: Optional[Exception] = None
 
     models_to_try = [GEMINI_MODEL_PRIMARY]
+    if complex_query and GEMINI_MODEL_COMPLEX:
+        models_to_try.append(GEMINI_MODEL_COMPLEX)
     if GEMINI_MODEL_FALLBACK and GEMINI_MODEL_FALLBACK != GEMINI_MODEL_PRIMARY:
         models_to_try.append(GEMINI_MODEL_FALLBACK)
+    # Deduplicate while preserving order.
+    models_to_try = list(dict.fromkeys(models_to_try))
 
     for model_name in models_to_try:
         try:
@@ -239,6 +265,8 @@ Response format:
             text = _extract_response_text(response)
             return _append_disclaimer(text)
         except Exception as e:
+            if _is_resource_exhausted_error(e):
+                raise GeminiResourceExhaustedError(str(e)) from e
             last_error = e
             logger.warning("Gemini model %s failed: %s", model_name, e)
 
@@ -251,12 +279,12 @@ async def chat(
     chat_request: ChatRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Chat with AI assistant (last 5 messages retained as Gemini history)."""
+    """Chat with AI assistant (last 5 turns/10 messages retained as Gemini history)."""
     try:
         user_id = current_user["id"]
         language = chat_request.language or current_user.get("language", "en")
 
-        history_rows = _fetch_recent_chat_rows(user_id, limit=5)
+        history_rows = _fetch_recent_chat_rows(user_id, limit=10)
         gemini_history = _rows_to_gemini_history(history_rows)
 
         current_phase = None
@@ -295,12 +323,19 @@ async def chat(
                 language,
                 hormone_context,
                 gemini_history,
+                complex_query=chat_request.complex,
             )
         except ValueError as e:
             logger.error("Gemini configuration error: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="AI service is not configured. Please set GEMINI_API_KEY.",
+            ) from e
+        except GeminiResourceExhaustedError as e:
+            logger.warning("Gemini quota/rate exhausted: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={"status": "busy", "message": "Limit reached. Please try again shortly."},
             ) from e
         except Exception as e:
             logger.exception("Gemini error: %s", e)
