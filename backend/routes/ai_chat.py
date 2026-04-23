@@ -1,10 +1,12 @@
 import logging
 import os
+import re
 import time
 from functools import wraps
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from database import supabase
@@ -15,7 +17,7 @@ router = APIRouter()
 logger = logging.getLogger("periodcycle_ai.ai_chat")
 
 # Primary / fallback models (override via env if needed)
-GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+GEMINI_MODEL_PRIMARY = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_MODEL_FALLBACK = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-3.1-flash-preview")
 GEMINI_MODEL_COMPLEX = os.getenv("GEMINI_MODEL_COMPLEX", "gemini-3.1-flash-preview")
 
@@ -146,10 +148,36 @@ class ChatRequest(BaseModel):
         None,
         description="Device calendar date YYYY-MM-DD for cycle context (preferred over server clock)",
     )
+    stream: bool = Field(
+        False,
+        description="If true, returns streaming text chunks for immediate UI rendering.",
+    )
+
+
+def _classify_query_intent(user_message: str) -> str:
+    text = (user_message or "").strip().lower()
+    if not text:
+        return "general"
+    personal_markers = [
+        r"\b(i|me|my|mine)\b",
+        r"\bmy cycle\b",
+        r"\bwhy am i\b",
+        r"\bmy period\b",
+        r"\bmy symptoms?\b",
+        r"\bmy hormones?\b",
+        r"\bcycle\b",
+        r"\bphase\b",
+    ]
+    for pat in personal_markers:
+        if re.search(pat, text):
+            return "personal"
+    if text.startswith(("what is", "explain", "define", "tell me about", "how does")):
+        return "general"
+    return "general"
 
 
 def _build_master_system_instruction(
-    user_context: Dict[str, Any], language: str, hormone_context: str
+    user_context: Dict[str, Any], language: str, hormone_context: str, intent: str
 ) -> str:
     user_name = user_context.get("name", "User")
     phase_info = ""
@@ -174,7 +202,7 @@ def _build_master_system_instruction(
     else:
         language_instruction = "\nIMPORTANT: Respond in simple, clear English."
 
-    return f"""You are an expert women's-health medical education assistant.
+    base = f"""You are an expert women's-health medical education assistant.
 
 CRITICAL RULES:
 1. Give medically sound, evidence-aware educational information only.
@@ -184,20 +212,29 @@ CRITICAL RULES:
 5. Always address the user by name: {user_name}.
 6. RESPOND IN THE USER'S SELECTED LANGUAGE: {language.upper()}{language_instruction}
 
-User context:
-- Name: {user_name}
-- Typical cycle length: {user_context.get('cycle_length', 28)} days{phase_info}
-- Allergies: {allergies_text}
-- Interests: {interests_text}
-
-Hormone mapping context for today (educational reference, NOT lab values):
-{hormone_context}
-
 Safety behavior:
 - Provide self-care and symptom education.
 - For urgent red flags, advise urgent care/ER.
 - Keep answers concise and practical.
 """
+
+    if intent == "general":
+        return (
+            base
+            + f"\nGeneral query mode:\n- Name: {user_name}\n- Language: {language}\n"
+            + "- Do not rely on user hormone/allergy/persona details unless user explicitly asks.\n"
+        )
+
+    return (
+        base
+        + "\nPersonal query mode:\n"
+        + f"- Name: {user_name}\n"
+        + f"- Typical cycle length: {user_context.get('cycle_length', 28)} days{phase_info}\n"
+        + f"- Allergies: {allergies_text}\n"
+        + f"- Interests: {interests_text}\n\n"
+        + "Hormone mapping context for today (educational reference, NOT lab values):\n"
+        + f"{hormone_context}\n"
+    )
 
 
 def _is_resource_exhausted_error(err: Exception) -> bool:
@@ -252,7 +289,10 @@ def get_gemini_response(
     if not os.getenv("GEMINI_API_KEY") or _GENAI_CLIENT is None:
         raise ValueError("GEMINI_API_KEY is not configured")
 
-    system_instruction = _build_master_system_instruction(user_context, language, hormone_context)
+    intent = _classify_query_intent(user_message)
+    system_instruction = _build_master_system_instruction(
+        user_context, language, hormone_context, intent
+    )
 
     last_error: Optional[Exception] = None
 
@@ -274,14 +314,19 @@ def get_gemini_response(
 
             @_retry_on_429(max_retries=3, base_delay_seconds=2)
             def _generate_once() -> Any:
-                return _GENAI_CLIENT.models.generate_content(
+                return _GENAI_CLIENT.models.generate_content_stream(
                     model=model_kwargs["model"],
                     contents=contents,
                     config={"system_instruction": model_kwargs["system_instruction"]},
                 )
 
-            response = _generate_once()
-            text = _extract_response_text(response)
+            stream = _generate_once()
+            chunks: List[str] = []
+            for chunk in stream:
+                ctext = _extract_response_text(chunk)
+                if ctext:
+                    chunks.append(ctext)
+            text = "".join(chunks).strip()
             return _append_disclaimer(text)
         except Exception as e:
             if _is_resource_exhausted_error(e):
@@ -291,6 +336,71 @@ def get_gemini_response(
 
     logger.error("All Gemini models failed; last error: %s", last_error)
     raise RuntimeError(f"Failed to generate AI response: {last_error}")
+
+
+def get_gemini_response_stream(
+    user_message: str,
+    user_context: Dict[str, Any],
+    language: str,
+    hormone_context: str,
+    gemini_history: List[Dict[str, Any]],
+    complex_query: bool = False,
+) -> Iterator[str]:
+    """Yield streaming response chunks for low TTFT Flutter rendering."""
+    global _GENAI_CLIENT
+    _ensure_genai_configured()
+    if not os.getenv("GEMINI_API_KEY") or _GENAI_CLIENT is None:
+        raise ValueError("GEMINI_API_KEY is not configured")
+
+    intent = _classify_query_intent(user_message)
+    system_instruction = _build_master_system_instruction(
+        user_context, language, hormone_context, intent
+    )
+    models_to_try = [GEMINI_MODEL_PRIMARY]
+    if complex_query and GEMINI_MODEL_COMPLEX:
+        models_to_try.append(GEMINI_MODEL_COMPLEX)
+    if GEMINI_MODEL_FALLBACK and GEMINI_MODEL_FALLBACK != GEMINI_MODEL_PRIMARY:
+        models_to_try.append(GEMINI_MODEL_FALLBACK)
+    models_to_try = list(dict.fromkeys(models_to_try))
+
+    contents = _build_generate_contents(gemini_history, user_message)
+    last_error: Optional[Exception] = None
+    for model_name in models_to_try:
+        try:
+            attempts = 0
+            while True:
+                emitted_any = False
+                try:
+                    stream = _GENAI_CLIENT.models.generate_content_stream(
+                        model=model_name,
+                        contents=contents,
+                        config={"system_instruction": system_instruction},
+                    )
+                    for chunk in stream:
+                        ctext = _extract_response_text(chunk)
+                        if ctext:
+                            emitted_any = True
+                            yield ctext
+                    return
+                except Exception as e:
+                    if _is_resource_exhausted_error(e) and not emitted_any and attempts < 3:
+                        wait_seconds = 2 * (2**attempts)
+                        logger.warning(
+                            "Gemini stream 429 on model %s; retry %s/3 in %ss",
+                            model_name,
+                            attempts + 1,
+                            wait_seconds,
+                        )
+                        time.sleep(wait_seconds)
+                        attempts += 1
+                        continue
+                    if _is_resource_exhausted_error(e):
+                        raise GeminiResourceExhaustedError(BUSY_MESSAGE) from e
+                    raise
+        except Exception as e:
+            last_error = e
+            logger.warning("Gemini streaming model %s failed: %s", model_name, e)
+    raise RuntimeError(f"Failed to generate streaming AI response: {last_error}")
 
 
 @router.post("/chat")
@@ -336,6 +446,36 @@ async def chat(
         }
 
         try:
+            if chat_request.stream:
+                def _event_stream() -> Iterator[str]:
+                    collected: List[str] = []
+                    try:
+                        for chunk in get_gemini_response_stream(
+                            chat_request.message.strip(),
+                            user_context,
+                            language,
+                            hormone_context,
+                            gemini_history,
+                            complex_query=chat_request.complex,
+                        ):
+                            collected.append(chunk)
+                            yield chunk
+                    finally:
+                        # Save full exchange after stream completes.
+                        full_text = _append_disclaimer("".join(collected).strip()) if collected else ""
+                        try:
+                            supabase.table("chat_history").insert(
+                                {"user_id": user_id, "message": chat_request.message, "role": "user"}
+                            ).execute()
+                            if full_text:
+                                supabase.table("chat_history").insert(
+                                    {"user_id": user_id, "message": full_text, "role": "assistant"}
+                                ).execute()
+                        except Exception:
+                            logger.exception("Database error saving streaming chat history")
+
+                return StreamingResponse(_event_stream(), media_type="text/plain; charset=utf-8")
+
             ai_response = get_gemini_response(
                 chat_request.message.strip(),
                 user_context,
