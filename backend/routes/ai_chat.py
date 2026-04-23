@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -22,6 +23,7 @@ RESPONSE_DISCLAIMER = (
     "\n\n---\n"
     "This information is for educational purposes and not a substitute for professional medical advice."
 )
+BUSY_MESSAGE = "The AI is a bit busy, please wait a moment before your next message."
 
 _GENAI_CONFIGURED = False
 
@@ -250,6 +252,9 @@ def get_gemini_response(
     # Deduplicate while preserving order.
     models_to_try = list(dict.fromkeys(models_to_try))
 
+    max_429_retries = 3
+    backoff_base_seconds = 2
+
     for model_name in models_to_try:
         try:
             model_kwargs: Dict[str, Any] = {
@@ -261,9 +266,28 @@ def get_gemini_response(
 
             model = genai.GenerativeModel(**model_kwargs)
             chat = model.start_chat(history=gemini_history)
-            response = chat.send_message(user_message)
-            text = _extract_response_text(response)
-            return _append_disclaimer(text)
+            retry_count = 0
+            while True:
+                try:
+                    response = chat.send_message(user_message)
+                    text = _extract_response_text(response)
+                    return _append_disclaimer(text)
+                except Exception as e:
+                    if _is_resource_exhausted_error(e):
+                        if retry_count >= max_429_retries:
+                            raise GeminiResourceExhaustedError(BUSY_MESSAGE) from e
+                        wait_seconds = backoff_base_seconds * (2**retry_count)
+                        logger.warning(
+                            "Gemini 429 RESOURCE_EXHAUSTED on model %s; retry %s/%s in %ss",
+                            model_name,
+                            retry_count + 1,
+                            max_429_retries,
+                            wait_seconds,
+                        )
+                        time.sleep(wait_seconds)
+                        retry_count += 1
+                        continue
+                    raise
         except Exception as e:
             if _is_resource_exhausted_error(e):
                 raise GeminiResourceExhaustedError(str(e)) from e
@@ -335,7 +359,7 @@ async def chat(
             logger.warning("Gemini quota/rate exhausted: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={"status": "busy", "message": "Limit reached. Please try again shortly."},
+                detail={"status": "busy", "message": BUSY_MESSAGE},
             ) from e
         except Exception as e:
             logger.exception("Gemini error: %s", e)
