@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from config import settings
 from database import supabase
 from routes.auth import get_current_user
 from routes.wellness import get_hormone_trends_summary_for_llm
@@ -46,8 +45,9 @@ def configure_genai_on_startup() -> None:
         _GENAI_CONFIGURED = True
         return
 
-    if settings.GEMINI_API_KEY:
-        _GENAI_CLIENT = genai.Client(api_key=settings.GEMINI_API_KEY)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if api_key:
+        _GENAI_CLIENT = genai.Client(api_key=api_key)
         logger.info("Gemini client configured (google.genai.Client)")
     else:
         logger.warning("GEMINI_API_KEY not set; chat will fail until configured")
@@ -249,7 +249,7 @@ def get_gemini_response(
     global _GENAI_CLIENT
     _ensure_genai_configured()
 
-    if not settings.GEMINI_API_KEY or _GENAI_CLIENT is None:
+    if not os.getenv("GEMINI_API_KEY") or _GENAI_CLIENT is None:
         raise ValueError("GEMINI_API_KEY is not configured")
 
     system_instruction = _build_master_system_instruction(user_context, language, hormone_context)
