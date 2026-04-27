@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS users (
     -- RapidAPI cache (optional)
     rapidapi_request_id VARCHAR(255),
     rapidapi_request_id_expires_at TIMESTAMPTZ,
+    consent_accepted BOOLEAN NOT NULL DEFAULT FALSE,
+    consent_timestamp TIMESTAMPTZ,
+    privacy_policy_version TEXT,
+    consent_language TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );

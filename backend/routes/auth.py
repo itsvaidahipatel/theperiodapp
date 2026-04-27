@@ -11,6 +11,7 @@ router = APIRouter()
 security = HTTPBearer()
 # Optional Supabase session on /register: links public.users.id to auth.users (JWT ``sub``)
 optional_supabase_bearer = HTTPBearer(auto_error=False)
+PRIVACY_POLICY_VERSION = "2026.04.v1"
 
 def _post_registration_sync(user_id: str) -> None:
     """
@@ -40,9 +41,11 @@ class RegisterRequest(BaseModel):
     cycle_length: int = 28  # Required, default 28
     allergies: Optional[list] = None
     language: Optional[str] = "en"
+    language_choice: str
     favorite_cuisine: Optional[str] = None
     favorite_exercise: Optional[str] = None
     interests: Optional[list] = None
+    consent_accepted: bool
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -110,6 +113,12 @@ async def register(
     Without a Bearer token, a database-generated UUID is used for ``users.id`` (legacy self-contained auth).
     """
     try:
+        if request.consent_accepted is not True:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Consent is required to register.",
+            )
+
         # Check if user already exists (email links app profile to the Supabase account)
         @retry_supabase_call(max_retries=3)
         def _check_existing():
@@ -151,10 +160,14 @@ async def register(
             "cycle_length": cycle_length,
             "avg_bleeding_days": avg_bleeding_days,
             "allergies": request.allergies or [],
-            "language": request.language or "en",
+            "language": request.language_choice or request.language or "en",
             "favorite_cuisine": request.favorite_cuisine,
             "favorite_exercise": request.favorite_exercise,
-            "interests": request.interests or []
+            "interests": request.interests or [],
+            "consent_accepted": True,
+            "consent_timestamp": datetime.utcnow().isoformat(),
+            "privacy_policy_version": PRIVACY_POLICY_VERSION,
+            "consent_language": request.language_choice,
         }
 
         if supabase_session and supabase_session.credentials:
@@ -249,7 +262,7 @@ async def register(
                 email_service.send_welcome_email,
                 to_email=request.email,
                 user_name=request.name,
-                language=request.language or "en"
+                language=request.language_choice or request.language or "en"
             )
         except Exception as email_error:
             # Don't fail registration if email fails, but log it
