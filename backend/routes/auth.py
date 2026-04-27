@@ -14,6 +14,22 @@ security = HTTPBearer()
 optional_supabase_bearer = HTTPBearer(auto_error=False)
 PRIVACY_POLICY_VERSION = "2026.04.v1"
 
+
+def _json_safe_value(value):
+    """Recursively convert datetime/date objects to ISO-8601 strings."""
+    if isinstance(value, (dt_module.datetime, dt_module.date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(v) for v in value]
+    return value
+
+
+def _json_safe_user(user: dict) -> dict:
+    """Ensure user payload is JSON-serializable."""
+    return _json_safe_value(dict(user))
+
 def _post_registration_sync(user_id: str) -> None:
     """
     Sync period anchors + stats after registration.
@@ -209,7 +225,7 @@ async def register(
                 detail="Failed to create user"
             )
         
-        user = response.data[0]
+        user = _json_safe_user(response.data[0])
         user.pop("password_hash", None)  # Remove password from response
         
         # Create first period_logs entry using avg_bleeding_days (end_date = start + (avg_bleeding_days - 1))
@@ -302,7 +318,7 @@ async def login(request: LoginRequest):
                 detail="Invalid email or password"
             )
         
-        user = response.data[0]
+        user = _json_safe_user(response.data[0])
         
         # Check if password_hash field exists
         if "password_hash" not in user or not user.get("password_hash"):
@@ -351,8 +367,9 @@ async def login(request: LoginRequest):
 @router.get("/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     """Get current user information."""
-    current_user.pop("password_hash", None)
-    return current_user
+    safe_user = _json_safe_user(current_user)
+    safe_user.pop("password_hash", None)
+    return safe_user
 
 
 @router.post("/update-fcm-token")
