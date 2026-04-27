@@ -2,7 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, SecretStr
 from typing import Optional
-from datetime import datetime, timedelta, timezone
+import datetime as dt_module
+from datetime import timezone, timedelta
 
 from database import supabase, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
@@ -167,7 +168,7 @@ async def register(
             "favorite_exercise": request.favorite_exercise,
             "interests": request.interests or [],
             "consent_accepted": request.consent_accepted,
-            "consent_timestamp": datetime.now(timezone.utc),
+            "consent_timestamp": dt_module.datetime.now(timezone.utc),
             "privacy_policy_version": PRIVACY_POLICY_VERSION,
             "consent_language": request.language_choice,
         }
@@ -214,7 +215,7 @@ async def register(
         # Create first period_logs entry using avg_bleeding_days (end_date = start + (avg_bleeding_days - 1))
         if request.last_period_date:
             try:
-                last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
+                last_period_dt = dt_module.datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
                 bleeding_days = max(2, min(8, avg_bleeding_days))
                 estimated_end_date = last_period_dt + timedelta(days=bleeding_days - 1)
                 end_date_value = estimated_end_date.strftime("%Y-%m-%d")
@@ -371,7 +372,7 @@ async def update_fcm_token(
         user_id = current_user["id"]
         response = (
             supabase.table("users")
-            .update({"fcm_token": token, "updated_at": datetime.utcnow().isoformat()})
+            .update({"fcm_token": token, "updated_at": dt_module.datetime.utcnow().isoformat()})
             .eq("id", user_id)
             .execute()
         )
