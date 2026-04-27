@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, SecretStr
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from database import supabase, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
@@ -33,9 +33,11 @@ def _post_registration_sync(user_id: str) -> None:
 
 
 class RegisterRequest(BaseModel):
+    model_config = {"hide_input_in_errors": True}
+
     name: str
     email: EmailStr
-    password: str
+    password: SecretStr
     last_period_date: str  # Required - period start date (source of truth)
     avg_bleeding_days: int = 5  # Typical bleeding length (2-8+), default 5
     cycle_length: int = 28  # Required, default 28
@@ -133,7 +135,7 @@ async def register(
             )
         
         # Hash password
-        hashed_password = get_password_hash(request.password)
+        hashed_password = get_password_hash(request.password.get_secret_value())
 
         # Clamp cycle_length to 21-45; default 28 if missing or out of range
         raw_cycle = request.cycle_length or 28
@@ -164,8 +166,8 @@ async def register(
             "favorite_cuisine": request.favorite_cuisine,
             "favorite_exercise": request.favorite_exercise,
             "interests": request.interests or [],
-            "consent_accepted": True,
-            "consent_timestamp": datetime.utcnow().isoformat(),
+            "consent_accepted": request.consent_accepted,
+            "consent_timestamp": datetime.now(timezone.utc),
             "privacy_policy_version": PRIVACY_POLICY_VERSION,
             "consent_language": request.language_choice,
         }
