@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from database import supabase, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
@@ -199,7 +199,6 @@ async def register(
         # Create first period_logs entry using avg_bleeding_days (end_date = start + (avg_bleeding_days - 1))
         if request.last_period_date:
             try:
-                from datetime import datetime, timedelta
                 last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
                 bleeding_days = max(2, min(8, avg_bleeding_days))
                 estimated_end_date = last_period_dt + timedelta(days=bleeding_days - 1)
