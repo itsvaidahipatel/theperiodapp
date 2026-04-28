@@ -80,6 +80,8 @@ Available URLs:
 - API: [http://localhost:8000](http://localhost:8000)
 - OpenAPI docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 - Health: [http://localhost:8000/health](http://localhost:8000/health)
+- Account deletion (public compliance URL): [http://localhost:8000/delete-requests](http://localhost:8000/delete-requests)
+- Static deletion page: [http://localhost:8000/static/delete-account.html](http://localhost:8000/static/delete-account.html)
 
 ### 3) Frontend setup (optional)
 

@@ -2,7 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional
-from datetime import datetime, timedelta, timezone
+import datetime as dt_module
+from datetime import timezone, timedelta
 
 from database import supabase, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
@@ -38,7 +39,6 @@ class RegisterRequest(BaseModel):
     last_period_date: str  # Required - period start date (source of truth)
     avg_bleeding_days: int = 5  # Typical bleeding length (2-8+), default 5
     cycle_length: int = 28  # Required, default 28
-    allergies: Optional[list] = None
     language: Optional[str] = "en"
     favorite_cuisine: Optional[str] = None
     favorite_exercise: Optional[str] = None
@@ -110,10 +110,12 @@ async def register(
     Without a Bearer token, a database-generated UUID is used for ``users.id`` (legacy self-contained auth).
     """
     try:
+        email_norm = str(request.email).lower().strip()
+
         # Check if user already exists (email links app profile to the Supabase account)
         @retry_supabase_call(max_retries=3)
         def _check_existing():
-            return supabase.table("users").select("id").eq("email", request.email).execute()
+            return supabase.table("users").select("id").eq("email", email_norm).execute()
         
         existing = await async_supabase_call(_check_existing)
         
@@ -145,16 +147,18 @@ async def register(
         # Create user - schema includes avg_bleeding_days (Integer, default 5)
         user_data: dict = {
             "name": request.name,
-            "email": request.email,
+            "email": email_norm,
             "password_hash": hashed_password,
             "last_period_date": request.last_period_date,
             "cycle_length": cycle_length,
             "avg_bleeding_days": avg_bleeding_days,
-            "allergies": request.allergies or [],
             "language": request.language or "en",
             "favorite_cuisine": request.favorite_cuisine,
             "favorite_exercise": request.favorite_exercise,
-            "interests": request.interests or []
+            "interests": request.interests or [],
+            "consent_accepted": True,
+            "consent_timestamp": dt_module.datetime.now(timezone.utc).isoformat(),
+            "privacy_policy_version": "2024.1",
         }
 
         if supabase_session and supabase_session.credentials:
@@ -174,7 +178,7 @@ async def register(
                 )
             claim_email = auth_payload.get("email")
             if claim_email is not None and str(claim_email).strip():
-                if str(claim_email).strip().lower() != str(request.email).strip().lower():
+                if str(claim_email).strip().lower() != email_norm:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Registration email must match the Supabase signed-in account email.",
@@ -194,12 +198,15 @@ async def register(
             )
         
         user = response.data[0]
+        for key, value in list(user.items()):
+            if isinstance(value, (dt_module.datetime, dt_module.date)):
+                user[key] = value.isoformat()
         user.pop("password_hash", None)  # Remove password from response
         
         # Create first period_logs entry using avg_bleeding_days (end_date = start + (avg_bleeding_days - 1))
         if request.last_period_date:
             try:
-                last_period_dt = datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
+                last_period_dt = dt_module.datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
                 bleeding_days = max(2, min(8, avg_bleeding_days))
                 estimated_end_date = last_period_dt + timedelta(days=bleeding_days - 1)
                 end_date_value = estimated_end_date.strftime("%Y-%m-%d")
@@ -239,14 +246,14 @@ async def register(
                 )
         
         # Create access token
-        access_token = create_access_token(data={"sub": user["id"]})
+        access_token = create_access_token(data={"sub": str(user["id"])})
         
         # OPTION B: Send welcome email in background (external calls can be slow/hang)
         try:
             from email_service import email_service
             background_tasks.add_task(
                 email_service.send_welcome_email,
-                to_email=request.email,
+                to_email=email_norm,
                 user_name=request.name,
                 language=request.language or "en"
             )
@@ -263,20 +270,24 @@ async def register(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+
+        print(f"REGISTRATION CRASH: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Registration failed: {str(e)}"
+            detail=f"Registration failed: {str(e)}",
         )
 
 @router.post("/login")
 async def login(request: LoginRequest):
     """Login user and return JWT token."""
     try:
+        email_norm = str(request.email).lower().strip()
         # Find user by email - use password_hash column name
         # Select only columns that exist in the database
         @retry_supabase_call(max_retries=3)
         def _find_user():
-            return supabase.table("users").select("*").eq("email", request.email).execute()
+            return supabase.table("users").select("*").eq("email", email_norm).execute()
         
         response = await async_supabase_call(_find_user)
         
@@ -287,6 +298,9 @@ async def login(request: LoginRequest):
             )
         
         user = response.data[0]
+        for key, value in list(user.items()):
+            if isinstance(value, (dt_module.datetime, dt_module.date)):
+                user[key] = value.isoformat()
         
         # Check if password_hash field exists
         if "password_hash" not in user or not user.get("password_hash"):
@@ -305,7 +319,7 @@ async def login(request: LoginRequest):
         user.pop("password_hash", None)  # Remove password from response
         
         # Create access token
-        access_token = create_access_token(data={"sub": user["id"]})
+        access_token = create_access_token(data={"sub": str(user["id"])})
         
         return {
             "msg": "Login successful",
@@ -339,6 +353,29 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
+@router.delete("/delete-account", status_code=status.HTTP_200_OK)
+async def delete_account(current_user: dict = Depends(get_current_user)):
+    """Permanently delete the authenticated user's profile row (cascades per DB FKs)."""
+    user_id = current_user["id"]
+    print(f"User {user_id} requested permanent deletion. Wiping all health logs.")
+
+    @retry_supabase_call(max_retries=3)
+    def _delete_user():
+        return supabase.table("users").delete().eq("id", user_id).execute()
+
+    try:
+        await async_supabase_call(_delete_user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete account: {str(e)}",
+        )
+
+    return {"msg": "All your data has been permanently deleted."}
+
+
 @router.post("/update-fcm-token")
 async def update_fcm_token(
     request: UpdateFcmTokenRequest,
@@ -356,7 +393,7 @@ async def update_fcm_token(
         user_id = current_user["id"]
         response = (
             supabase.table("users")
-            .update({"fcm_token": token, "updated_at": datetime.utcnow().isoformat()})
+            .update({"fcm_token": token, "updated_at": dt_module.datetime.utcnow().isoformat()})
             .eq("id", user_id)
             .execute()
         )

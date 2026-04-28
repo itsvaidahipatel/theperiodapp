@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Data Management &amp; Account Deletion</title>
+    <style>
+      :root {
+        --bg: #fff8fb;
+        --card: #ffffff;
+        --text: #2f2430;
+        --muted: #6f5e70;
+        --accent: #e26ba7;
+        --accent-soft: #f9e6f1;
+        --border: #f2cfe2;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Inter", "Segoe UI", Roboto, Arial, sans-serif;
+        background: linear-gradient(180deg, var(--bg) 0%, #fff 100%);
+        color: var(--text);
+      }
+      .container {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 32px 18px 40px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow: 0 10px 24px rgba(226, 107, 167, 0.12);
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 14px;
+        font-size: 1.7rem;
+        color: #7d2c57;
+      }
+      h2 {
+        margin: 20px 0 8px;
+        font-size: 1.1rem;
+        color: #8e3a67;
+      }
+      p {
+        margin: 0 0 10px;
+        line-height: 1.6;
+      }
+      .steps {
+        margin: 8px 0 0 0;
+        padding-left: 18px;
+      }
+      .steps li {
+        margin: 6px 0;
+      }
+      .button-wrap {
+        margin-top: 12px;
+      }
+      .button {
+        display: inline-block;
+        text-decoration: none;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 600;
+        border-radius: 10px;
+        padding: 11px 16px;
+      }
+      .button:hover {
+        background: #cf4f90;
+      }
+      .legal {
+        margin-top: 20px;
+        border-left: 4px solid var(--accent);
+        background: var(--accent-soft);
+        padding: 12px;
+        border-radius: 8px;
+        color: #5d3b53;
+      }
+      .muted {
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <section class="card">
+        <h1>Data Management &amp; Account Deletion</h1>
+        <p class="muted">
+          This page explains how to request permanent account and data deletion for PeriodCycle.AI.
+        </p>
+
+        <h2>Delete Data In-App (Instant)</h2>
+        <p>To delete your account and associated health data directly in the app:</p>
+        <ol class="steps">
+          <li>Open the app and sign in.</li>
+          <li>Go to <strong>Profile &gt; Account Actions &gt; Delete Account</strong>.</li>
+          <li>Confirm deletion when prompted. This action is permanent.</li>
+        </ol>
+
+        <h2>Web Request Option (If You Uninstalled)</h2>
+        <p>
+          If you no longer have the app installed, submit a deletion request by email and our support
+          team will assist you.
+        </p>
+        <div class="button-wrap">
+          <a
+            class="button"
+            href="mailto:your-support@email.com?subject=Data%20Deletion%20Request"
+            >Request Data Deletion via Email</a
+          >
+        </div>
+
+        <div class="legal">
+          Restricted Data Use Certification: We certify that personal health data is used exclusively for
+          wellness features and is never sold to third parties.
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
