@@ -26,6 +26,7 @@ RESPONSE_DISCLAIMER = (
     "This information is for educational purposes and not a substitute for professional medical advice."
 )
 BUSY_MESSAGE = "The AI is a bit busy, please wait a moment before your next message."
+SAFETY_PLACEHOLDER = "This content has been removed to comply with health information regulations."
 
 _GENAI_CONFIGURED = False
 _GENAI_CLIENT: Optional[Any] = None
@@ -124,6 +125,47 @@ def _append_disclaimer(text: str) -> str:
     return base + RESPONSE_DISCLAIMER
 
 
+def _fetch_blocked_phrases() -> List[str]:
+    """Fetch all blocked phrases from ai_safety_blocks."""
+    resp = supabase.table("ai_safety_blocks").select("blocked_phrase").execute()
+    rows = resp.data or []
+    phrases: List[str] = []
+    for row in rows:
+        phrase = str((row or {}).get("blocked_phrase") or "").strip()
+        if phrase:
+            phrases.append(phrase)
+    return phrases
+
+
+def _contains_blocked_phrase(text: str, blocked_phrases: List[str]) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return any(phrase.lower() in lowered for phrase in blocked_phrases)
+
+
+def check_safety_blocks(response_text: str) -> str:
+    """
+    Replace output with a regulatory placeholder when blocked phrases are present.
+    Blocked phrases are loaded from Supabase table: ai_safety_blocks.blocked_phrase.
+    """
+    text = (response_text or "").strip()
+    if not text:
+        return text
+
+    try:
+        blocked_phrases = _fetch_blocked_phrases()
+    except Exception:
+        logger.exception("Failed to query ai_safety_blocks; returning original response")
+        return text
+
+    if _contains_blocked_phrase(text, blocked_phrases):
+        logger.warning("AI response blocked by safety phrase match")
+        return SAFETY_PLACEHOLDER
+
+    return text
+
+
 def _extract_response_text(response: Any) -> str:
     if hasattr(response, "text") and response.text:
         return str(response.text)
@@ -135,6 +177,12 @@ def _extract_response_text(response: Any) -> str:
                 return str(parts[0].text)
         return str(c0)
     return str(response)
+
+
+def _is_rls_insert_error(err: Exception) -> bool:
+    raw = str(err)
+    lowered = raw.lower()
+    return "42501" in raw or "row-level security policy" in lowered
 
 
 class ChatRequest(BaseModel):
@@ -186,7 +234,6 @@ def _build_master_system_instruction(
         if user_context.get("phase_day"):
             phase_info += f" (phase day id: {user_context['phase_day']})"
 
-    allergies_text = ", ".join(user_context.get("allergies", []) or []) or "None"
     interests_text = ", ".join(user_context.get("interests", []) or []) or "None"
 
     if language == "hi":
@@ -222,7 +269,7 @@ Safety behavior:
         return (
             base
             + f"\nGeneral query mode:\n- Name: {user_name}\n- Language: {language}\n"
-            + "- Do not rely on user hormone/allergy/persona details unless user explicitly asks.\n"
+            + "- Do not rely on user hormone/persona details unless user explicitly asks.\n"
         )
 
     return (
@@ -230,7 +277,6 @@ Safety behavior:
         + "\nPersonal query mode:\n"
         + f"- Name: {user_name}\n"
         + f"- Typical cycle length: {user_context.get('cycle_length', 28)} days{phase_info}\n"
-        + f"- Allergies: {allergies_text}\n"
         + f"- Interests: {interests_text}\n\n"
         + "Hormone mapping context for today (educational reference, NOT lab values):\n"
         + f"{hormone_context}\n"
@@ -417,6 +463,26 @@ async def chat(
     try:
         user_id = current_user["id"]
         language = chat_request.language or current_user.get("language", "en")
+        user_message = (chat_request.message or "").strip()
+
+        # Block unsafe user inputs before calling AI.
+        blocked_phrases: List[str] = []
+        try:
+            blocked_phrases = _fetch_blocked_phrases()
+        except Exception:
+            logger.exception("Failed to load safety blocks for user-input scan")
+        if blocked_phrases and _contains_blocked_phrase(user_message, blocked_phrases):
+            placeholder = SAFETY_PLACEHOLDER
+            try:
+                supabase.table("chat_history").insert(
+                    {"user_id": user_id, "message": user_message, "role": "user"}
+                ).execute()
+                supabase.table("chat_history").insert(
+                    {"user_id": user_id, "message": placeholder, "role": "assistant"}
+                ).execute()
+            except Exception:
+                logger.exception("Database error saving blocked-input chat history")
+            return StreamingResponse(iter([placeholder]), media_type="text/plain; charset=utf-8")
 
         history_rows = _fetch_recent_chat_rows(user_id, limit=10)
         gemini_history = _rows_to_gemini_history(history_rows)
@@ -447,7 +513,6 @@ async def chat(
             "name": current_user.get("name"),
             "language": language,
             "cycle_length": current_user.get("cycle_length", 28),
-            "allergies": current_user.get("allergies", []),
             "interests": current_user.get("interests", []),
             "current_phase": current_phase,
             "phase_day": phase_day,
@@ -458,7 +523,7 @@ async def chat(
                 collected: List[str] = []
                 try:
                     for chunk in get_gemini_response_stream(
-                        chat_request.message.strip(),
+                        user_message,
                         user_context,
                         language,
                         hormone_context,
@@ -466,20 +531,27 @@ async def chat(
                         complex_query=chat_request.complex,
                     ):
                         collected.append(chunk)
-                        yield chunk
                 finally:
                     # Save full exchange after stream completes.
-                    full_text = _append_disclaimer("".join(collected).strip()) if collected else ""
+                    raw_text = _append_disclaimer("".join(collected).strip()) if collected else ""
+                    full_text = check_safety_blocks(raw_text) if raw_text else ""
                     try:
                         supabase.table("chat_history").insert(
-                            {"user_id": user_id, "message": chat_request.message, "role": "user"}
+                            {"user_id": user_id, "message": user_message, "role": "user"}
                         ).execute()
                         if full_text:
                             supabase.table("chat_history").insert(
                                 {"user_id": user_id, "message": full_text, "role": "assistant"}
                             ).execute()
-                    except Exception:
-                        logger.exception("Database error saving streaming chat history")
+                    except Exception as e:
+                        if _is_rls_insert_error(e):
+                            logger.warning(
+                                "Skipping chat_history save due to RLS policy (code 42501)."
+                            )
+                        else:
+                            logger.exception("Database error saving streaming chat history")
+                if full_text:
+                    yield full_text
 
             return StreamingResponse(_event_stream(), media_type="text/plain; charset=utf-8")
         except ValueError as e:

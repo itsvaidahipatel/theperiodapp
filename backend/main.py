@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -85,6 +87,11 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_STATIC_DIR = os.path.join(_BASE_DIR, "static")
+os.makedirs(_STATIC_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -146,6 +153,11 @@ async def health_check():
         "status": "healthy",
         "database": "connected",
     }
+
+
+@app.get("/delete-requests")
+async def delete_requests_page():
+    return FileResponse(os.path.join(_STATIC_DIR, "delete-account.html"))
 
 
 if __name__ == "__main__":

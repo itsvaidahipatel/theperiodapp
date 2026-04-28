@@ -18,7 +18,6 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
     last_period_date: '',
     avg_bleeding_days: 5,
     cycle_length: 28,
-    allergies: [],
     language: selectedLanguage,
     favorite_cuisine: '',
     favorite_exercise: '',
@@ -59,7 +58,6 @@ const SimpleAuthComponent = ({ onSubmit, isLogin = false, error, loading }) => {
     if (!submitData.last_period_date) delete submitData.last_period_date
     if (!submitData.favorite_cuisine) delete submitData.favorite_cuisine
     if (!submitData.favorite_exercise) delete submitData.favorite_exercise
-    if (submitData.allergies.length === 0) delete submitData.allergies
     if (submitData.interests.length === 0) delete submitData.interests
     onSubmit(submitData)
   }

@@ -15,7 +15,6 @@ CREATE TABLE IF NOT EXISTS users (
     last_period_date DATE,
     cycle_length INTEGER DEFAULT 28,
     avg_bleeding_days INTEGER DEFAULT 5,
-    allergies JSONB DEFAULT '[]'::jsonb,
     language VARCHAR(10) DEFAULT 'en',
     favorite_cuisine VARCHAR(100),
     favorite_exercise VARCHAR(100),

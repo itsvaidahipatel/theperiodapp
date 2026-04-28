@@ -215,7 +215,6 @@ AND column_name IN ('source', 'confidence', 'fertility_prob', 'predicted_ovulati
 - `password_hash` (TEXT)
 - `last_period_date` (DATE)
 - `cycle_length` (INTEGER)
-- `allergies` (ARRAY)
 - `language` (TEXT)
 - `favorite_cuisine` (TEXT)
 - `favorite_exercise` (TEXT)
