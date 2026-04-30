@@ -199,6 +199,10 @@ class PeriodLogUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class UpdateLastAnchorRequest(BaseModel):
+    date: str
+
+
 class CycleStatsAPIResponse(BaseModel):
     """Public cycle stats shape; ignores unknown keys and never exposes raw user / FK fields."""
 
@@ -911,4 +915,74 @@ async def toggle_anomaly(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to toggle anomaly: {str(e)}",
+        )
+
+
+@router.put("/update-last-anchor")
+async def update_last_anchor(
+    payload: UpdateLastAnchorRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Update the latest period start anchor and recalculate dependent fields.
+    """
+    try:
+        user_id = current_user["id"]
+        new_date_obj = parse_period_date(payload.date)
+        new_date_str = new_date_obj.strftime("%Y-%m-%d")
+
+        latest_log_res = (
+            supabase.table("period_logs")
+            .select("id, date")
+            .eq("user_id", user_id)
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not latest_log_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No period logs found to update",
+            )
+
+        latest_log = latest_log_res.data[0]
+        bleeding_days = max(2, min(8, int(current_user.get("avg_bleeding_days") or 5)))
+        end_date_str = (new_date_obj + timedelta(days=bleeding_days - 1)).strftime("%Y-%m-%d")
+
+        updated_log_res = (
+            supabase.table("period_logs")
+            .update(
+                {
+                    "date": new_date_str,
+                    "end_date": end_date_str,
+                    "is_manual_end": False,
+                }
+            )
+            .eq("id", latest_log["id"])
+            .eq("user_id", user_id)
+            .execute()
+        )
+        if not updated_log_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update latest period anchor",
+            )
+
+        supabase.table("users").update({"last_period_date": new_date_str}).eq("id", user_id).execute()
+
+        # Keep period_start_logs + cycle stats in lockstep with the edited anchor.
+        from routes.auth import _post_registration_sync
+
+        _post_registration_sync(user_id)
+
+        return {
+            "message": "Last anchor updated successfully",
+            "updatedLog": updated_log_res.data[0],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update last anchor: {str(e)}",
         )
