@@ -55,14 +55,11 @@ class RegisterRequest(BaseModel):
     name: str
     email: EmailStr
     password: SecretStr
-    last_period_date: str  # Required - period start date (source of truth)
-    avg_bleeding_days: int = 5  # Typical bleeding length (2-8+), default 5
-    cycle_length: int = 28  # Required, default 28
+    last_period_date: Optional[str] = None  # Optional onboarding field
+    avg_bleeding_days: Optional[int] = None  # Optional; DB default is 5
+    cycle_length: Optional[int] = None  # Optional; DB default is 28
     language: Optional[str] = "en"
     language_choice: str
-    favorite_cuisine: Optional[str] = None
-    favorite_exercise: Optional[str] = None
-    interests: Optional[list] = None
     consent_accepted: bool
 
 class LoginRequest(BaseModel):
@@ -91,6 +88,45 @@ def _fetch_user_from_db(user_id: str):
     """Helper function to fetch user from database with retry logic."""
     response = supabase.table("users").select("*").eq("id", user_id).execute()
     return response
+
+
+def _warm_cycle_state_on_login(user: dict) -> None:
+    """
+    Prime cycle logic on login so first-run users hit the same path as returning users.
+    Safe no-op when user has no cycle inputs yet.
+    """
+    try:
+        from cycle_utils import calculate_phase_for_date_range
+
+        user_id = str(user.get("id") or "").strip()
+        if not user_id:
+            return
+
+        raw_cycle = user.get("cycle_length")
+        try:
+            cycle_length = int(raw_cycle or 28)
+        except (TypeError, ValueError):
+            cycle_length = 28
+        try:
+            avg_bleeding_days = int(user.get("avg_bleeding_days") or 5)
+        except (TypeError, ValueError):
+            avg_bleeding_days = 5
+        avg_bleeding_days = max(2, min(8, avg_bleeding_days))
+
+        raw_last_period = user.get("last_period_date")
+        last_period_date = str(raw_last_period).strip() if raw_last_period else None
+
+        # Stateless compute-on-demand call; ensures cycle_utils pipeline runs at login.
+        calculate_phase_for_date_range(
+            user_id=user_id,
+            last_period_date=last_period_date,
+            cycle_length=cycle_length,
+            period_logs=[],
+        )
+    except Exception:
+        import traceback
+        print("⚠️ Login cycle warm-up failed (non-fatal)")
+        print(traceback.format_exc())
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Dependency to get current authenticated user."""
@@ -134,7 +170,7 @@ async def register(
     supabase_session: Optional[HTTPAuthorizationCredentials] = Depends(optional_supabase_bearer),
 ):
     """
-    Register a new user. ``RegisterRequest`` is unchanged.
+    Register a new user with optional cycle onboarding fields.
 
     For Supabase Auth as primary IdP: send ``Authorization: Bearer <supabase_access_token>`` from the
     client after sign-up. The token is verified with the Supabase JWT secret; ``sub`` becomes
@@ -167,29 +203,35 @@ async def register(
         # Hash password
         hashed_password = get_password_hash(request.password.get_secret_value())
 
-        # Strict medical validation for last_period_date (YYYY-MM-DD)
-        try:
-            dt_module.datetime.strptime(request.last_period_date, "%Y-%m-%d")
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="last_period_date must be in YYYY-MM-DD format",
-            ) from None
+        # Optional medical onboarding fields: validate only when provided.
+        last_period_date = None
+        if request.last_period_date is not None:
+            last_period_date = str(request.last_period_date).strip()
+            if not last_period_date:
+                last_period_date = None
+            else:
+                try:
+                    dt_module.datetime.strptime(last_period_date, "%Y-%m-%d")
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="last_period_date must be in YYYY-MM-DD format",
+                    ) from None
 
-        # Strict cycle length validation: reject outside [21, 45]
-        raw_cycle = request.cycle_length
-        try:
-            cycle_length = int(raw_cycle)
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="cycle_length must be an integer between 21 and 45",
-            ) from None
-        if cycle_length < 21 or cycle_length > 45:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="cycle_length must be between 21 and 45",
-            )
+        cycle_length = 28
+        if request.cycle_length is not None:
+            try:
+                cycle_length = int(request.cycle_length)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="cycle_length must be an integer between 21 and 45",
+                ) from None
+            if cycle_length < 21 or cycle_length > 45:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="cycle_length must be between 21 and 45",
+                )
 
         # Safety net: re-check uniqueness immediately before insert
         existing = await async_supabase_call(_check_existing)
@@ -199,38 +241,36 @@ async def register(
                 detail="EMAIL_ALREADY_EXISTS",
             )
 
-        # Strict avg_bleeding_days validation: reject outside [2, 8]
-        raw_bleeding = getattr(request, "avg_bleeding_days", 5)
-        try:
-            avg_bleeding_days = int(raw_bleeding)
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="avg_bleeding_days must be an integer between 2 and 8",
-            ) from None
-        if avg_bleeding_days < 2 or avg_bleeding_days > 8:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="avg_bleeding_days must be between 2 and 8",
-            )
+        avg_bleeding_days = 5
+        if request.avg_bleeding_days is not None:
+            try:
+                avg_bleeding_days = int(request.avg_bleeding_days)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="avg_bleeding_days must be an integer between 2 and 8",
+                ) from None
+            if avg_bleeding_days < 2 or avg_bleeding_days > 8:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="avg_bleeding_days must be between 2 and 8",
+                )
 
-        # Create user - schema includes avg_bleeding_days (Integer, default 5)
+        # Create user; keep optional onboarding fields absent to use DB defaults.
         user_data: dict = {
             "name": request.name,
             "email": email_norm,
             "password_hash": hashed_password,
-            "last_period_date": request.last_period_date,
+            "language": request.language_choice or request.language or "en",
             "cycle_length": cycle_length,
             "avg_bleeding_days": avg_bleeding_days,
-            "language": request.language_choice or request.language or "en",
-            "favorite_cuisine": request.favorite_cuisine,
-            "favorite_exercise": request.favorite_exercise,
-            "interests": request.interests or [],
             "consent_accepted": request.consent_accepted,
             "consent_timestamp": dt_module.datetime.now(timezone.utc).isoformat(),
             "privacy_policy_version": PRIVACY_POLICY_VERSION,
             "consent_language": request.language_choice,
         }
+        if last_period_date is not None:
+            user_data["last_period_date"] = last_period_date
 
         if supabase_session and supabase_session.credentials:
             try:
@@ -272,10 +312,10 @@ async def register(
         user.pop("password_hash", None)  # Remove password from response
         
         # Create first period_logs entry using avg_bleeding_days (end_date = start + (avg_bleeding_days - 1))
-        if request.last_period_date:
+        if last_period_date:
             try:
-                last_period_dt = dt_module.datetime.strptime(request.last_period_date, "%Y-%m-%d").date()
-                bleeding_days = max(2, min(8, avg_bleeding_days))
+                last_period_dt = dt_module.datetime.strptime(last_period_date, "%Y-%m-%d").date()
+                bleeding_days = max(2, min(8, int(avg_bleeding_days or 5)))
                 estimated_end_date = last_period_dt + timedelta(days=bleeding_days - 1)
                 end_date_value = estimated_end_date.strftime("%Y-%m-%d")
                 # Auto-calculated from typical bleeding length; is_manual_end=False
@@ -286,7 +326,7 @@ async def register(
                 # flow='Medium' so the engine recognizes it as a valid period start
                 period_log_entry = {
                     "user_id": user["id"],
-                    "date": request.last_period_date,
+                    "date": last_period_date,
                     "end_date": end_date_value,
                     "is_manual_end": is_manual_end_value,
                     "flow": "Medium",
@@ -299,7 +339,7 @@ async def register(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail="Failed to insert initial period log during registration",
                     )
-                print(f"✅ Created period_logs entry for registration: start={request.last_period_date}, end={end_date_value}")
+                print(f"✅ Created period_logs entry for registration: start={last_period_date}, end={end_date_value}")
 
                 # Run sync inline: user should not proceed/login until anchors are fully synced.
                 _post_registration_sync(user["id"])
@@ -366,6 +406,7 @@ async def login(request: LoginRequest):
             )
         
         user = _json_safe_user(response.data[0])
+        _warm_cycle_state_on_login(user)
         
         # Check if password_hash field exists
         if "password_hash" not in user or not user.get("password_hash"):
