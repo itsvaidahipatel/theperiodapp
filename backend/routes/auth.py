@@ -52,6 +52,19 @@ class LoginRequest(BaseModel):
 class UpdateFcmTokenRequest(BaseModel):
     fcm_token: str
 
+
+@router.get("/check-email")
+async def check_email(email: str):
+    email_norm = (email or "").strip().lower()
+    if not email_norm:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Email is required",
+        )
+    response = supabase.table("users").select("id").eq("email", email_norm).execute()
+    return {"available": not bool(response.data)}
+
+
 @retry_supabase_call(max_retries=3, initial_delay=0.5, backoff_factor=2.0)
 def _fetch_user_from_db(user_id: str):
     """Helper function to fetch user from database with retry logic."""
@@ -121,28 +134,59 @@ async def register(
         
         if existing.data:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
+                status_code=status.HTTP_409_CONFLICT,
+                detail="EMAIL_ALREADY_EXISTS",
             )
         
         # Hash password
         hashed_password = get_password_hash(request.password)
 
-        # Clamp cycle_length to 21-45; default 28 if missing or out of range
-        raw_cycle = request.cycle_length or 28
+        # Strict medical validation for last_period_date (YYYY-MM-DD)
         try:
-            cycle_length = max(21, min(45, int(raw_cycle)))
+            dt_module.datetime.strptime(request.last_period_date, "%Y-%m-%d")
         except (TypeError, ValueError):
-            cycle_length = 28
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="last_period_date must be in YYYY-MM-DD format",
+            ) from None
 
-        # Clamp avg_bleeding_days to 2-8+ (store 8 for "8+")
-        raw_bleeding = getattr(request, "avg_bleeding_days", 5) or 5
+        # Strict cycle length validation: reject outside [21, 45]
+        raw_cycle = request.cycle_length
         try:
-            avg_bleeding_days = max(2, min(9, int(raw_bleeding)))  # 2-8, or 9 for "8+"
-            if avg_bleeding_days == 9:
-                avg_bleeding_days = 8  # 8+ stored as 8
+            cycle_length = int(raw_cycle)
         except (TypeError, ValueError):
-            avg_bleeding_days = 5
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="cycle_length must be an integer between 21 and 45",
+            ) from None
+        if cycle_length < 21 or cycle_length > 45:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="cycle_length must be between 21 and 45",
+            )
+
+        # Safety net: re-check uniqueness immediately before insert
+        existing = await async_supabase_call(_check_existing)
+        if existing.data:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="EMAIL_ALREADY_EXISTS",
+            )
+
+        # Strict avg_bleeding_days validation: reject outside [2, 8]
+        raw_bleeding = getattr(request, "avg_bleeding_days", 5)
+        try:
+            avg_bleeding_days = int(raw_bleeding)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="avg_bleeding_days must be an integer between 2 and 8",
+            ) from None
+        if avg_bleeding_days < 2 or avg_bleeding_days > 8:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="avg_bleeding_days must be between 2 and 8",
+            )
 
         # Create user - schema includes avg_bleeding_days (Integer, default 5)
         user_data: dict = {

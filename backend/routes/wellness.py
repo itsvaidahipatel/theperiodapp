@@ -452,6 +452,13 @@ async def get_nutrition(
             if narrowed:
                 rows = narrowed
 
+        # Neutral sort when user has no preference signals.
+        if not interests and not favorite_cuisine:
+            return {
+                "recipes": rows,
+                "wholefoods": [],
+            }
+
         cuisine_boost = favorite_cuisine if cuisine_query is None else None
         ranked = _rank_rows_by_score(
             rows,
@@ -511,6 +518,12 @@ async def get_exercises(
             ]
             if narrowed:
                 rows = narrowed
+
+        # Neutral sort when user has no preference signals.
+        if not interests and not favorite_exercise:
+            return {
+                "exercises": rows,
+            }
 
         category_boost = favorite_exercise if category_query is None else None
         ranked = _rank_rows_by_score(
