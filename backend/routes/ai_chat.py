@@ -2,8 +2,9 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -27,6 +28,9 @@ RESPONSE_DISCLAIMER = (
 )
 BUSY_MESSAGE = "The AI is a bit busy, please wait a moment before your next message."
 SAFETY_PLACEHOLDER = "This content has been removed to comply with health information regulations."
+
+# Daily cap on persisted user turns (`chat_history.role == "user"`). Set to 0 to disable.
+CHAT_DAILY_USER_MESSAGE_LIMIT = int(os.getenv("CHAT_DAILY_USER_MESSAGE_LIMIT", "10"))
 
 _GENAI_CONFIGURED = False
 _GENAI_CLIENT: Optional[Any] = None
@@ -60,6 +64,38 @@ def configure_genai_on_startup() -> None:
 def _ensure_genai_configured() -> None:
     if not _GENAI_CONFIGURED:
         configure_genai_on_startup()
+
+
+def _utc_day_start_end_iso() -> Tuple[str, str]:
+    """Inclusive start and exclusive end of the current UTC calendar day (ISO-8601 for TIMESTAMPTZ)."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+def _seconds_until_next_utc_midnight() -> int:
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    next_midnight = start + timedelta(days=1)
+    return max(1, int((next_midnight - now).total_seconds()))
+
+
+def _count_user_chat_messages_today_utc(user_id: str) -> int:
+    """Number of user-authored chat rows stored since 00:00 UTC today (exclusive end next midnight)."""
+    start_iso, end_iso = _utc_day_start_end_iso()
+    resp = (
+        supabase.table("chat_history")
+        .select("id", count="exact")
+        .eq("user_id", user_id)
+        .eq("role", "user")
+        .gte("created_at", start_iso)
+        .lt("created_at", end_iso)
+        .execute()
+    )
+    if getattr(resp, "count", None) is not None:
+        return int(resp.count)
+    return len(resp.data or [])
 
 
 def _fetch_recent_chat_rows(user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -234,6 +270,7 @@ def _build_master_system_instruction(
         if user_context.get("phase_day"):
             phase_info += f" (phase day id: {user_context['phase_day']})"
 
+    allergies_text = ", ".join(user_context.get("allergies", []) or []) or "None"
     interests_text = ", ".join(user_context.get("interests", []) or []) or "None"
 
     if language == "hi":
@@ -464,6 +501,29 @@ async def chat(
         user_id = current_user["id"]
         language = chat_request.language or current_user.get("language", "en")
         user_message = (chat_request.message or "").strip()
+
+        if CHAT_DAILY_USER_MESSAGE_LIMIT > 0:
+            try:
+                sent_today = _count_user_chat_messages_today_utc(user_id)
+            except Exception as e:
+                logger.exception("Failed to count today's chat messages for rate limit")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Could not verify chat rate limit. Please try again.",
+                ) from e
+            if sent_today >= CHAT_DAILY_USER_MESSAGE_LIMIT:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "status": "rate_limited",
+                        "message": (
+                            f"You've reached the daily limit of {CHAT_DAILY_USER_MESSAGE_LIMIT} "
+                            "chat messages. Please try again tomorrow."
+                        ),
+                        "limit": CHAT_DAILY_USER_MESSAGE_LIMIT,
+                    },
+                    headers={"Retry-After": str(_seconds_until_next_utc_midnight())},
+                )
 
         # Block unsafe user inputs before calling AI.
         blocked_phrases: List[str] = []
