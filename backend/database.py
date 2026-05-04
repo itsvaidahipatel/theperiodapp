@@ -30,18 +30,17 @@ _require_supabase_credentials()
 # Create Supabase client with default configuration (anon key - respects RLS)
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
 
-# Create service role client for operations that need to bypass RLS
-# Only use this for server-side operations that require elevated permissions
+# Service role client bypasses RLS — use only for trusted server-side admin paths (e.g. registration).
+# Key: ``SUPABASE_SERVICE_ROLE_KEY`` (see ``config.Settings`` / env).
 supabase_admin: Client | None = None
-if settings.SUPABASE_SERVICE_ROLE_KEY:
+_service_key = (settings.SUPABASE_SERVICE_ROLE_KEY or "").strip()
+if _service_key:
     try:
-        supabase_admin = create_client(
-            settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY
-        )
+        supabase_admin = create_client(settings.SUPABASE_URL, _service_key)
     except Exception as e:
         logger.warning(
             "Could not create Supabase service role client: %s. "
-            "Some operations may fail if RLS policies are too restrictive.",
+            "Admin inserts (e.g. registration) will fail until this is fixed.",
             e,
         )
 

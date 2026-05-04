@@ -6,7 +6,7 @@ import uuid
 import datetime as dt_module
 from datetime import timezone, timedelta
 
-from database import supabase, async_supabase_call, retry_supabase_call
+from database import supabase, supabase_admin, async_supabase_call, retry_supabase_call
 from auth_utils import get_password_hash, verify_password, create_access_token, verify_token
 
 router = APIRouter()
@@ -336,11 +336,17 @@ async def register(
                         detail="Registration email must match the Supabase signed-in account email.",
                     )
             user_data["id"] = supabase_sub
-        
+
+        if supabase_admin is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Server is missing SUPABASE_SERVICE_ROLE_KEY; registration cannot complete.",
+            )
+
         @retry_supabase_call(max_retries=3)
         def _insert_user():
-            return supabase.table("users").insert(user_data).execute()
-        
+            return supabase_admin.table("users").insert(user_data).execute()
+
         response = await async_supabase_call(_insert_user)
         
         if not response.data:
@@ -374,7 +380,7 @@ async def register(
                     "notes": None
                 }
                 
-                period_log_insert = supabase.table("period_logs").insert(period_log_entry).execute()
+                period_log_insert = supabase_admin.table("period_logs").insert(period_log_entry).execute()
                 if not period_log_insert.data:
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
