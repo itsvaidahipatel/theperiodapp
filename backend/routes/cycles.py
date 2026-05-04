@@ -9,7 +9,7 @@ import logging
 import os
 
 from database import supabase, async_supabase_call, retry_supabase_call
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 from cycle_utils import (
     calculate_phase_for_date_range,
     get_period_phase_day_from_logs,
@@ -133,8 +133,28 @@ def _late_anchor_shift_days_from_user(user: dict) -> int:
 
 # NOTE: _prediction_in_progress removed - predictions are now calculated synchronously on-demand
 
+
+def _reject_body_user_id_mismatch(past_cycle_data: List[Dict], auth_user_id: str) -> None:
+    """
+    ``POST /cycles/predict`` still accepts ``past_cycle_data`` for API compatibility but does not use it
+    for queries. Reject payloads that try to name another account, so a client cannot imply cross-user scope.
+    """
+    auth = str(auth_user_id).strip().lower()
+    for row in past_cycle_data or []:
+        if not isinstance(row, dict):
+            continue
+        for key in ("user_id", "userId"):
+            if key not in row or row[key] is None:
+                continue
+            if str(row[key]).strip().lower() != auth:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Request must not reference another user's identifier.",
+                )
+
+
 class CyclePredictionRequest(BaseModel):
-    past_cycle_data: List[Dict]
+    past_cycle_data: List[Dict] = Field(default_factory=list)
     current_date: Optional[str] = None
 
 
@@ -157,7 +177,9 @@ async def predict_cycles(
 ):
     """Generate cycle predictions and phase mappings for user using adaptive local algorithms."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
+        _reject_body_user_id_mismatch(request.past_cycle_data, user_id)
+
         from missing_period_handler import handle_missing_period
 
         handle_missing_period(user_id)
@@ -247,7 +269,7 @@ async def get_current_phase(
     """Get current phase using the same logic as the calendar (calculate_phase_for_date_range).
     If the date is inside a period_log, phase is always Period (p1, p2, ...)."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         from cycle_utils import get_user_today
 
         today = get_user_today(client_today)
@@ -394,7 +416,7 @@ async def get_phase_map(
         force_recalculate: Ignored (always calculates fresh)
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         from cycle_utils import get_user_today
         user_today = get_user_today(client_today)
 
@@ -527,7 +549,7 @@ async def get_period_start_logs_endpoint(
     """
     from period_start_logs import get_period_start_logs
 
-    user_id = current_user["id"]
+    user_id = authenticated_subject_id(current_user)
     logs = get_period_start_logs(user_id, confirmed_only=confirmed_only)
     return {"period_start_logs": logs}
 
@@ -572,7 +594,7 @@ async def cycle_health_check(
     - Recommendations
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         
         # Get user data for current cycle stats
         user_response = supabase.table("users").select(
@@ -1100,7 +1122,7 @@ async def debug_cycle_data(current_user: dict = Depends(get_current_user)):
             # Hide endpoint existence when not in debug mode
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         
         # Check period logs
         period_logs = supabase.table("period_logs").select("*").eq("user_id", user_id).execute()

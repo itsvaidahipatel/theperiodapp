@@ -22,7 +22,7 @@ from period_service import (
 )
 from prediction_cache import hard_invalidate_predictions_from_date, schedule_regenerate_predictions
 from period_start_logs import get_period_start_logs, sync_period_start_logs_from_period_logs
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 from missing_period_handler import handle_missing_period_async
 
 router = APIRouter()
@@ -244,7 +244,7 @@ async def record_period_log(
     Inserts/updates ``period_logs``, syncs anchors, updates ``users.last_period_date``, and runs
     late-anchor / missing-period handling after a successful write.
     """
-    user_id = current_user["id"]
+    user_id = authenticated_subject_id(current_user)
     date_obj = parse_period_date(log_data.date)
 
     from cycle_utils import get_user_today
@@ -343,7 +343,9 @@ async def record_period_log(
                 if prev_end_dt >= date_obj:
                     trim_end = date_obj - timedelta(days=1)
                     trim_end_str = trim_end.strftime("%Y-%m-%d")
-                    supabase.table("period_logs").update({"end_date": trim_end_str}).eq("id", prev["id"]).execute()
+                    supabase.table("period_logs").update({"end_date": trim_end_str}).eq("id", prev["id"]).eq(
+                        "user_id", user_id
+                    ).execute()
                     logger.info("Trimmed previous period end to %s (overlap protection)", trim_end_str)
 
         log_entry = {
@@ -476,7 +478,7 @@ async def log_period(
 async def get_period_logs(current_user: dict = Depends(get_current_user)):
     """Get all period logs for the current user. Returns camelCase."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         response = supabase.table("period_logs").select("*").eq("user_id", user_id).order("date", desc=False).execute()
 
@@ -510,7 +512,7 @@ async def get_predictions_endpoint(
 ):
     """Get predictions with confidence levels. Returns camelCase."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         language = current_user.get("language", "en")
 
         pred_bundle = get_predictions(user_id, count=count, language=language, client_today_str=client_today)
@@ -539,7 +541,7 @@ async def get_predictions_endpoint(
 async def get_stats(current_user: dict = Depends(get_current_user)) -> CycleStatsAPIResponse:
     """Get comprehensive cycle statistics (sanitized public model)."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         language = current_user.get("language", "en")
         stats = get_cycle_stats(user_id, language=language)
         return CycleStatsAPIResponse.model_validate(stats)
@@ -557,7 +559,7 @@ async def get_period_episodes(current_user: dict = Depends(get_current_user)):
     Get period episodes (start dates + predicted end dates) for calendar rendering.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         period_starts = get_period_start_logs(user_id, confirmed_only=False)
 
@@ -599,7 +601,7 @@ async def update_period_log(
     Update a period log entry with SMART RECALCULATION.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         check = supabase.table("period_logs").select("*").eq("id", log_id).eq("user_id", user_id).execute()
 
@@ -694,7 +696,13 @@ async def update_period_log(
                 update_data["is_manual_end"] = False
                 logger.info("Clearing end_date (estimated length)")
 
-            response = supabase.table("period_logs").update(update_data).eq("id", log_id).execute()
+            response = (
+                supabase.table("period_logs")
+                .update(update_data)
+                .eq("id", log_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
 
             if not response.data:
                 raise HTTPException(
@@ -724,7 +732,9 @@ async def update_period_log(
             }
         else:
             update_data = log_data.model_dump(exclude_unset=True)
-            response = supabase.table("period_logs").update(update_data).eq("id", log_id).execute()
+            response = (
+                supabase.table("period_logs").update(update_data).eq("id", log_id).eq("user_id", user_id).execute()
+            )
 
             if not response.data:
                 raise HTTPException(
@@ -751,7 +761,7 @@ async def delete_period_log(
 ):
     """Delete a period log entry. Recalculates predictions."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         check = supabase.table("period_logs").select("id").eq("id", log_id).eq("user_id", user_id).execute()
 
@@ -761,7 +771,7 @@ async def delete_period_log(
                 detail="Period log not found",
             )
 
-        supabase.table("period_logs").delete().eq("id", log_id).execute()
+        supabase.table("period_logs").delete().eq("id", log_id).eq("user_id", user_id).execute()
 
         period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
         update_user_cycle_stats(user_id, period_starts=period_starts)
@@ -785,7 +795,7 @@ async def log_period_end(
 ):
     """Log a period end date."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         end_date_obj = parse_period_date(end_data.date)
 
@@ -840,6 +850,7 @@ async def log_period_end(
                 }
             )
             .eq("id", last_log["id"])
+            .eq("user_id", user_id)
             .execute()
         )
 
@@ -879,7 +890,7 @@ async def toggle_anomaly(
     so Bayesian / rolling stats exclude this cycle.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         check = supabase.table("period_logs").select("id, date").eq("id", log_id).eq("user_id", user_id).execute()
 
@@ -927,7 +938,7 @@ async def update_last_anchor(
     Update the latest period start anchor and recalculate dependent fields.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         new_date_obj = parse_period_date(payload.date)
         new_date_str = new_date_obj.strftime("%Y-%m-%d")
 

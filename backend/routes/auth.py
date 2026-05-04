@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, SecretStr
 from typing import Optional
+import uuid
 import datetime as dt_module
 from datetime import timezone, timedelta
 
@@ -129,17 +130,33 @@ def _warm_cycle_state_on_login(user: dict) -> None:
         print(traceback.format_exc())
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Dependency to get current authenticated user."""
+    """
+    Resolve the authenticated app user from the Bearer JWT.
+
+    Supabase Auth (and our login/register tokens minted with the same secret) place the account UUID
+    in the ``sub`` claim. ``public.users.id`` matches that UUID when registration links the profile to
+    Supabase; downstream requests must send that same token so RLS owner-only policies
+    (``auth.uid()`` / ``sub``) align with lookups by ``users.id``.
+    """
     token = credentials.credentials
     payload = verify_token(token)
-    user_id = payload.get("sub")
-    
-    if user_id is None:
+    raw_sub = payload.get("sub")
+    user_id = str(raw_sub).strip() if raw_sub is not None else ""
+
+    if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials"
+            detail="Invalid authentication credentials",
         )
-    
+
+    try:
+        uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+        )
+
     try:
         # Fetch user from database with retry logic and async handling
         response = await async_supabase_call(_fetch_user_from_db, user_id)
@@ -162,6 +179,30 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database connection error. Please try again."
         )
+
+
+def authenticated_subject_id(current_user: dict) -> str:
+    """
+    ``public.users.id`` for the Bearer token (same as Supabase JWT ``sub`` after profile link).
+
+    Use this—and never a client-supplied user id—to scope health reads/writes from this API. When the
+    backend uses the Supabase service role, row-level security is not applied on these queries; the app
+    layer must enforce ownership the same way PostgREST does for end-user tokens.
+    """
+    raw = current_user.get("id")
+    if raw is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+        )
+    uid = str(raw).strip()
+    if not uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+        )
+    return uid
+
 
 @router.post("/register")
 async def register(
@@ -462,31 +503,15 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 
 @router.delete("/delete-account", status_code=status.HTTP_200_OK)
 async def delete_account(current_user: dict = Depends(get_current_user)):
-    """Permanently delete the authenticated user's profile row (cascades per DB FKs)."""
-    user_id = current_user["id"]
-    print(f"User {user_id} requested permanent deletion. Wiping all health logs.")
+    """
+    Delete the authenticated user's row in ``public.users`` by ``current_user['id']`` (JWT ``sub``).
 
-    @retry_supabase_call(max_retries=3)
-    def _delete_user():
-        return supabase.table("users").delete().eq("id", user_id).execute()
-
-    try:
-        await async_supabase_call(_delete_user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete account: {str(e)}",
-        )
-
-    return {"msg": "All your data has been permanently deleted."}
-
-
-@router.delete("/delete-account", status_code=status.HTTP_200_OK)
-async def delete_account(current_user: dict = Depends(get_current_user)):
-    """Permanently delete the authenticated user's profile row (cascades per DB FKs)."""
-    user_id = current_user["id"]
+    With ``ON DELETE CASCADE`` on FKs from child tables (e.g. ``period_logs``, ``chat_history``,
+    ``user_cycle_days``) to ``users``, this single delete removes the profile and dependent rows so
+    the account can be erased for Right to be Forgotten requests; behavior is enforced in the schema,
+    not in this endpoint.
+    """
+    user_id = authenticated_subject_id(current_user)
     print(f"User {user_id} requested permanent deletion. Wiping all health logs.")
 
     @retry_supabase_call(max_retries=3)
@@ -520,7 +545,7 @@ async def update_fcm_token(
         )
 
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         response = (
             supabase.table("users")
             .update({"fcm_token": token, "updated_at": dt_module.datetime.utcnow().isoformat()})

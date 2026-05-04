@@ -8,7 +8,7 @@ import os
 from typing import Any, Dict, List, Tuple
 
 from database import supabase
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 from cycle_utils import calculate_phase_for_date_range
 
 router = APIRouter()
@@ -90,7 +90,7 @@ async def six_month_phase_diagnostic(current_user: dict = Depends(get_current_us
     first log show F1.
     """
     _guard_not_production()
-    user_id = current_user["id"]
+    user_id = authenticated_subject_id(current_user)
     # Last 180 days
     end = datetime.now()
     start = end - timedelta(days=180)
@@ -133,7 +133,7 @@ async def analyze_phases(
     so you can verify exact math for every date (anchor, diff, phase, source).
     """
     _guard_not_production()
-    user_id = current_user["id"]
+    user_id = authenticated_subject_id(current_user)
     today = datetime.now().date()
     days_int = _safe_int(days, 90)
     start = (today - timedelta(days=days_int)).strftime("%Y-%m-%d")

@@ -18,7 +18,7 @@ from prediction_cache import (
     invalidate_predictions_after_period,
     schedule_regenerate_predictions,
 )
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 
 router = APIRouter()
 security = HTTPBearer()
@@ -147,7 +147,7 @@ async def update_profile(
 ):
     """Update user profile."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         raw = profile_data.model_dump(exclude_unset=True)
         update_data: Dict[str, Any] = {
             k: raw[k] for k in _PROFILE_UPDATE_KEYS if k in raw
@@ -190,7 +190,7 @@ async def change_password(
 ):
     """Change user password."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         if not verify_password(password_data.current_password, current_user.get("password_hash", "")):
             raise HTTPException(
@@ -229,7 +229,7 @@ async def remove_item(
 ):
     """Remove item from user's saved items."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         if "saved_items" not in current_user:
             raise HTTPException(
@@ -300,7 +300,7 @@ async def update_notification_preferences(
 ):
     """Update user's notification preferences."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         update_data: Dict[str, Any] = {}
 
         if preferences.push_notifications_enabled is not None:
@@ -366,7 +366,7 @@ async def reset_cycle_data(current_user: dict = Depends(get_current_user)):
     stateless phase logic (e.g. calculate_phase_for_date_range) sees no stale cycles.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         supabase.table("period_logs").delete().eq("user_id", user_id).execute()
         logger.info("Deleted all period_logs for user reset")
@@ -425,7 +425,7 @@ async def reset_last_period(current_user: dict = Depends(get_current_user)):
     refreshes stats, and regenerates predictions from the new last confirmed period.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         logs_response = (
             supabase.table("period_logs")

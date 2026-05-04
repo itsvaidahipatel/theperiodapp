@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from database import supabase
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 from routes.wellness import get_hormone_trends_summary_for_llm
 
 router = APIRouter()
@@ -461,7 +461,7 @@ async def chat(
 ):
     """Chat with AI assistant (last 5 turns/10 messages retained as Gemini history)."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         language = chat_request.language or current_user.get("language", "en")
         user_message = (chat_request.message or "").strip()
 
@@ -590,7 +590,7 @@ async def get_chat_history(
 ):
     """Get chat history for the current user."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         response = (
             supabase.table("chat_history")

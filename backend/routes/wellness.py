@@ -1,3 +1,9 @@
+"""
+Wellness routes (hormones, nutrition, exercises): all handlers depend on ``get_current_user``.
+The account scope is always ``authenticated_subject_id(current_user)`` (JWT ``sub`` / ``users.id``).
+Query parameters such as ``phase_day_id`` refer to cycle *template* ids (e.g. p1, f5), not user UUIDs.
+"""
+
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -12,7 +18,7 @@ from cycle_utils import (
     get_user_today,
 )
 from database import supabase
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 
 router = APIRouter()
 logger = logging.getLogger("periodcycle_ai.wellness")
@@ -296,7 +302,10 @@ def _empty_hormone_response(
 
 @router.get("/hormones")
 async def get_hormones(
-    phase_day_id: Optional[str] = Query(None, description="Phase day ID (e.g., p1, f5, o2, l10). If not provided, uses today's phase-day ID"),
+    phase_day_id: Optional[str] = Query(
+        None,
+        description="Cycle template phase-day id (e.g. p1, f5)—not a user UUID. Omitted: derived from the authenticated user's logs.",
+    ),
     days: int = Query(5, description="Number of days to fetch (default 5: last 4 days + today)"),
     client_today: Optional[str] = Query(
         None,
@@ -306,7 +315,7 @@ async def get_hormones(
 ):
     """Get hormone data for a specific phase day. Defaults to today's phase-day ID. Can fetch multiple days for graphs."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         language = current_user.get("language", "en")
 
         today_phase_day_id = _resolve_phase_day_id(user_id, phase_day_id, client_today)
@@ -410,7 +419,10 @@ async def get_hormones(
 
 @router.get("/nutrition")
 async def get_nutrition(
-    phase_day_id: Optional[str] = Query(None, description="Phase day ID. If not provided, uses today's phase-day ID"),
+    phase_day_id: Optional[str] = Query(
+        None,
+        description="Cycle template phase-day id—not a user UUID. Omitted: derived for the authenticated user.",
+    ),
     language: str = Query("en", description="Language code"),
     cuisine: Optional[str] = Query(None, description="Optional strict cuisine filter (query); falls back to all rows if no match"),
     client_today: Optional[str] = Query(
@@ -427,7 +439,7 @@ async def get_nutrition(
     otherwise all phase-day recipes are returned, interest-matched first.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
@@ -477,7 +489,10 @@ async def get_nutrition(
 
 @router.get("/exercises")
 async def get_exercises(
-    phase_day_id: Optional[str] = Query(None, description="Phase day ID. If not provided, uses today's phase-day ID"),
+    phase_day_id: Optional[str] = Query(
+        None,
+        description="Cycle template phase-day id—not a user UUID. Omitted: derived for the authenticated user.",
+    ),
     language: str = Query("en", description="Language code"),
     category: Optional[str] = Query(None, description="Optional category filter; falls back to all rows if no match"),
     client_today: Optional[str] = Query(
@@ -494,7 +509,7 @@ async def get_exercises(
     returned with interest matches first.
     """
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
 
         resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:

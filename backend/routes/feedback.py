@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from database import supabase
-from routes.auth import get_current_user
+from routes.auth import authenticated_subject_id, get_current_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ async def submit_feedback(
 ):
     """Submit user feedback, questions, or suggestions. User details are linked via user_id only."""
     try:
-        user_id = current_user["id"]
+        user_id = authenticated_subject_id(current_user)
         background_tasks.add_task(
             _persist_feedback,
             user_id,
