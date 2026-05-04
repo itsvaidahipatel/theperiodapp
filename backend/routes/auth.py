@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, SecretStr
 from typing import Optional
+import re
 import uuid
 import datetime as dt_module
 from datetime import timezone, timedelta
@@ -72,6 +73,39 @@ class UpdateFcmTokenRequest(BaseModel):
     fcm_token: str
 
 
+class VerifyResetOtpRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+
+class FinalizePasswordResetRequest(BaseModel):
+    email: EmailStr
+    reset_token: str
+    new_password: str
+
+
+def _validate_password_reset_strength(password: str) -> None:
+    if len(password or "") < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must be at least 8 characters and include a number, capital letter, or symbol.",
+        )
+    if not re.search(r"[A-Z0-9!@#$%^&*]", password):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must be at least 8 characters and include a number, capital letter, or symbol.",
+        )
+
+
+def _merge_login_user_compliance_fields(user: dict) -> None:
+    """Ensure clients always receive compliance keys (legacy rows may omit columns)."""
+    if user.get("consent_accepted") is None:
+        user["consent_accepted"] = False
+    for key in ("consent_timestamp", "privacy_policy_version", "consent_language"):
+        if key not in user:
+            user[key] = None
+
+
 @router.get("/check-email")
 async def check_email(email: str):
     email_norm = (email or "").strip().lower()
@@ -99,8 +133,9 @@ def _warm_cycle_state_on_login(user: dict) -> None:
     try:
         from cycle_utils import calculate_phase_for_date_range
 
-        user_id = str(user.get("id") or "").strip()
-        if not user_id:
+        try:
+            user_id = authenticated_subject_id(user)
+        except HTTPException:
             return
 
         raw_cycle = user.get("cycle_length")
@@ -453,27 +488,29 @@ async def login(request: LoginRequest):
             )
         
         user = _json_safe_user(response.data[0])
-        _warm_cycle_state_on_login(user)
-        
+
         # Check if password_hash field exists
         if "password_hash" not in user or not user.get("password_hash"):
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="User account error: password_hash field not accessible."
             )
-        
-        # Verify password
+
+        # Verify password before any user-scoped side effects
         if not verify_password(request.password, user["password_hash"]):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password"
             )
-        
+
+        _warm_cycle_state_on_login(user)
+
         user.pop("password_hash", None)  # Remove password from response
-        
+        _merge_login_user_compliance_fields(user)
+
         # Create access token
         access_token = create_access_token(data={"sub": str(user["id"])})
-        
+
         return {
             "msg": "Login successful",
             "access_token": access_token,
@@ -571,6 +608,178 @@ async def update_fcm_token(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update FCM token: {str(e)}",
         )
+
+@router.post("/verify-reset-otp")
+async def verify_reset_otp(request: VerifyResetOtpRequest):
+    """
+    Step 1: verify OTP and issue a short-lived reset token.
+    Uses the service-role client because ``password_resets`` is locked down under RLS.
+    """
+    if supabase_admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Password reset is unavailable: SUPABASE_SERVICE_ROLE_KEY is not configured.",
+        )
+
+    email_norm = str(request.email).strip().lower()
+    otp_norm = str(request.otp or "").strip()
+    if not otp_norm:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="otp is required",
+        )
+
+    try:
+        reset_row_res = (
+            supabase_admin.table("password_resets")
+            .select("*")
+            .eq("email", email_norm)
+            .eq("otp", otp_norm)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not reset_row_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP",
+            )
+
+        reset_row = reset_row_res.data[0]
+        expires_at_raw = reset_row.get("expires_at")
+        if not expires_at_raw:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP expired",
+            )
+
+        expires_at = dt_module.datetime.fromisoformat(
+            str(expires_at_raw).replace("Z", "+00:00")
+        )
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        now_utc = dt_module.datetime.now(timezone.utc)
+        if expires_at < now_utc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP expired",
+            )
+
+        reset_token = str(uuid.uuid4())
+        token_expires_at = now_utc + timedelta(minutes=10)
+
+        update_res = (
+            supabase_admin.table("password_resets")
+            .update(
+                {
+                    "reset_token": reset_token,
+                    "reset_token_expires_at": token_expires_at.isoformat(),
+                }
+            )
+            .eq("id", reset_row["id"])
+            .execute()
+        )
+        if not update_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to issue reset token",
+            )
+
+        return {
+            "message": "OTP verified",
+            "reset_token": reset_token,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to verify OTP: {str(e)}",
+        )
+
+
+@router.post("/finalize-password-reset")
+async def finalize_password_reset(request: FinalizePasswordResetRequest):
+    """
+    Step 2: validate reset token and set new password (argon2 via get_password_hash).
+    Uses the service-role client for ``password_resets`` and the user row update under RLS.
+    """
+    if supabase_admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Password reset is unavailable: SUPABASE_SERVICE_ROLE_KEY is not configured.",
+        )
+
+    email_norm = str(request.email).strip().lower()
+    reset_token = str(request.reset_token or "").strip()
+    new_password = str(request.new_password or "")
+
+    if not reset_token:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="reset_token is required",
+        )
+
+    _validate_password_reset_strength(new_password)
+
+    try:
+        reset_row_res = (
+            supabase_admin.table("password_resets")
+            .select("*")
+            .eq("email", email_norm)
+            .eq("reset_token", reset_token)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not reset_row_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset token",
+            )
+
+        reset_row = reset_row_res.data[0]
+        token_expires_raw = reset_row.get("reset_token_expires_at")
+        if not token_expires_raw:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset token expired",
+            )
+        token_expires_at = dt_module.datetime.fromisoformat(
+            str(token_expires_raw).replace("Z", "+00:00")
+        )
+        if token_expires_at.tzinfo is None:
+            token_expires_at = token_expires_at.replace(tzinfo=timezone.utc)
+        if token_expires_at < dt_module.datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset token expired",
+            )
+
+        hashed_password = get_password_hash(new_password)
+        user_update_res = (
+            supabase_admin.table("users")
+            .update({"password_hash": hashed_password})
+            .eq("email", email_norm)
+            .execute()
+        )
+        if not user_update_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        supabase_admin.table("password_resets").delete().eq("id", reset_row["id"]).execute()
+
+        return {"message": "Password reset successful"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to finalize password reset: {str(e)}",
+        )
+
 
 @router.post("/logout")
 async def logout():

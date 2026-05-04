@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auto_close_periods import auto_close_open_periods
 from cycle_stats import get_cycle_stats, update_user_cycle_stats
 from cycle_utils import estimate_period_length, get_user_phase_day
-from database import supabase
+from database import supabase, supabase_admin
 from luteal_learning import learn_luteal_from_new_period
 from period_service import (
     MAX_CYCLE_DAYS,
@@ -29,6 +29,11 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_WINDOW_SEC = 5
+
+
+def _service_or_anon():
+    """Prefer service role for server-side writes when RLS blocks the anon key."""
+    return supabase_admin if supabase_admin is not None else supabase
 
 
 def parse_period_date(value: Union[str, date, datetime, None]) -> date:
@@ -153,7 +158,7 @@ async def _parallel_fetch_post_log_bundle(
 ) -> Dict[str, Any]:
     def fetch_logs():
         return (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("*")
             .eq("user_id", user_id)
             .order("date", desc=True)
@@ -259,7 +264,7 @@ async def record_period_log(
             )
 
         existing_same_start = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("*")
             .eq("user_id", user_id)
             .eq("date", log_data.date)
@@ -300,7 +305,7 @@ async def record_period_log(
         is_anomaly = check_anomaly(user_id, date_obj)
 
         period_length_days_for_check = max(2, min(8, int(current_user.get("avg_bleeding_days") or 5)))
-        logs_check = supabase.table("period_logs").select("date", "end_date").eq("user_id", user_id).execute()
+        logs_check = _service_or_anon().table("period_logs").select("date", "end_date").eq("user_id", user_id).execute()
         for row in logs_check.data or []:
             start_date_str = row.get("date")
             if not start_date_str:
@@ -326,7 +331,7 @@ async def record_period_log(
         logger.debug("Computed end_date=%s bleeding_days=%s", end_date_value, bleeding_days)
 
         prev_logs = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("id", "date", "end_date", "is_manual_end")
             .eq("user_id", user_id)
             .lt("date", log_data.date)
@@ -343,7 +348,7 @@ async def record_period_log(
                 if prev_end_dt >= date_obj:
                     trim_end = date_obj - timedelta(days=1)
                     trim_end_str = trim_end.strftime("%Y-%m-%d")
-                    supabase.table("period_logs").update({"end_date": trim_end_str}).eq("id", prev["id"]).eq(
+                    _service_or_anon().table("period_logs").update({"end_date": trim_end_str}).eq("id", prev["id"]).eq(
                         "user_id", user_id
                     ).execute()
                     logger.info("Trimmed previous period end to %s (overlap protection)", trim_end_str)
@@ -358,7 +363,7 @@ async def record_period_log(
         }
 
         existing = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("*")
             .eq("user_id", user_id)
             .eq("date", log_data.date)
@@ -370,9 +375,9 @@ async def record_period_log(
             next_predicted_start = _next_predicted_period_start(user_id)
 
         if existing.data:
-            response = supabase.table("period_logs").update(log_entry).eq("user_id", user_id).eq("date", log_data.date).execute()
+            response = _service_or_anon().table("period_logs").update(log_entry).eq("user_id", user_id).eq("date", log_data.date).execute()
         else:
-            response = supabase.table("period_logs").insert(log_entry).execute()
+            response = _service_or_anon().table("period_logs").insert(log_entry).execute()
 
         if not response.data:
             raise HTTPException(
@@ -410,7 +415,7 @@ async def record_period_log(
         except Exception:
             logger.exception("Luteal learning failed (non-blocking)")
 
-        supabase.table("users").update({"last_period_date": log_data.date}).eq("id", user_id).execute()
+        _service_or_anon().table("users").update({"last_period_date": log_data.date}).eq("id", user_id).execute()
 
         hard_inv: Dict[str, Any] = {
             "cache_invalidated": False,
@@ -480,7 +485,7 @@ async def get_period_logs(current_user: dict = Depends(get_current_user)):
     try:
         user_id = authenticated_subject_id(current_user)
 
-        response = supabase.table("period_logs").select("*").eq("user_id", user_id).order("date", desc=False).execute()
+        response = _service_or_anon().table("period_logs").select("*").eq("user_id", user_id).order("date", desc=False).execute()
 
         logs = [
             {
@@ -603,7 +608,7 @@ async def update_period_log(
     try:
         user_id = authenticated_subject_id(current_user)
 
-        check = supabase.table("period_logs").select("*").eq("id", log_id).eq("user_id", user_id).execute()
+        check = _service_or_anon().table("period_logs").select("*").eq("id", log_id).eq("user_id", user_id).execute()
 
         if not check.data:
             raise HTTPException(
@@ -659,7 +664,7 @@ async def update_period_log(
                 while current_date <= old_period_end:
                     date_str = current_date.strftime("%Y-%m-%d")
                     try:
-                        supabase.table("user_cycle_days").delete().eq("user_id", user_id).eq("date", date_str).eq("phase", "Period").execute()
+                        _service_or_anon().table("user_cycle_days").delete().eq("user_id", user_id).eq("date", date_str).eq("phase", "Period").execute()
                         deleted_count += 1
                     except Exception:
                         logger.warning("Could not delete old predictions for %s", date_str, exc_info=True)
@@ -697,7 +702,7 @@ async def update_period_log(
                 logger.info("Clearing end_date (estimated length)")
 
             response = (
-                supabase.table("period_logs")
+                _service_or_anon().table("period_logs")
                 .update(update_data)
                 .eq("id", log_id)
                 .eq("user_id", user_id)
@@ -715,7 +720,7 @@ async def update_period_log(
 
             if new_date == old_date or new_date > old_date:
                 logs_response = (
-                    supabase.table("period_logs")
+                    _service_or_anon().table("period_logs")
                     .select("date")
                     .eq("user_id", user_id)
                     .order("date", desc=True)
@@ -723,7 +728,7 @@ async def update_period_log(
                     .execute()
                 )
                 if logs_response.data and logs_response.data[0].get("date") == new_date:
-                    supabase.table("users").update({"last_period_date": new_date}).eq("id", user_id).execute()
+                    _service_or_anon().table("users").update({"last_period_date": new_date}).eq("id", user_id).execute()
                     logger.info("Updated last_period_date to %s", new_date)
 
             return {
@@ -733,7 +738,7 @@ async def update_period_log(
         else:
             update_data = log_data.model_dump(exclude_unset=True)
             response = (
-                supabase.table("period_logs").update(update_data).eq("id", log_id).eq("user_id", user_id).execute()
+                _service_or_anon().table("period_logs").update(update_data).eq("id", log_id).eq("user_id", user_id).execute()
             )
 
             if not response.data:
@@ -763,7 +768,7 @@ async def delete_period_log(
     try:
         user_id = authenticated_subject_id(current_user)
 
-        check = supabase.table("period_logs").select("id").eq("id", log_id).eq("user_id", user_id).execute()
+        check = _service_or_anon().table("period_logs").select("id").eq("id", log_id).eq("user_id", user_id).execute()
 
         if not check.data:
             raise HTTPException(
@@ -771,7 +776,7 @@ async def delete_period_log(
                 detail="Period log not found",
             )
 
-        supabase.table("period_logs").delete().eq("id", log_id).eq("user_id", user_id).execute()
+        _service_or_anon().table("period_logs").delete().eq("id", log_id).eq("user_id", user_id).execute()
 
         period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
         update_user_cycle_stats(user_id, period_starts=period_starts)
@@ -809,7 +814,7 @@ async def log_period_end(
             )
 
         logs_response = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("*")
             .eq("user_id", user_id)
             .is_("end_date", "null")
@@ -842,7 +847,7 @@ async def log_period_end(
             )
 
         update_response = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .update(
                 {
                     "end_date": end_data.date,
@@ -892,7 +897,7 @@ async def toggle_anomaly(
     try:
         user_id = authenticated_subject_id(current_user)
 
-        check = supabase.table("period_logs").select("id, date").eq("id", log_id).eq("user_id", user_id).execute()
+        check = _service_or_anon().table("period_logs").select("id, date").eq("id", log_id).eq("user_id", user_id).execute()
 
         if not check.data:
             raise HTTPException(
@@ -904,7 +909,7 @@ async def toggle_anomaly(
         sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
 
         ps = (
-            supabase.table("period_start_logs")
+            _service_or_anon().table("period_start_logs")
             .select("is_outlier")
             .eq("user_id", user_id)
             .eq("start_date", start_str)
@@ -914,7 +919,7 @@ async def toggle_anomaly(
         current_flag = bool(ps.data[0].get("is_outlier")) if ps.data else False
         new_flag = not current_flag
 
-        supabase.table("period_start_logs").update({"is_outlier": new_flag}).eq("user_id", user_id).eq("start_date", start_str).execute()
+        _service_or_anon().table("period_start_logs").update({"is_outlier": new_flag}).eq("user_id", user_id).eq("start_date", start_str).execute()
 
         logger.info("Toggled is_outlier for cycle start (user anomaly)")
 
@@ -943,7 +948,7 @@ async def update_last_anchor(
         new_date_str = new_date_obj.strftime("%Y-%m-%d")
 
         latest_log_res = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("id, date")
             .eq("user_id", user_id)
             .order("date", desc=True)
@@ -961,7 +966,7 @@ async def update_last_anchor(
         end_date_str = (new_date_obj + timedelta(days=bleeding_days - 1)).strftime("%Y-%m-%d")
 
         updated_log_res = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .update(
                 {
                     "date": new_date_str,
@@ -979,7 +984,7 @@ async def update_last_anchor(
                 detail="Failed to update latest period anchor",
             )
 
-        supabase.table("users").update({"last_period_date": new_date_str}).eq("id", user_id).execute()
+        _service_or_anon().table("users").update({"last_period_date": new_date_str}).eq("id", user_id).execute()
 
         # Keep period_start_logs + cycle stats in lockstep with the edited anchor.
         from routes.auth import _post_registration_sync

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from auth_utils import get_password_hash, verify_password
 from cycle_stats import update_user_cycle_stats
 from cycle_utils import estimate_period_length
-from database import supabase
+from database import supabase, supabase_admin
 from period_start_logs import sync_period_start_logs_from_period_logs
 from prediction_cache import (
     hard_invalidate_predictions_from_date,
@@ -19,6 +19,13 @@ from prediction_cache import (
     schedule_regenerate_predictions,
 )
 from routes.auth import authenticated_subject_id, get_current_user
+
+try:
+    from postgrest.exceptions import APIError as PostgrestAPIError
+except ImportError:  # pragma: no cover
+    class PostgrestAPIError(Exception):
+        """Placeholder when postgrest is not importable (should not happen with supabase-py)."""
+
 
 router = APIRouter()
 security = HTTPBearer()
@@ -56,14 +63,14 @@ def _merge_user_update_payload(base: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class ProfileUpdate(BaseModel):
+    """Only columns that exist on ``public.users`` for this endpoint (RLS-safe subset)."""
+
     model_config = ConfigDict(extra="ignore")
 
     name: Optional[str] = None
     language: Optional[str] = None
     cycle_length: Optional[int] = None
     avg_bleeding_days: Optional[int] = None
-    favorite_cuisine: Optional[str] = None
-    favorite_exercise: Optional[str] = None
 
 
 class NotificationPreferencesDto(BaseModel):
@@ -135,9 +142,11 @@ _PROFILE_UPDATE_KEYS = (
     "language",
     "cycle_length",
     "avg_bleeding_days",
-    "favorite_cuisine",
-    "favorite_exercise",
 )
+
+
+def _profile_write_client():
+    return supabase_admin if supabase_admin is not None else supabase
 
 
 @router.post("/profile")
@@ -145,7 +154,7 @@ async def update_profile(
     profile_data: ProfileUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update user profile."""
+    """Update user profile (name, language, cycle_length, avg_bleeding_days only)."""
     try:
         user_id = authenticated_subject_id(current_user)
         raw = profile_data.model_dump(exclude_unset=True)
@@ -163,7 +172,20 @@ async def update_profile(
             )
 
         payload = _merge_user_update_payload(update_data)
-        response = supabase.table("users").update(payload).eq("id", user_id).execute()
+        try:
+            response = (
+                _profile_write_client()
+                .table("users")
+                .update(payload)
+                .eq("id", user_id)
+                .execute()
+            )
+        except PostgrestAPIError as e:
+            logger.warning("Profile update PostgREST error: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Could not update profile (database policy). Check that you are signed in and allowed to change these fields.",
+            ) from e
 
         if not response.data:
             raise HTTPException(

@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 
-from database import supabase, async_supabase_call, retry_supabase_call
+from database import supabase, supabase_admin, async_supabase_call, retry_supabase_call
 from routes.auth import authenticated_subject_id, get_current_user
 from cycle_utils import (
     calculate_phase_for_date_range,
@@ -19,6 +19,11 @@ from cycle_utils import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _service_or_anon():
+    """Prefer service role for server-side access when RLS blocks the anon key."""
+    return supabase_admin if supabase_admin is not None else supabase
 
 
 def _shift_calendar_months(d: date, months_delta: int) -> date:
@@ -188,7 +193,7 @@ async def predict_cycles(
         current_date = request.current_date or get_user_today(None).strftime("%Y-%m-%d")
         
         # Get user data
-        user_response = supabase.table("users").select(
+        user_response = _service_or_anon().table("users").select(
             "last_period_date, cycle_length, late_period_anchor_shift_days"
         ).eq("id", user_id).execute()
         if not user_response.data or not user_response.data[0]:
@@ -223,7 +228,7 @@ async def predict_cycles(
         end_date = (current_date_obj + timedelta(days=60)).strftime("%Y-%m-%d")
 
         logs_response = (
-            supabase.table("period_logs")
+            _service_or_anon().table("period_logs")
             .select("date, end_date")
             .eq("user_id", user_id)
             .order("date")
@@ -288,13 +293,13 @@ async def get_current_phase(
         # 1) Fetch user and period_logs in parallel (reduces latency)
         @retry_supabase_call(max_retries=3)
         def _fetch_user():
-            return supabase.table("users").select(
+            return _service_or_anon().table("users").select(
                 "last_period_date, cycle_length, late_period_anchor_shift_days"
             ).eq("id", user_id).execute()
 
         @retry_supabase_call(max_retries=3)
         def _fetch_logs():
-            return supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+            return _service_or_anon().table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
 
         user_response, logs_response = await asyncio.gather(
             async_supabase_call(_fetch_user),
@@ -324,7 +329,7 @@ async def get_current_phase(
         if period_day_id is not None:
             # Graceful auto-update: only update last_period_date for today or past, never future dates
             if period_day_id.lower() == "p1" and check_date_obj <= today:
-                supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
+                _service_or_anon().table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
                 logger.info("Auto-updated last_period_date due to p1 (log)")
             return {
                 "phase": "Period",
@@ -360,7 +365,7 @@ async def get_current_phase(
             canon_phase = _resolved_canonical_phase(m.get("phase"), phase_day_id)
             # Graceful auto-update: only update last_period_date for today or past, never future dates
             if phase_day_id.lower() == "p1" and check_date_obj <= today:
-                supabase.table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
+                _service_or_anon().table("users").update({"last_period_date": check_date}).eq("id", user_id).execute()
                 logger.info("Auto-updated last_period_date due to p1 (calc)")
             return {
                 "phase": canon_phase,
@@ -425,7 +430,7 @@ async def get_phase_map(
         await handle_missing_period_async(user_id)
         
         # 1) Get user cycle config
-        user_response = supabase.table("users").select(
+        user_response = _service_or_anon().table("users").select(
             "last_period_date, cycle_length, late_period_anchor_shift_days"
         ).eq("id", user_id).execute()
         
@@ -462,7 +467,7 @@ async def get_phase_map(
         cycle_length_int = cycle_length
         
         # 2) Fetch period_logs once (source of truth)
-        logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+        logs_response = _service_or_anon().table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
         period_logs = logs_response.data or []
 
         # Single source of truth: phases come from calculate_phase_for_date_range in RAM only.
@@ -597,7 +602,7 @@ async def cycle_health_check(
         user_id = authenticated_subject_id(current_user)
         
         # Get user data for current cycle stats
-        user_response = supabase.table("users").select(
+        user_response = _service_or_anon().table("users").select(
             "last_period_date, cycle_length, late_period_anchor_shift_days"
         ).eq("id", user_id).execute()
         user_data = user_response.data[0] if user_response.data else {}
@@ -632,7 +637,7 @@ async def cycle_health_check(
                 days_since_period = (today - last_period_date_only).days
                 
                 # Get period logs to calculate period length
-                period_logs_response = supabase.table("period_logs").select("date").eq("user_id", user_id).order("date", desc=True).limit(10).execute()
+                period_logs_response = _service_or_anon().table("period_logs").select("date").eq("user_id", user_id).order("date", desc=True).limit(10).execute()
                 period_days = []
                 if period_logs_response.data:
                     for log in period_logs_response.data:
@@ -739,7 +744,7 @@ async def cycle_health_check(
             cycle_timeline = []
 
             # Fetch period logs once (needed for correct "Period" override)
-            logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+            logs_response = _service_or_anon().table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
             period_logs = logs_response.data or []
 
             # Build overall range (from first period start to today + avg_cycle_length)
@@ -986,7 +991,7 @@ async def cycle_health_check(
         
         # Build complete cycle timeline with dates and daily phase data
         # PERFORMANCE: compute all phases in one pass, then slice per cycle.
-        logs_response = supabase.table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
+        logs_response = _service_or_anon().table("period_logs").select("date, end_date").eq("user_id", user_id).order("date").execute()
         period_logs = logs_response.data or []
 
         start_dates = [datetime.strptime(ps["start_date"], "%Y-%m-%d").date() if isinstance(ps["start_date"], str) else ps["start_date"] for ps in period_starts]
@@ -1125,13 +1130,13 @@ async def debug_cycle_data(current_user: dict = Depends(get_current_user)):
         user_id = authenticated_subject_id(current_user)
         
         # Check period logs
-        period_logs = supabase.table("period_logs").select("*").eq("user_id", user_id).execute()
+        period_logs = _service_or_anon().table("period_logs").select("*").eq("user_id", user_id).execute()
         
         # Check cycle days
-        cycle_days = supabase.table("user_cycle_days").select("*").eq("user_id", user_id).execute()
+        cycle_days = _service_or_anon().table("user_cycle_days").select("*").eq("user_id", user_id).execute()
         
         # Check user data
-        user_data = supabase.table("users").select("*").eq("id", user_id).execute()
+        user_data = _service_or_anon().table("users").select("*").eq("id", user_id).execute()
         
         pl = period_logs.data or []
         return {
