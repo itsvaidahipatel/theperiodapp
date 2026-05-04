@@ -1615,6 +1615,37 @@ def _apply_late_anchor_shift_to_cycle_starts(
     return final_cs, final_meta
 
 
+def _guaranteed_phase_day_bounds(layout_cycle_days: int, avg_bleeding_days: int) -> Dict[str, int]:
+    """
+    Deterministic four-phase layout for one menstrual cycle (day_in_cycle is 1-indexed).
+
+    - Period: days 1 .. bleed (bleed = clamped avg bleeding length).
+    - Follicular: after Period until before Ovulation window.
+    - Ovulation: small window centered at day (layout_cycle_days - 14), classic ~14-day luteal tail.
+    - Luteal: after Ovulation through end of cycle.
+
+    ``layout_cycle_days`` should already be clamped to [21, 45].
+    """
+    cl = max(21, min(45, int(layout_cycle_days)))
+    bleed = max(2, min(8, int(avg_bleeding_days)))
+    ov_peak = cl - 14
+    ov_peak = max(bleed + 2, min(cl - 7, ov_peak))
+    ov_start = max(bleed + 1, ov_peak - 1)
+    ov_end = min(cl, ov_peak + 1)
+    if ov_start > ov_end:
+        ov_start = ov_end = ov_peak
+    if bleed + 1 >= ov_start:
+        ov_start = min(cl, bleed + 2)
+        ov_end = min(cl, max(ov_start, ov_peak))
+    return {
+        "layout_cycle_days": cl,
+        "period_end_day": bleed,
+        "ovulation_peak_day": ov_peak,
+        "ovulation_start_day": ov_start,
+        "ovulation_end_day": ov_end,
+    }
+
+
 def calculate_phase_for_date_range(
     user_id: str,
     last_period_date: Optional[str],
@@ -1715,6 +1746,14 @@ def calculate_phase_for_date_range(
         luteal_mean, luteal_sd = estimate_luteal(user_id)
         period_days = estimate_period_length(user_id, normalized=True)
         period_length_days = int(round(max(3.0, min(8.0, period_days))))
+
+        has_luteal_observations = False
+        try:
+            _lur = supabase.table("users").select("luteal_observations").eq("id", user_id).limit(1).execute()
+            if _lur.data and _lur.data[0].get("luteal_observations"):
+                has_luteal_observations = True
+        except Exception:
+            pass
         
         phase_mappings = []
         current_date = start_date_obj
@@ -2063,6 +2102,15 @@ def calculate_phase_for_date_range(
             # Adaptive window: 3 days for regular cycles, up to 5 for irregular (ovulation_sd)
             max_ov_days = 5 if ovulation_sd >= 2.5 else 3
             ovulation_days = select_ovulation_days(ovulation_sd, max_days=max_ov_days)
+
+            src_meta = cycle_metadata.get(cycle_start, {}).get("source", "")
+            profile_clamped = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length)))
+            acl_int = int(round(float(actual_cycle_length)))
+            acl_int = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, acl_int))
+            # Bayesian / sparse data: use profile cycle_length so Ovulation ~= cycle_length-14 and Luteal always exists.
+            use_standard_profile_cycle = (not has_luteal_observations) or src_meta in ("virtual", "predicted")
+            layout_for_bounds = profile_clamped if use_standard_profile_cycle else acl_int
+            phase_bounds = _guaranteed_phase_day_bounds(layout_for_bounds, period_length_days)
             
             # Cache all cycle-level metadata
             cycle_metadata_cache[cycle_start_str] = {
@@ -2073,7 +2121,8 @@ def calculate_phase_for_date_range(
                 "ovulation_date_str": ovulation_date_str,
                 "ovulation_sd": ovulation_sd,
                 "ovulation_days": ovulation_days,
-                "luteal_mean": luteal_mean  # Cache for reuse
+                "luteal_mean": luteal_mean,  # Cache for reuse
+                "phase_bounds": phase_bounds,
             }
             
             # Log luteal anchoring ONCE per cycle (not per day)
@@ -2158,6 +2207,7 @@ def calculate_phase_for_date_range(
                 print(f"⚠️ WARNING: No metadata for cycle {cycle_start_str}, using fallback")
                 min_ovulation_day = max(10, int(period_days) + 8)
                 fallback_ovulation_day = max(min_ovulation_day, int(cycle_length - 14))
+                _fb_cl = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length)))
                 cycle_meta = {
                     "actual_cycle_length": float(cycle_length),
                     "calculated_ovulation_day": fallback_ovulation_day,
@@ -2168,7 +2218,8 @@ def calculate_phase_for_date_range(
                     ).strftime("%Y-%m-%d"),
                     "ovulation_sd": 2.0,
                     "ovulation_days": {-1, 0, 1},
-                    "luteal_mean": 14.0
+                    "luteal_mean": 14.0,
+                    "phase_bounds": _guaranteed_phase_day_bounds(_fb_cl, period_length_days),
                 }
             
             # Use cached values (no per-day calculation)
@@ -2203,12 +2254,6 @@ def calculate_phase_for_date_range(
             phase = None
             is_fertile_window = False
             is_ovulation_event = False
-
-            # Phase boundaries use absolute cycle day offsets to keep phase IDs continuous
-            # across month boundaries (e.g. L4 on Apr 30 -> L5 on May 1).
-            period_end_day = min(5, max(1, int(actual_cycle_length) if actual_cycle_length else 5))
-            ovulation_window_start_day = max(period_end_day + 1, int(fertile_window_start))
-            ovulation_window_end_day = min(int(actual_cycle_length), max(ovulation_window_start_day, int(fertile_window_end)))
             
             # VALIDATION: Ensure day_in_cycle is reasonable (never negative or None)
             if day_in_cycle < 1:
@@ -2233,6 +2278,17 @@ def calculate_phase_for_date_range(
                                 offset_from_ov = (current_date - ovulation_date).days
                                 ovulation_days = cycle_meta.get("ovulation_days", {-1, 0, 1})
                             break
+
+            # Phase boundaries: four-phase layout from cache (after any anchor switch above).
+            pb = (cycle_meta or {}).get("phase_bounds")
+            if not pb:
+                pb = _guaranteed_phase_day_bounds(
+                    max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length))),
+                    period_length_days,
+                )
+            period_end_day = int(pb["period_end_day"])
+            ovulation_window_start_day = int(pb["ovulation_start_day"])
+            ovulation_window_end_day = int(pb["ovulation_end_day"])
             
             # MEDICAL FIX: Phase assignment with clear priority (medically accurate)
             # CRITICAL: Ensure only ONE period phase per cycle (days 1 to period_days)
@@ -2242,24 +2298,24 @@ def calculate_phase_for_date_range(
                 print(f"⚠️ WARNING: day_in_cycle < 1 for date {current_date.strftime('%Y-%m-%d')}, cycle start {current_cycle_start.strftime('%Y-%m-%d')}. Setting to 1.")
                 day_in_cycle = 1
             
-            # 1. Period Phase: fixed Days 1-5
+            # 1. Period — days 1 .. avg_bleeding_days
             if 1 <= day_in_cycle <= period_end_day:
                 phase = "Period"
-            # 2. Ovulation window: map to o1..oN by position within fertile window days
+            # 2. Ovulation — narrow window around day (layout_cycle - 14)
             elif ovulation_window_start_day <= day_in_cycle <= ovulation_window_end_day:
                 phase = "Ovulation"
                 is_fertile_window = True
                 is_ovulation_event = (offset_from_ov == 0)
-            # 3. Follicular Phase: after Period and before ovulation window
+            # 3. Follicular — after Period until ovulation window
             elif period_end_day < day_in_cycle < ovulation_window_start_day:
                 phase = "Follicular"
-            # 4. Luteal Phase: after ovulation window
+            # 4. Luteal — after ovulation through next anchor (covers virtual/long cycles)
             elif day_in_cycle > ovulation_window_end_day:
                 phase = "Luteal"
             else:
-                phase = "Follicular"  # Edge-case fallback
+                phase = "Follicular"
             
-            # MEDICAL VALIDATION: Period only on days 1-5
+            # MEDICAL VALIDATION: Period only on bleeding window
             if phase == "Period" and (day_in_cycle < 1 or day_in_cycle > period_end_day):
                 print(f"❌ ERROR: Attempted to assign Period phase to day {day_in_cycle} (valid range: 1-{period_end_day}). Fixing to correct phase.")
                 if ovulation_window_start_day <= day_in_cycle <= ovulation_window_end_day:
@@ -2428,18 +2484,62 @@ def calculate_phase_for_date_range(
         
         # Build final list: include all dates in range (including virtual backward fill)
         by_date = {m["date"]: m for m in phase_mappings}
-        follicular_default = {
-            "phase": "Follicular",
-            "source": "local",
-            "is_predicted": True,
-            "is_virtual": True,
-            "prediction_confidence": 0.5,
-            "fertility_prob": 0.0,
-            "predicted_ovulation_date": None,
-            "luteal_estimate": 14.0,
-            "luteal_sd": 2.0,
-            "ovulation_sd": 2.0
-        }
+        _gap_profile_cl = max(MIN_CYCLE_DAYS, min(MAX_CYCLE_DAYS, int(cycle_length)))
+
+        def _gap_fill_row(d_dt: datetime) -> Dict[str, Any]:
+            """Assign four phases for dates the main loop skipped (no anchor / edge cases)."""
+            anchor_g = None
+            for i in range(len(cycle_starts) - 1, -1, -1):
+                if cycle_starts[i] <= d_dt:
+                    anchor_g = cycle_starts[i]
+                    break
+            meta_g = (
+                cycle_metadata_cache.get(anchor_g.strftime("%Y-%m-%d")) if anchor_g else None
+            )
+            pb_g = (meta_g or {}).get("phase_bounds")
+            if not pb_g:
+                pb_g = _guaranteed_phase_day_bounds(_gap_profile_cl, period_length_days)
+            ped = int(pb_g["period_end_day"])
+            ows = int(pb_g["ovulation_start_day"])
+            owe = int(pb_g["ovulation_end_day"])
+            if anchor_g:
+                dic_g = (d_dt - anchor_g).days + 1
+            else:
+                dic_g = ((d_dt - start_date_obj).days % _gap_profile_cl) + 1
+            if 1 <= dic_g <= ped:
+                ph_g = "Period"
+                dip_g = dic_g
+                pid_g = generate_phase_day_id("Period", dip_g)
+            elif ows <= dic_g <= owe:
+                ph_g = "Ovulation"
+                dip_g = (dic_g - ows) + 1
+                ow_len = max(1, (owe - ows) + 1)
+                pid_g = _calendar_phase_day_id("Ovulation", dip_g, ovulation_cap=ow_len)
+            elif ped < dic_g < ows:
+                ph_g = "Follicular"
+                dip_g = max(1, dic_g - ped)
+                pid_g = generate_phase_day_id("Follicular", dip_g)
+            else:
+                ph_g = "Luteal"
+                dip_g = max(1, dic_g - owe)
+                pid_g = generate_phase_day_id("Luteal", dip_g)
+            return {
+                "date": d_dt.strftime("%Y-%m-%d"),
+                "phase": ph_g,
+                "phase_day_id": pid_g,
+                "source": "local",
+                "is_predicted": True,
+                "is_virtual": True,
+                "is_fertile_window": ph_g == "Ovulation",
+                "is_ovulation_event": False,
+                "prediction_confidence": 0.5,
+                "fertility_prob": 0.0,
+                "predicted_ovulation_date": None,
+                "luteal_estimate": 14.0,
+                "luteal_sd": 2.0,
+                "ovulation_sd": 2.0,
+            }
+
         final_phase_mappings = []
         d = start_date_obj
         while d <= end_date_obj:
@@ -2448,12 +2548,7 @@ def calculate_phase_for_date_range(
             if m:
                 final_phase_mappings.append(m)
             else:
-                # Fill gaps with predicted/virtual phases (including before first log)
-                # More intelligent default: increment follicular day based on distance from range start,
-                # instead of showing f1 for long gaps.
-                day_in_range = (d - start_date_obj).days + 1
-                phase_day_id = generate_phase_day_id("Follicular", day_in_range)
-                final_phase_mappings.append({"date": date_str, "phase_day_id": phase_day_id, **follicular_default})
+                final_phase_mappings.append(_gap_fill_row(d))
             d += timedelta(days=1)
         print(f"✅ Generated {len(final_phase_mappings)} phase mappings (includes virtual backward fill before first log)")
         return final_phase_mappings
