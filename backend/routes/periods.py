@@ -22,7 +22,7 @@ from period_service import (
 )
 from prediction_cache import hard_invalidate_predictions_from_date, schedule_regenerate_predictions
 from period_start_logs import get_period_start_logs, sync_period_start_logs_from_period_logs
-from routes.auth import authenticated_subject_id, get_current_user
+from routes.auth import _post_registration_sync, authenticated_subject_id, get_current_user
 from missing_period_handler import handle_missing_period_async
 
 router = APIRouter()
@@ -373,6 +373,24 @@ async def record_period_log(
         next_predicted_start: Optional[date] = None
         if not existing.data:
             next_predicted_start = _next_predicted_period_start(user_id)
+            latest_res = (
+                _service_or_anon()
+                .table("period_logs")
+                .select("date")
+                .eq("user_id", user_id)
+                .order("date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if latest_res.data and latest_res.data[0].get("date"):
+                latest_raw = latest_res.data[0]["date"]
+                latest_str = str(latest_raw).strip()[:10]
+                latest_d = parse_period_date(latest_str)
+                if date_obj <= latest_d:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="NEW_DATE_BEFORE_LATEST_LOG",
+                    )
 
         if existing.data:
             response = _service_or_anon().table("period_logs").update(log_entry).eq("user_id", user_id).eq("date", log_data.date).execute()
@@ -388,8 +406,8 @@ async def record_period_log(
         saved = response.data[0]
         logger.info("Period log saved start=%s end=%s manual_end=%s", log_data.date, end_date_value, is_manual_end_value)
 
-        period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
-        update_user_cycle_stats(user_id, period_starts=period_starts)
+        _post_registration_sync(user_id, client_today_str=client_today)
+        period_starts = get_period_start_logs(user_id, confirmed_only=False)
 
         logged_date = parse_period_date(log_data.date)
         predicted_phase_data = get_user_phase_day(user_id, log_data.date, prefer_actual=False)
@@ -634,6 +652,25 @@ async def update_period_log(
                     detail="Cannot set period start to a future date",
                 )
 
+            latest_other = (
+                _service_or_anon()
+                .table("period_logs")
+                .select("date")
+                .eq("user_id", user_id)
+                .neq("id", log_id)
+                .order("date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if latest_other.data and latest_other.data[0].get("date"):
+                lo_str = str(latest_other.data[0]["date"]).strip()[:10]
+                latest_other_d = parse_period_date(lo_str)
+                if new_date_obj <= latest_other_d:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="NEW_DATE_BEFORE_LATEST_LOG",
+                    )
+
             validation = can_log_period(user_id, new_date_obj)
             if not validation.get("canLog", False):
                 raise HTTPException(
@@ -715,8 +752,7 @@ async def update_period_log(
                     detail="Failed to update period log",
                 )
 
-            period_starts = sync_period_start_logs_from_period_logs(user_id, client_today_str=client_today)
-            update_user_cycle_stats(user_id, period_starts=period_starts)
+            _post_registration_sync(user_id, client_today_str=client_today)
 
             if new_date == old_date or new_date > old_date:
                 logs_response = (

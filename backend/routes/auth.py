@@ -32,16 +32,18 @@ def _json_safe_user(user: dict) -> dict:
     """Ensure user payload is JSON-serializable."""
     return _json_safe_value(dict(user))
 
-def _post_registration_sync(user_id: str) -> None:
+def _post_registration_sync(user_id: str, client_today_str: Optional[str] = None) -> None:
     """
-    Sync period anchors + stats after registration.
+    Sync period anchors + stats after registration or period log writes.
     This runs inline so login cannot proceed before anchors exist.
     """
     try:
         from period_start_logs import sync_period_start_logs_from_period_logs
         from cycle_stats import update_user_cycle_stats
 
-        period_starts = sync_period_start_logs_from_period_logs(user_id)
+        period_starts = sync_period_start_logs_from_period_logs(
+            user_id, client_today_str=client_today_str
+        )
         update_user_cycle_stats(user_id, period_starts=period_starts)
         print(f"✅ Post-registration sync completed for user {user_id}")
     except Exception as e:
