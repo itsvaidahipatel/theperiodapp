@@ -2,7 +2,8 @@
 Wellness routes (hormones, nutrition, exercises): all handlers depend on ``get_current_user``.
 The account scope is always ``authenticated_subject_id(current_user)`` (JWT ``sub`` / ``users.id``).
 Query parameters such as ``phase_day_id`` refer to cycle *template* ids (e.g. p1, f5), not user UUIDs.
-Hormone reference content is read only from ``hormones_data_v2`` (legacy ``hormones_data`` is not used).
+All API ``phase_day_id`` (and hormone ``id``) values are normalized to lowercase. Reference rows are read
+only from ``hormones_data_v2`` (nutrition and exercises are gated on the same v2 id).
 """
 
 import json
@@ -33,6 +34,11 @@ HORMONES_DATA_V2_SELECT = (
 NUTRITION_TABLE_SELECT = (
     "id, hormone_id, phase_id, day_number, cuisine, recipe_name, serves, "
     "ingredients, steps, photo_url, nutrients, created_at"
+)
+
+# exercises_* — align with deployed tables (steps text, photo_url; v2 hormone_id FK).
+EXERCISES_TABLE_SELECT = (
+    "id, hormone_id, category, exercise_name, steps, photo_url, energy_level"
 )
 
 HORMONE_DISCLAIMER = (
@@ -107,11 +113,13 @@ def _exercise_interest_score(
     cat = row.get("category")
     name = row.get("exercise_name")
     desc = row.get("description")
+    steps = row.get("steps")
     for interest in interests:
         if (
             _text_matches_interest(cat, interest)
             or _text_matches_interest(name, interest)
             or _text_matches_interest(desc, interest)
+            or _text_matches_interest(steps, interest)
         ):
             score += 2
     if category_boost and _text_matches_interest(cat, category_boost):
@@ -214,20 +222,20 @@ def _to_optional_text(raw: Any) -> Optional[str]:
     return s if s else None
 
 
-def _canonical_v2_id(row: Optional[Dict[str, Any]]) -> Optional[str]:
-    """``hormones_data_v2.id`` as stored (exact casing for clients); None if missing."""
+def _v2_id_lowercase(row: Optional[Dict[str, Any]]) -> Optional[str]:
+    """``hormones_data_v2.id`` normalized to lowercase for API responses and FK filters."""
     if not row:
         return None
     rid = row.get("id")
     if rid is None:
         return None
-    s = str(rid).strip()
+    s = str(rid).strip().lower()
     return s if s else None
 
 
 def _response_phase_day_id(row: Optional[Dict[str, Any]], resolved_lower: str) -> str:
-    """Prefer exact ``id`` from a v2 row; otherwise fall back to resolved lookup key."""
-    cid = _canonical_v2_id(row)
+    """Resolved phase template id (always lowercase); prefer v2 row id when present."""
+    cid = _v2_id_lowercase(row)
     return cid if cid else resolved_lower
 
 
@@ -266,7 +274,7 @@ def _energy_to_text(raw: Any) -> Optional[str]:
 
 def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any]:
     """Serialize one ``hormones_data_v2`` row: hormone levels, trends, mood, energy, ``best_work_type``."""
-    cid = _canonical_v2_id(hormone_data)
+    cid = _v2_id_lowercase(hormone_data)
     return {
         "id": cid,
         "phase_day_id": cid,
@@ -297,7 +305,7 @@ def _empty_hormone_response(
     out: Dict[str, Any] = {
         "today": {},
         "language": language,
-        "phase_day_id": phase_day_id,
+        "phase_day_id": phase_day_id.strip().lower() if isinstance(phase_day_id, str) and phase_day_id.strip() else phase_day_id,
         "message": message,
         "disclaimer": HORMONE_DISCLAIMER,
     }
@@ -434,8 +442,8 @@ async def get_nutrition(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Nutrition for the resolved phase day. Phase validity and ``phase_day_id`` casing follow
-    ``hormones_data_v2`` (single source of truth); recipes are keyed by the same ``hormone_id``.
+    Nutrition for the resolved phase day. Validity and ``phase_day_id`` use ``hormones_data_v2`` only
+    (lowercase id); recipes match ``hormone_id`` to that id.
 
     Rows are ranked by ``users.interests`` (e.g. South Indian) against ``cuisine`` / ``recipe_name``,
     then by ``favorite_cuisine`` as a boost. Optional ``cuisine`` query narrows results when matches exist;
@@ -521,11 +529,12 @@ async def get_exercises(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Exercises for the resolved phase day.
+    Exercises for the resolved phase day. Rows load only after a matching ``hormones_data_v2`` row
+    (same lowercase ``hormone_id`` as ``phase_day_id``).
 
     Rows are ranked by ``users.interests`` (e.g. Yoga) against ``category``, ``exercise_name``, and
-    ``description``. Optional ``category`` query narrows when matches exist; otherwise all rows are
-    returned with interest matches first.
+    ``steps`` (and legacy ``description`` when present). Optional ``category`` query narrows when matches exist;
+    otherwise all rows are returned with interest matches first.
     """
     try:
         user_id = authenticated_subject_id(current_user)
@@ -534,13 +543,35 @@ async def get_exercises(
         if not resolved:
             return {"exercises": []}
 
+        try:
+            v2_row = (
+                supabase.table("hormones_data_v2")
+                .select("id")
+                .eq("id", resolved)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            logger.exception("hormones_data_v2 lookup failed in get_exercises")
+            raise
+
+        if not v2_row.data:
+            return {"exercises": []}
+
+        phase_key = _response_phase_day_id(v2_row.data[0], resolved)
+
         interests = _normalize_interests_list(current_user.get("interests"))
         category_query = str(category).strip() if category is not None and str(category).strip() else None
         favorite_exercise = current_user.get("favorite_exercise")
         favorite_exercise = str(favorite_exercise).strip() if favorite_exercise else None
 
         table_name = f"exercises_{language}"
-        response = supabase.table(table_name).select("*").eq("hormone_id", resolved).execute()
+        response = (
+            supabase.table(table_name)
+            .select(EXERCISES_TABLE_SELECT)
+            .eq("hormone_id", phase_key)
+            .execute()
+        )
         rows: List[Dict[str, Any]] = list(response.data or [])
 
         if category_query:
