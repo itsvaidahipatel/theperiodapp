@@ -3,6 +3,8 @@
  * Loads all required data (dashboard, hormones, nutrition, exercises) in sequence
  */
 
+import { format } from 'date-fns'
+
 import { 
   getPeriodLogs,
   getHormonesData,
@@ -62,7 +64,8 @@ export const loadWellnessData = async (phaseDayId = null, language = null, prelo
   
   try {
     // Load hormones (no categories)
-    const hormonesPromise = getHormonesData(phaseDayId).catch((err) => {
+    const clientToday = format(new Date(), 'yyyy-MM-dd')
+    const hormonesPromise = getHormonesData(phaseDayId, 5, clientToday).catch((err) => {
       console.error('Error fetching hormones:', err)
       return null
     })

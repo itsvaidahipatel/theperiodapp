@@ -398,12 +398,12 @@ export const submitFeedback = async (subject, message, type = "general") => {
 }
 
 // Wellness API functions
-export const getHormonesData = async (phaseDayId = null, days = 5) => {
-  // If phaseDayId not provided, backend will use today's phase-day ID automatically
-  // days parameter: 5 = last 4 days + today
-  const url = phaseDayId 
-    ? `/wellness/hormones?phase_day_id=${phaseDayId}&days=${days}`
-    : `/wellness/hormones?days=${days}`
+export const getHormonesData = async (phaseDayId = null, days = 5, clientToday = null) => {
+  const params = new URLSearchParams()
+  params.set('days', String(days))
+  if (phaseDayId) params.set('phase_day_id', String(phaseDayId))
+  if (clientToday) params.set('client_today', String(clientToday))
+  const url = `/wellness/hormones?${params.toString()}`
   const normalizeHormoneRow = (row) => {
     const safe = row && typeof row === 'object' ? row : {}
     const toObj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {})

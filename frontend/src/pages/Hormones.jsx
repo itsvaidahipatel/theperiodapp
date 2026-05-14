@@ -100,7 +100,7 @@ const Hormones = () => {
           console.log(`📞 Hormones page: Calling getHormonesData('${currentPhase.phase_day_id}')...`)
           
           // Add timeout to the API call
-          const hormonesPromise = getHormonesData(currentPhase.phase_day_id)
+          const hormonesPromise = getHormonesData(currentPhase.phase_day_id, 5, today)
           const timeoutPromise = new Promise((_, reject) => 
             setTimeout(() => reject(new Error('getHormonesData timeout after 8 seconds')), 8000)
           )
@@ -152,11 +152,18 @@ const Hormones = () => {
   // Get today's data (either from today field or hormonesData itself for backward compatibility)
   const getTodayData = () => {
     if (!hormonesData) return null
-    if (hormonesData.today) return hormonesData.today
+    const rawToday = hormonesData.today
+    const todayHasRow =
+      rawToday &&
+      typeof rawToday === 'object' &&
+      (rawToday.id != null ||
+        rawToday.estrogen != null ||
+        rawToday.progesterone != null ||
+        rawToday.fsh != null ||
+        rawToday.lh != null)
+    if (todayHasRow) return rawToday
     if (!hormonesData.today && !hormonesData.history) {
-      // Check if it's an error message
       if (hormonesData.message) return null
-      // If data is directly in hormonesData (backward compatibility)
       if (hormonesData.estrogen || hormonesData.progesterone) {
         return hormonesData
       }

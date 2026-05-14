@@ -155,24 +155,21 @@ def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[
             "(they may need to log a period)."
         )
     try:
-        r = (
-            supabase.table("hormones_data_v2")
-            .select(
-                "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
-                "fsh, fsh_trend, lh, lh_trend"
-            )
-            .eq("id", resolved)
-            .limit(1)
-            .execute()
-        )
+        id_variants = _hormone_id_variants(resolved)
+        rows_llm = _fetch_hormones_v2_rows(supabase, id_variants)
+        if not rows_llm and supabase_admin is not None:
+            rows_llm = _fetch_hormones_v2_rows(supabase_admin, id_variants)
     except Exception:
         logger.exception("hormones_data_v2 lookup for LLM context failed")
         return f"Hormone reference: could not load trend data for phase day {resolved}."
 
-    if not r.data:
+    if not rows_llm:
         return f"Hormone reference: no trend row in database for phase day {resolved}."
 
-    h = r.data[0]
+    h = next(
+        (r for r in rows_llm if str(r.get("id", "")).strip().lower() == resolved),
+        rows_llm[0],
+    )
     parts: List[str] = []
     for val_key, trend_key, label in (
         ("estrogen", "estrogen_trend", "Estrogen"),
@@ -334,6 +331,10 @@ async def get_hormones(
         user_id = authenticated_subject_id(current_user)
         language = current_user.get("language", "en")
 
+        if phase_day_id is not None:
+            pid = str(phase_day_id).strip().lower()
+            phase_day_id = pid if pid else None
+
         today_phase_day_id = _resolve_phase_day_id(user_id, phase_day_id, client_today)
 
         if not today_phase_day_id:
@@ -348,19 +349,16 @@ async def get_hormones(
         if days > 1:
             phase_day_ids_list = get_previous_phase_day_ids(today_phase_day_id, max(1, days))
             unique_ids = list(dict.fromkeys(phase_day_ids_list))
+            expanded_ids = _expand_v2_id_variants_for_list(unique_ids)
 
             try:
-                hormone_response = (
-                    supabase.table("hormones_data_v2")
-                    .select(HORMONES_DATA_V2_SELECT)
-                    .in_("id", unique_ids)
-                    .execute()
-                )
+                rows = _fetch_hormones_v2_rows(supabase, expanded_ids)
+                if not rows and supabase_admin is not None:
+                    rows = _fetch_hormones_v2_rows(supabase_admin, expanded_ids)
             except Exception:
                 logger.exception("hormones_data_v2 batch query failed")
                 raise
 
-            rows = hormone_response.data or []
             by_id_lower = {}
             for row in rows:
                 rid = row.get("id")
@@ -395,18 +393,19 @@ async def get_hormones(
             return out
 
         try:
-            response = (
-                supabase.table("hormones_data_v2")
-                .select(HORMONES_DATA_V2_SELECT)
-                .eq("id", today_phase_day_id)
-                .execute()
-            )
+            id_variants = _hormone_id_variants(today_phase_day_id)
+            rows_one = _fetch_hormones_v2_rows(supabase, id_variants)
+            if not rows_one and supabase_admin is not None:
+                rows_one = _fetch_hormones_v2_rows(supabase_admin, id_variants)
         except Exception:
             logger.exception("hormones_data_v2 single lookup failed")
             raise
 
-        if response.data:
-            row0 = response.data[0]
+        if rows_one:
+            row0 = next(
+                (r for r in rows_one if str(r.get("id", "")).strip().lower() == today_phase_day_id),
+                rows_one[0],
+            )
             payload = _hormone_row_to_today_payload(row0)
             return {
                 **payload,
@@ -441,6 +440,30 @@ def _hormone_id_variants(phase_key: str) -> List[str]:
             seen.add(c)
             out.append(c)
     return out
+
+
+def _expand_v2_id_variants_for_list(ids: List[str]) -> List[str]:
+    """Expand each phase template id to DB spelling variants for ``hormones_data_v2.in_("id", ...)``."""
+    out: List[str] = []
+    seen: set = set()
+    for raw in ids:
+        for v in _hormone_id_variants(str(raw)):
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
+def _fetch_hormones_v2_rows(client: Client, id_list: List[str]) -> List[Dict[str, Any]]:
+    if not id_list:
+        return []
+    r = (
+        client.table("hormones_data_v2")
+        .select(HORMONES_DATA_V2_SELECT)
+        .in_("id", id_list)
+        .execute()
+    )
+    return list(r.data or [])
 
 
 def _sort_nutrition_by_recipe_name(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

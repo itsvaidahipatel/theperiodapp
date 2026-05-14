@@ -228,7 +228,7 @@ const PeriodCalendar = ({ onPeriodLogged }) => {
       
       // Fetch all wellness data in parallel (background, non-blocking)
       Promise.all([
-        getHormonesData(todayPhaseDayId, 5).catch(err => {
+        getHormonesData(todayPhaseDayId, 5, today).catch(err => {
           console.warn('⚠️ Failed to preload hormones data:', err)
           return null
         }),
