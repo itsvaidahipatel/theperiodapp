@@ -160,11 +160,11 @@ CREATE TABLE IF NOT EXISTS public.hormones_data_v2 (
 ) TABLESPACE pg_default;
 
 -- ---------------------------------------------------------------------------
--- nutrition_* / exercises_* — content keyed by hormone_id -> hormones_data_v2(id)
+-- nutrition_* — recipes keyed by hormone_id -> hormones_data_v2(id)
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS nutrition_en (
+CREATE TABLE IF NOT EXISTS public.nutrition_en (
     id TEXT NOT NULL,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES public.hormones_data_v2 (id) ON DELETE CASCADE,
     phase_id INTEGER NOT NULL,
     day_number INTEGER NOT NULL,
     cuisine TEXT NOT NULL,
@@ -174,13 +174,13 @@ CREATE TABLE IF NOT EXISTS nutrition_en (
     steps JSONB NULL,
     photo_url TEXT NULL,
     nutrients JSONB NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NULL DEFAULT NOW(),
     CONSTRAINT nutrition_en_pkey PRIMARY KEY (id)
-);
+) TABLESPACE pg_default;
 
-CREATE TABLE IF NOT EXISTS nutrition_hi (
+CREATE TABLE IF NOT EXISTS public.nutrition_hi (
     id TEXT NOT NULL,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES public.hormones_data_v2 (id) ON DELETE CASCADE,
     phase_id INTEGER NOT NULL,
     day_number INTEGER NOT NULL,
     cuisine TEXT NOT NULL,
@@ -190,13 +190,13 @@ CREATE TABLE IF NOT EXISTS nutrition_hi (
     steps JSONB NULL,
     photo_url TEXT NULL,
     nutrients JSONB NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NULL DEFAULT NOW(),
     CONSTRAINT nutrition_hi_pkey PRIMARY KEY (id)
-);
+) TABLESPACE pg_default;
 
-CREATE TABLE IF NOT EXISTS nutrition_gu (
+CREATE TABLE IF NOT EXISTS public.nutrition_gu (
     id TEXT NOT NULL,
-    hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
+    hormone_id TEXT NOT NULL REFERENCES public.hormones_data_v2 (id) ON DELETE CASCADE,
     phase_id INTEGER NOT NULL,
     day_number INTEGER NOT NULL,
     cuisine TEXT NOT NULL,
@@ -206,9 +206,9 @@ CREATE TABLE IF NOT EXISTS nutrition_gu (
     steps JSONB NULL,
     photo_url TEXT NULL,
     nutrients JSONB NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NULL DEFAULT NOW(),
     CONSTRAINT nutrition_gu_pkey PRIMARY KEY (id)
-);
+) TABLESPACE pg_default;
 
 CREATE TABLE IF NOT EXISTS exercises_en (
     id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
@@ -374,5 +374,5 @@ CREATE POLICY "Users can insert own feedback" ON feedback
 
 -- Reference data: enable read for anon/authenticated clients if you expose Supabase directly to the app.
 -- Example (uncomment if needed):
--- ALTER TABLE hormones_data ENABLE ROW LEVEL SECURITY;
--- CREATE POLICY "Anyone can read hormones reference" ON hormones_data FOR SELECT USING (true);
+-- ALTER TABLE hormones_data_v2 ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Anyone can read hormones reference" ON hormones_data_v2 FOR SELECT USING (true);

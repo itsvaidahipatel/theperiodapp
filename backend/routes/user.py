@@ -1,3 +1,9 @@
+"""
+User profile, notifications, password, and cycle-reset routes.
+
+Reference wellness data lives in ``hormones_data_v2`` only (``routes.wellness``); this module does not use legacy ``hormones_data``.
+"""
+
 import json
 import logging
 import re

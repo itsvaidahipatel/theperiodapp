@@ -2,6 +2,7 @@
 Wellness routes (hormones, nutrition, exercises): all handlers depend on ``get_current_user``.
 The account scope is always ``authenticated_subject_id(current_user)`` (JWT ``sub`` / ``users.id``).
 Query parameters such as ``phase_day_id`` refer to cycle *template* ids (e.g. p1, f5), not user UUIDs.
+Hormone reference content is read only from ``hormones_data_v2`` (legacy ``hormones_data`` is not used).
 """
 
 import json
@@ -213,6 +214,23 @@ def _to_optional_text(raw: Any) -> Optional[str]:
     return s if s else None
 
 
+def _canonical_v2_id(row: Optional[Dict[str, Any]]) -> Optional[str]:
+    """``hormones_data_v2.id`` as stored (exact casing for clients); None if missing."""
+    if not row:
+        return None
+    rid = row.get("id")
+    if rid is None:
+        return None
+    s = str(rid).strip()
+    return s if s else None
+
+
+def _response_phase_day_id(row: Optional[Dict[str, Any]], resolved_lower: str) -> str:
+    """Prefer exact ``id`` from a v2 row; otherwise fall back to resolved lookup key."""
+    cid = _canonical_v2_id(row)
+    return cid if cid else resolved_lower
+
+
 def _coerce_json_object(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -247,9 +265,11 @@ def _energy_to_text(raw: Any) -> Optional[str]:
 
 
 def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Serialize one ``hormones_data_v2`` row (matches ``database/schema.sql`` column set)."""
+    """Serialize one ``hormones_data_v2`` row: hormone levels, trends, mood, energy, ``best_work_type``."""
+    cid = _canonical_v2_id(hormone_data)
     return {
-        "id": _to_optional_text(hormone_data.get("id")),
+        "id": cid,
+        "phase_day_id": cid,
         "phase_id": _optional_int(hormone_data.get("phase_id")),
         "day_number": _optional_int(hormone_data.get("day_number")),
         "estrogen": _to_optional_text(hormone_data.get("estrogen")),
@@ -357,7 +377,7 @@ async def get_hormones(
                 "today": today_data,
                 "history": hormone_history,
                 "language": language,
-                "phase_day_id": today_phase_day_id,
+                "phase_day_id": _response_phase_day_id(today_row, today_phase_day_id),
                 "disclaimer": HORMONE_DISCLAIMER,
             }
             if msg:
@@ -376,11 +396,13 @@ async def get_hormones(
             raise
 
         if response.data:
+            row0 = response.data[0]
+            payload = _hormone_row_to_today_payload(row0)
             return {
-                **_hormone_row_to_today_payload(response.data[0]),
+                **payload,
                 "language": language,
                 "disclaimer": HORMONE_DISCLAIMER,
-                "phase_day_id": today_phase_day_id,
+                "phase_day_id": _response_phase_day_id(row0, today_phase_day_id),
             }
 
         logger.info("No hormones_data_v2 row for phase_day_id=%s", today_phase_day_id)
@@ -412,7 +434,8 @@ async def get_nutrition(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Nutrition for the resolved phase day.
+    Nutrition for the resolved phase day. Phase validity and ``phase_day_id`` casing follow
+    ``hormones_data_v2`` (single source of truth); recipes are keyed by the same ``hormone_id``.
 
     Rows are ranked by ``users.interests`` (e.g. South Indian) against ``cuisine`` / ``recipe_name``,
     then by ``favorite_cuisine`` as a boost. Optional ``cuisine`` query narrows results when matches exist;
@@ -423,7 +446,24 @@ async def get_nutrition(
 
         resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
-            return {"recipes": []}
+            return {"recipes": [], "phase_day_id": None}
+
+        try:
+            v2_row = (
+                supabase.table("hormones_data_v2")
+                .select("id")
+                .eq("id", resolved)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            logger.exception("hormones_data_v2 lookup failed in get_nutrition")
+            raise
+
+        if not v2_row.data:
+            return {"recipes": [], "phase_day_id": _response_phase_day_id(None, resolved)}
+
+        phase_for_client = _response_phase_day_id(v2_row.data[0], resolved)
 
         interests = _normalize_interests_list(current_user.get("interests"))
         favorite_cuisine = current_user.get("favorite_cuisine")
@@ -432,7 +472,10 @@ async def get_nutrition(
 
         table_name = f"nutrition_{language}"
         recipes_response = (
-            supabase.table(table_name).select(NUTRITION_TABLE_SELECT).eq("hormone_id", resolved).execute()
+            supabase.table(table_name)
+            .select(NUTRITION_TABLE_SELECT)
+            .eq("hormone_id", phase_for_client)
+            .execute()
         )
         rows: List[Dict[str, Any]] = list(recipes_response.data or [])
 
@@ -448,7 +491,7 @@ async def get_nutrition(
 
         # Neutral sort when user has no preference signals.
         if not interests and not favorite_cuisine:
-            return {"recipes": rows}
+            return {"recipes": rows, "phase_day_id": phase_for_client}
 
         cuisine_boost = favorite_cuisine if cuisine_query is None else None
         ranked = _rank_rows_by_score(
@@ -456,7 +499,7 @@ async def get_nutrition(
             lambda r: _nutrition_interest_score(r, interests, cuisine_boost),
         )
 
-        return {"recipes": ranked}
+        return {"recipes": ranked, "phase_day_id": phase_for_client}
 
     except Exception as e:
         logger.exception("get_nutrition failed: %s", e)

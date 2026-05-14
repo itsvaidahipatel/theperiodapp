@@ -181,7 +181,7 @@ def parse_phase_day_id(phase_day_id: Optional[str]) -> Tuple[Optional[str], Opti
 
 def parse_hormone_value(value: Any) -> float:
     """
-    Coerce hormones_data numeric hormone columns to float for charts.
+    Coerce hormone reference numeric values to float for charts (``hormones_data_v2`` / legacy numerics).
 
     Post-migration: estrogen/progesterone/fsh/lh are DECIMAL; legacy rows may still hold
     parseable numeric strings. Non-numeric text (e.g. old 'Low'/'High' labels) returns 0.0 —

@@ -279,7 +279,7 @@ const Hormones = () => {
             )}
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 max-w-2xl mx-auto">
               <p className="text-sm text-yellow-800 mb-2">
-                <strong>Note:</strong> The hormones_data table needs to be populated with data for each phase-day ID.
+                <strong>Note:</strong> The hormones_data_v2 table needs a row for each phase-day ID used in the app.
               </p>
               <p className="text-xs text-yellow-700">
                 You need to insert hormone data for phase-day IDs like: p1-p12, f1-f30, o1-o8, l1-l25
