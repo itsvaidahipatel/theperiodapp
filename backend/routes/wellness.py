@@ -9,7 +9,6 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
 
 from cycle_utils import (
     calculate_today_phase_day_id,
@@ -22,6 +21,17 @@ from routes.auth import authenticated_subject_id, get_current_user
 
 router = APIRouter()
 logger = logging.getLogger("periodcycle_ai.wellness")
+
+# hormones_data_v2 — keep selects aligned with database/schema.sql
+HORMONES_DATA_V2_SELECT = (
+    "id, phase_id, day_number, estrogen, estrogen_trend, progesterone, progesterone_trend, "
+    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type, created_at, updated_at"
+)
+
+# nutrition_* tables (e.g. nutrition_en)
+NUTRITION_TABLE_SELECT = (
+    "id, hormone_id, cuisine, recipe_name, image_url, ingredients, steps, nutrients, created_at"
+)
 
 HORMONE_DISCLAIMER = (
     "Hormone values are based on standard cycle mapping and are for educational tracking only."
@@ -120,25 +130,6 @@ def _rank_rows_by_score(
     keyed.sort(key=lambda t: (t[0], t[1]))
     return [t[2] for t in keyed]
 
-class HormoneHistoryPoint(BaseModel):
-    """One day in /wellness/hormones?days>1 history."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    phase_day_id: str
-    id: Optional[str] = None
-    estrogen: Optional[str] = None
-    estrogen_trend: Optional[str] = None
-    progesterone: Optional[str] = None
-    progesterone_trend: Optional[str] = None
-    fsh: Optional[str] = None
-    fsh_trend: Optional[str] = None
-    lh: Optional[str] = None
-    lh_trend: Optional[str] = None
-    mood: Dict[str, Any] = Field(default_factory=dict)
-    energy: Optional[Any] = None
-    best_work_type: Dict[str, Any] = Field(default_factory=dict)
-
 
 def get_hormone_trends_summary_for_llm(user_id: str, client_today_str: Optional[str] = None) -> str:
     """
@@ -236,13 +227,30 @@ def _coerce_json_object(raw: Any) -> Dict[str, Any]:
     return {}
 
 
+def _optional_int(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _energy_to_text(raw: Any) -> Optional[str]:
+    """``hormones_data_v2.energy`` is TEXT; coerce legacy JSON-shaped values if present."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return _to_optional_text(raw.get("level"))
+    return _to_optional_text(raw)
+
+
 def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Build API dict for hormones_data_v2 (TEXT hormone fields + JSONB objects)."""
-    phase_day_id_from_db = hormone_data.get("id")
-    mood_obj = _coerce_json_object(hormone_data.get("mood"))
-    best_work_type_obj = _coerce_json_object(hormone_data.get("best_work_type"))
+    """Serialize one ``hormones_data_v2`` row (matches ``database/schema.sql`` column set)."""
     return {
-        "id": phase_day_id_from_db,
+        "id": _to_optional_text(hormone_data.get("id")),
+        "phase_id": _optional_int(hormone_data.get("phase_id")),
+        "day_number": _optional_int(hormone_data.get("day_number")),
         "estrogen": _to_optional_text(hormone_data.get("estrogen")),
         "estrogen_trend": _to_optional_text(hormone_data.get("estrogen_trend")),
         "progesterone": _to_optional_text(hormone_data.get("progesterone")),
@@ -251,35 +259,12 @@ def _hormone_row_to_today_payload(hormone_data: Dict[str, Any]) -> Dict[str, Any
         "fsh_trend": _to_optional_text(hormone_data.get("fsh_trend")),
         "lh": _to_optional_text(hormone_data.get("lh")),
         "lh_trend": _to_optional_text(hormone_data.get("lh_trend")),
-        "mood": mood_obj,
-        "energy": hormone_data.get("energy"),
-        "best_work_type": best_work_type_obj,
-        # Compatibility extras
-        "phase_day_id": phase_day_id_from_db,
-        "energy_level": hormone_data.get("energy", {}).get("level")
-        if isinstance(hormone_data.get("energy"), dict)
-        else hormone_data.get("energy_level"),
-        "emotional_summary": mood_obj.get("summary") if isinstance(mood_obj, dict) else None,
+        "mood": _coerce_json_object(hormone_data.get("mood")),
+        "energy": _energy_to_text(hormone_data.get("energy")),
+        "best_work_type": _coerce_json_object(hormone_data.get("best_work_type")),
+        "created_at": hormone_data.get("created_at"),
+        "updated_at": hormone_data.get("updated_at"),
     }
-
-
-def _history_point_from_row(hormone_data: Dict[str, Any], phase_day_id: str) -> Dict[str, Any]:
-    row = HormoneHistoryPoint(
-        phase_day_id=phase_day_id,
-        id=_to_optional_text(hormone_data.get("id")),
-        estrogen=_to_optional_text(hormone_data.get("estrogen")),
-        estrogen_trend=_to_optional_text(hormone_data.get("estrogen_trend")),
-        progesterone=_to_optional_text(hormone_data.get("progesterone")),
-        progesterone_trend=_to_optional_text(hormone_data.get("progesterone_trend")),
-        fsh=_to_optional_text(hormone_data.get("fsh")),
-        fsh_trend=_to_optional_text(hormone_data.get("fsh_trend")),
-        lh=_to_optional_text(hormone_data.get("lh")),
-        lh_trend=_to_optional_text(hormone_data.get("lh_trend")),
-        mood=_coerce_json_object(hormone_data.get("mood")),
-        energy=hormone_data.get("energy"),
-        best_work_type=_coerce_json_object(hormone_data.get("best_work_type")),
-    )
-    return row.model_dump()
 
 
 def _empty_hormone_response(
@@ -336,10 +321,7 @@ async def get_hormones(
             try:
                 hormone_response = (
                     supabase.table("hormones_data_v2")
-                    .select(
-                        "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
-                        "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type"
-                    )
+                    .select(HORMONES_DATA_V2_SELECT)
                     .in_("id", unique_ids)
                     .execute()
                 )
@@ -359,7 +341,7 @@ async def get_hormones(
                 key = pid.lower()
                 hormone_data = by_id_lower.get(key)
                 if hormone_data:
-                    hormone_history.append(_history_point_from_row(hormone_data, pid))
+                    hormone_history.append(_hormone_row_to_today_payload(hormone_data))
 
             today_row = by_id_lower.get(today_phase_day_id.lower())
             if today_row:
@@ -384,10 +366,7 @@ async def get_hormones(
         try:
             response = (
                 supabase.table("hormones_data_v2")
-                .select(
-                    "id, estrogen, estrogen_trend, progesterone, progesterone_trend, "
-                    "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type"
-                )
+                .select(HORMONES_DATA_V2_SELECT)
                 .eq("id", today_phase_day_id)
                 .execute()
             )
@@ -443,7 +422,7 @@ async def get_nutrition(
 
         resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
-            return {"recipes": [], "wholefoods": []}
+            return {"recipes": []}
 
         interests = _normalize_interests_list(current_user.get("interests"))
         favorite_cuisine = current_user.get("favorite_cuisine")
@@ -451,7 +430,9 @@ async def get_nutrition(
         cuisine_query = str(cuisine).strip() if cuisine is not None and str(cuisine).strip() else None
 
         table_name = f"nutrition_{language}"
-        recipes_response = supabase.table(table_name).select("*").eq("hormone_id", resolved).execute()
+        recipes_response = (
+            supabase.table(table_name).select(NUTRITION_TABLE_SELECT).eq("hormone_id", resolved).execute()
+        )
         rows: List[Dict[str, Any]] = list(recipes_response.data or [])
 
         if cuisine_query:
@@ -466,10 +447,7 @@ async def get_nutrition(
 
         # Neutral sort when user has no preference signals.
         if not interests and not favorite_cuisine:
-            return {
-                "recipes": rows,
-                "wholefoods": [],
-            }
+            return {"recipes": rows}
 
         cuisine_boost = favorite_cuisine if cuisine_query is None else None
         ranked = _rank_rows_by_score(
@@ -477,10 +455,7 @@ async def get_nutrition(
             lambda r: _nutrition_interest_score(r, interests, cuisine_boost),
         )
 
-        return {
-            "recipes": ranked,
-            "wholefoods": [],
-        }
+        return {"recipes": ranked}
 
     except Exception as e:
         logger.exception("get_nutrition failed: %s", e)

@@ -71,6 +71,8 @@ class ProfileUpdate(BaseModel):
     language: Optional[str] = None
     cycle_length: Optional[int] = None
     avg_bleeding_days: Optional[int] = None
+    favorite_cuisine: Optional[str] = None
+    favorite_exercise: Optional[str] = None
 
 
 class NotificationPreferencesDto(BaseModel):
@@ -142,6 +144,8 @@ _PROFILE_UPDATE_KEYS = (
     "language",
     "cycle_length",
     "avg_bleeding_days",
+    "favorite_cuisine",
+    "favorite_exercise",
 )
 
 
@@ -154,7 +158,7 @@ async def update_profile(
     profile_data: ProfileUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update user profile (name, language, cycle_length, avg_bleeding_days only)."""
+    """Update user profile (name, language, cycle_length, avg_bleeding_days, optional favorites)."""
     try:
         user_id = authenticated_subject_id(current_user)
         raw = profile_data.model_dump(exclude_unset=True)
@@ -165,6 +169,12 @@ async def update_profile(
             update_data["cycle_length"] = int(update_data["cycle_length"])
         if "avg_bleeding_days" in update_data and update_data["avg_bleeding_days"] is not None:
             update_data["avg_bleeding_days"] = max(2, min(8, int(update_data["avg_bleeding_days"])))
+        if "favorite_cuisine" in update_data:
+            fc = update_data["favorite_cuisine"]
+            update_data["favorite_cuisine"] = None if fc is None else (str(fc).strip()[:100] or None)
+        if "favorite_exercise" in update_data:
+            fe = update_data["favorite_exercise"]
+            update_data["favorite_exercise"] = None if fe is None else (str(fe).strip()[:100] or None)
         if not update_data:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

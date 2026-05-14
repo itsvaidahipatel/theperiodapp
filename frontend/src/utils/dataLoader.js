@@ -199,7 +199,7 @@ export const loadWellnessData = async (phaseDayId = null, language = null, prelo
     
     const wellnessData = {
       hormones: normalizedHormones,
-      nutrition: normalizedNutrition,  // null if no recipes, or {recipes: [...], wholefoods: []} if has recipes
+      nutrition: normalizedNutrition,  // null if no recipes, or { recipes: [...] } from GET /wellness/nutrition
       exercises: normalizedExercises,   // null if no exercises, or {exercises: [...]} if has exercises
       phaseDayId: phaseDayId || normalizedHormones?.phase_day_id || hormones?.phase_day_id,
       language: lang,

@@ -65,6 +65,8 @@ class RegisterRequest(BaseModel):
     language: Optional[str] = "en"
     language_choice: str
     consent_accepted: bool
+    favorite_cuisine: Optional[str] = None
+    favorite_exercise: Optional[str] = None
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -349,6 +351,13 @@ async def register(
         }
         if last_period_date is not None:
             user_data["last_period_date"] = last_period_date
+
+        if request.favorite_cuisine is not None:
+            fc = str(request.favorite_cuisine).strip()
+            user_data["favorite_cuisine"] = fc[:100] if fc else None
+        if request.favorite_exercise is not None:
+            fe = str(request.favorite_exercise).strip()
+            user_data["favorite_exercise"] = fe[:100] if fe else None
 
         if supabase_session and supabase_session.credentials:
             try:

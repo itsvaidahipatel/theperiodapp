@@ -408,9 +408,7 @@ async def get_phase_map(
     ``Cache-Control: public, max-age=3600`` allows shared caches and Dio to reuse for one hour.
 
     When ``start_date`` / ``end_date`` are omitted, the range defaults to three calendar
-    months before and after the resolved user "today" (six months total). The default
-    ``end_date`` is extended by 44 days so cycles that start late in the window still
-    receive a full Ovulation/Luteal tail (month-aligned bounds alone can clip the tail).
+    months before and after the resolved user "today" (six months total).
 
     NEW STATELESS ARCHITECTURE:
     - Fetches period_logs once (source of truth)
@@ -489,17 +487,10 @@ async def get_phase_map(
             return _phase_map_json_response({"phase_map": []})
 
         # Default: 6-month window (3 calendar months back, 3 forward) when range omitted
-        phase_map_used_default_end = False
         if not start_date:
             start_date = _shift_calendar_months(user_today, -3).strftime("%Y-%m-%d")
         if not end_date:
-            phase_map_used_default_end = True
             end_date = _shift_calendar_months(user_today, 3).strftime("%Y-%m-%d")
-        # Month-aligned defaults can end on e.g. the 28th while a cycle anchored near month-end
-        # still needs ~cycle_length days for Ovulation/Luteal; extend tail when using that default.
-        if phase_map_used_default_end:
-            end_dt_pad = datetime.strptime(end_date, "%Y-%m-%d").date() + timedelta(days=44)
-            end_date = end_dt_pad.strftime("%Y-%m-%d")
         
         # 4) Calculate phases (dynamic predictions)
         phase_mappings = calculate_phase_for_date_range(
