@@ -30,10 +30,10 @@ HORMONES_DATA_V2_SELECT = (
     "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type, created_at, updated_at"
 )
 
-# nutrition_* — column list must match deployed tables (photo_url, not image_url; phase_id/day_number/serves).
+# nutrition_* — explicit column list (no created_at, wholefoods, or brain_note).
 NUTRITION_TABLE_SELECT = (
     "id, hormone_id, phase_id, day_number, cuisine, recipe_name, serves, "
-    "ingredients, steps, photo_url, nutrients, created_at"
+    "ingredients, steps, photo_url, nutrients"
 )
 
 # exercises_* — align with deployed tables (steps text, photo_url; v2 hormone_id FK).
@@ -427,6 +427,10 @@ async def get_hormones(
         raise HTTPException(status_code=500, detail=f"Failed to fetch hormones data: {str(e)}") from e
 
 
+def _sort_nutrition_by_recipe_name(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(rows, key=lambda r: str(r.get("recipe_name") or "").lower())
+
+
 @router.get("/nutrition")
 async def get_nutrition(
     phase_day_id: Optional[str] = Query(
@@ -434,7 +438,10 @@ async def get_nutrition(
         description="Cycle template phase-day id—not a user UUID. Omitted: derived for the authenticated user.",
     ),
     language: str = Query("en", description="Language code"),
-    cuisine: Optional[str] = Query(None, description="Optional strict cuisine filter (query); falls back to all rows if no match"),
+    cuisine: Optional[str] = Query(
+        None,
+        description="Optional cuisine filter: try hormone_id+cuisine first; if no rows, return all recipes for the phase.",
+    ),
     client_today: Optional[str] = Query(
         None,
         description="Device calendar date YYYY-MM-DD; preferred over server/IST for 'today'",
@@ -442,15 +449,19 @@ async def get_nutrition(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Nutrition for the resolved phase day. Validity and ``phase_day_id`` use ``hormones_data_v2`` only
-    (lowercase id); recipes match ``hormone_id`` to that id.
+    Nutrition for the resolved phase day. ``hormones_data_v2`` gates the phase key (lowercase).
 
-    Rows are ranked by ``users.interests`` (e.g. South Indian) against ``cuisine`` / ``recipe_name``,
-    then by ``favorite_cuisine`` as a boost. Optional ``cuisine`` query narrows results when matches exist;
-    otherwise all phase-day recipes are returned, interest-matched first.
+    Optional ``cuisine`` query: first fetch recipes for ``hormone_id`` with ``cuisine`` matching
+    (case-insensitive); if none, fetch all recipes for that ``hormone_id`` so the user always sees food.
+
+    Results are ordered by ``recipe_name``. Rows may be re-ranked by profile interests when present.
     """
     try:
         user_id = authenticated_subject_id(current_user)
+
+        if phase_day_id is not None:
+            pid = str(phase_day_id).strip().lower()
+            phase_day_id = pid if pid else None
 
         resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
@@ -476,28 +487,37 @@ async def get_nutrition(
         interests = _normalize_interests_list(current_user.get("interests"))
         favorite_cuisine = current_user.get("favorite_cuisine")
         favorite_cuisine = str(favorite_cuisine).strip() if favorite_cuisine else None
-        cuisine_query = str(cuisine).strip() if cuisine is not None and str(cuisine).strip() else None
+        cuisine_query = str(cuisine).strip().lower() if cuisine is not None and str(cuisine).strip() else None
 
         table_name = f"nutrition_{language}"
-        recipes_response = (
-            supabase.table(table_name)
-            .select(NUTRITION_TABLE_SELECT)
-            .eq("hormone_id", phase_for_client)
-            .execute()
-        )
-        rows: List[Dict[str, Any]] = list(recipes_response.data or [])
+        tbl = supabase.table(table_name)
 
+        def _fetch_by_hormone_only() -> List[Dict[str, Any]]:
+            r = (
+                tbl.select(NUTRITION_TABLE_SELECT)
+                .eq("hormone_id", phase_for_client)
+                .order("recipe_name")
+                .execute()
+            )
+            return list(r.data or [])
+
+        rows: List[Dict[str, Any]]
         if cuisine_query:
-            narrowed = [
-                r
-                for r in rows
-                if _text_matches_interest(r.get("cuisine"), cuisine_query)
-                or _text_matches_interest(r.get("recipe_name"), cuisine_query)
-            ]
-            if narrowed:
-                rows = narrowed
+            r_narrow = (
+                tbl.select(NUTRITION_TABLE_SELECT)
+                .eq("hormone_id", phase_for_client)
+                .ilike("cuisine", f"%{cuisine_query}%")
+                .order("recipe_name")
+                .execute()
+            )
+            rows = list(r_narrow.data or [])
+            if not rows:
+                rows = _fetch_by_hormone_only()
+        else:
+            rows = _fetch_by_hormone_only()
 
-        # Neutral sort when user has no preference signals.
+        rows = _sort_nutrition_by_recipe_name(rows)
+
         if not interests and not favorite_cuisine:
             return {"recipes": rows, "phase_day_id": phase_for_client}
 
