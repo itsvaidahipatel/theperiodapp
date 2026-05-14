@@ -28,9 +28,10 @@ HORMONES_DATA_V2_SELECT = (
     "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type, created_at, updated_at"
 )
 
-# nutrition_* tables (e.g. nutrition_en)
+# nutrition_* — column list must match deployed tables (photo_url, not image_url; phase_id/day_number/serves).
 NUTRITION_TABLE_SELECT = (
-    "id, hormone_id, cuisine, recipe_name, image_url, ingredients, steps, nutrients, created_at"
+    "id, hormone_id, phase_id, day_number, cuisine, recipe_name, serves, "
+    "ingredients, steps, photo_url, nutrients, created_at"
 )
 
 HORMONE_DISCLAIMER = (

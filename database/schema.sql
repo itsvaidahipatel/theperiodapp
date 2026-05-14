@@ -163,39 +163,51 @@ CREATE TABLE IF NOT EXISTS public.hormones_data_v2 (
 -- nutrition_* / exercises_* — content keyed by hormone_id -> hormones_data_v2(id)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS nutrition_en (
-    id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    id TEXT NOT NULL,
     hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
-    cuisine VARCHAR(100),
-    recipe_name VARCHAR(255) NOT NULL,
-    image_url TEXT,
-    ingredients JSONB,
-    steps JSONB,
-    nutrients JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    phase_id INTEGER NOT NULL,
+    day_number INTEGER NOT NULL,
+    cuisine TEXT NOT NULL,
+    recipe_name TEXT NOT NULL,
+    serves INTEGER NULL,
+    ingredients JSONB NULL,
+    steps JSONB NULL,
+    photo_url TEXT NULL,
+    nutrients JSONB NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT nutrition_en_pkey PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS nutrition_hi (
-    id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    id TEXT NOT NULL,
     hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
-    cuisine VARCHAR(100),
-    recipe_name VARCHAR(255) NOT NULL,
-    image_url TEXT,
-    ingredients JSONB,
-    steps JSONB,
-    nutrients JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    phase_id INTEGER NOT NULL,
+    day_number INTEGER NOT NULL,
+    cuisine TEXT NOT NULL,
+    recipe_name TEXT NOT NULL,
+    serves INTEGER NULL,
+    ingredients JSONB NULL,
+    steps JSONB NULL,
+    photo_url TEXT NULL,
+    nutrients JSONB NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT nutrition_hi_pkey PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS nutrition_gu (
-    id TEXT PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    id TEXT NOT NULL,
     hormone_id TEXT NOT NULL REFERENCES hormones_data_v2(id) ON DELETE CASCADE,
-    cuisine VARCHAR(100),
-    recipe_name VARCHAR(255) NOT NULL,
-    image_url TEXT,
-    ingredients JSONB,
-    steps JSONB,
-    nutrients JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    phase_id INTEGER NOT NULL,
+    day_number INTEGER NOT NULL,
+    cuisine TEXT NOT NULL,
+    recipe_name TEXT NOT NULL,
+    serves INTEGER NULL,
+    ingredients JSONB NULL,
+    steps JSONB NULL,
+    photo_url TEXT NULL,
+    nutrients JSONB NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT nutrition_gu_pkey PRIMARY KEY (id)
 );
 
 CREATE TABLE IF NOT EXISTS exercises_en (
