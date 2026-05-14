@@ -2,8 +2,8 @@
 Wellness routes (hormones, nutrition, exercises): all handlers depend on ``get_current_user``.
 The account scope is always ``authenticated_subject_id(current_user)`` (JWT ``sub`` / ``users.id``).
 Query parameters such as ``phase_day_id`` refer to cycle *template* ids (e.g. p1, f5), not user UUIDs.
-All API ``phase_day_id`` (and hormone ``id``) values are normalized to lowercase. Reference rows are read
-only from ``hormones_data_v2`` (nutrition and exercises are gated on the same v2 id).
+All API ``phase_day_id`` (and hormone ``id``) values are normalized to lowercase. Nutrition and exercise
+rows load by resolved ``hormone_id`` alone; ``hormones_data_v2`` is not required for those endpoints.
 """
 
 import json
@@ -30,13 +30,13 @@ HORMONES_DATA_V2_SELECT = (
     "fsh, fsh_trend, lh, lh_trend, mood, energy, best_work_type, created_at, updated_at"
 )
 
-# nutrition_* — explicit column list (no created_at, wholefoods, or brain_note).
+# nutrition_* — explicit columns only (must match nutrition_en / hi / gu).
 NUTRITION_TABLE_SELECT = (
     "id, hormone_id, phase_id, day_number, cuisine, recipe_name, serves, "
     "ingredients, steps, photo_url, nutrients"
 )
 
-# exercises_* — align with deployed tables (steps text, photo_url; v2 hormone_id FK).
+# exercises_* — subset of wellness columns that exist on exercise tables (see nutrition for cuisine fields).
 EXERCISES_TABLE_SELECT = (
     "id, hormone_id, category, exercise_name, steps, photo_url, energy_level"
 )
@@ -449,10 +449,9 @@ async def get_nutrition(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Nutrition for the resolved phase day. ``hormones_data_v2`` gates the phase key (lowercase).
+    Nutrition for the resolved phase (``hormone_id`` = resolved template id, lowercase).
 
-    Optional ``cuisine`` query: first fetch recipes for ``hormone_id`` with ``cuisine`` matching
-    (case-insensitive); if none, fetch all recipes for that ``hormone_id`` so the user always sees food.
+    Optional ``cuisine``: query with cuisine ILIKE first; if no rows, fetch all recipes for that ``hormone_id``.
 
     Results are ordered by ``recipe_name``. Rows may be re-ranked by profile interests when present.
     """
@@ -467,35 +466,22 @@ async def get_nutrition(
         if not resolved:
             return {"recipes": [], "phase_day_id": None}
 
-        try:
-            v2_row = (
-                supabase.table("hormones_data_v2")
-                .select("id")
-                .eq("id", resolved)
-                .limit(1)
-                .execute()
-            )
-        except Exception:
-            logger.exception("hormones_data_v2 lookup failed in get_nutrition")
-            raise
-
-        if not v2_row.data:
-            return {"recipes": [], "phase_day_id": _response_phase_day_id(None, resolved)}
-
-        phase_for_client = _response_phase_day_id(v2_row.data[0], resolved)
+        hormone_key = resolved.lower().strip()
 
         interests = _normalize_interests_list(current_user.get("interests"))
         favorite_cuisine = current_user.get("favorite_cuisine")
         favorite_cuisine = str(favorite_cuisine).strip() if favorite_cuisine else None
         cuisine_query = str(cuisine).strip().lower() if cuisine is not None and str(cuisine).strip() else None
 
-        table_name = f"nutrition_{language}"
+        lang = str(language or "en").strip().lower()
+        table_name = f"nutrition_{lang}"
         tbl = supabase.table(table_name)
 
         def _fetch_by_hormone_only() -> List[Dict[str, Any]]:
+            """All recipes for this phase; case-insensitive ``hormone_id`` (DB may store ``P3`` vs ``p3``)."""
             r = (
                 tbl.select(NUTRITION_TABLE_SELECT)
-                .eq("hormone_id", phase_for_client)
+                .ilike("hormone_id", hormone_key)
                 .order("recipe_name")
                 .execute()
             )
@@ -505,7 +491,7 @@ async def get_nutrition(
         if cuisine_query:
             r_narrow = (
                 tbl.select(NUTRITION_TABLE_SELECT)
-                .eq("hormone_id", phase_for_client)
+                .ilike("hormone_id", hormone_key)
                 .ilike("cuisine", f"%{cuisine_query}%")
                 .order("recipe_name")
                 .execute()
@@ -519,7 +505,7 @@ async def get_nutrition(
         rows = _sort_nutrition_by_recipe_name(rows)
 
         if not interests and not favorite_cuisine:
-            return {"recipes": rows, "phase_day_id": phase_for_client}
+            return {"recipes": rows, "phase_day_id": hormone_key}
 
         cuisine_boost = favorite_cuisine if cuisine_query is None else None
         ranked = _rank_rows_by_score(
@@ -527,7 +513,7 @@ async def get_nutrition(
             lambda r: _nutrition_interest_score(r, interests, cuisine_boost),
         )
 
-        return {"recipes": ranked, "phase_day_id": phase_for_client}
+        return {"recipes": ranked, "phase_day_id": hormone_key}
 
     except Exception as e:
         logger.exception("get_nutrition failed: %s", e)
@@ -549,36 +535,24 @@ async def get_exercises(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Exercises for the resolved phase day. Rows load only after a matching ``hormones_data_v2`` row
-    (same lowercase ``hormone_id`` as ``phase_day_id``).
+    Exercises for the resolved phase (``hormone_id`` = resolved template id, lowercase).
 
-    Rows are ranked by ``users.interests`` (e.g. Yoga) against ``category``, ``exercise_name``, and
-    ``steps`` (and legacy ``description`` when present). Optional ``category`` query narrows when matches exist;
+    Rows are ranked by ``users.interests`` against ``category``, ``exercise_name``, and ``steps``
+    (and legacy ``description`` when present). Optional ``category`` query narrows when matches exist;
     otherwise all rows are returned with interest matches first.
     """
     try:
         user_id = authenticated_subject_id(current_user)
 
+        if phase_day_id is not None:
+            pid = str(phase_day_id).strip().lower()
+            phase_day_id = pid if pid else None
+
         resolved = _resolve_phase_day_id(user_id, phase_day_id, client_today)
         if not resolved:
             return {"exercises": []}
 
-        try:
-            v2_row = (
-                supabase.table("hormones_data_v2")
-                .select("id")
-                .eq("id", resolved)
-                .limit(1)
-                .execute()
-            )
-        except Exception:
-            logger.exception("hormones_data_v2 lookup failed in get_exercises")
-            raise
-
-        if not v2_row.data:
-            return {"exercises": []}
-
-        phase_key = _response_phase_day_id(v2_row.data[0], resolved)
+        hormone_key = resolved.lower().strip()
 
         interests = _normalize_interests_list(current_user.get("interests"))
         category_query = str(category).strip() if category is not None and str(category).strip() else None
@@ -589,7 +563,7 @@ async def get_exercises(
         response = (
             supabase.table(table_name)
             .select(EXERCISES_TABLE_SELECT)
-            .eq("hormone_id", phase_key)
+            .eq("hormone_id", hormone_key)
             .execute()
         )
         rows: List[Dict[str, Any]] = list(response.data or [])
