@@ -12,13 +12,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from supabase import Client
+
 from cycle_utils import (
     calculate_today_phase_day_id,
     get_previous_phase_day_ids,
     get_user_phase_day,
     get_user_today,
 )
-from database import supabase
+from database import supabase, supabase_admin
 from routes.auth import authenticated_subject_id, get_current_user
 
 router = APIRouter()
@@ -427,6 +429,20 @@ async def get_hormones(
         raise HTTPException(status_code=500, detail=f"Failed to fetch hormones data: {str(e)}") from e
 
 
+def _hormone_id_variants(phase_key: str) -> List[str]:
+    """Common DB spellings for template ids (e.g. ``p4`` vs ``P4``). Avoid ILIKE on ``hormone_id`` (``_`` is LIKE wildcard)."""
+    k = (phase_key or "").strip().lower()
+    if not k:
+        return []
+    out: List[str] = []
+    seen: set = set()
+    for c in (k, k.upper(), k[0].upper() + k[1:] if len(k) > 1 else k.upper()):
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
 def _sort_nutrition_by_recipe_name(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(rows, key=lambda r: str(r.get("recipe_name") or "").lower())
 
@@ -473,15 +489,29 @@ async def get_nutrition(
         favorite_cuisine = str(favorite_cuisine).strip() if favorite_cuisine else None
         cuisine_query = str(cuisine).strip().lower() if cuisine is not None and str(cuisine).strip() else None
 
+        variants = _hormone_id_variants(hormone_key)
+        if not variants:
+            return {"recipes": [], "phase_day_id": None}
+
         lang = str(language or "en").strip().lower()
         table_name = f"nutrition_{lang}"
-        tbl = supabase.table(table_name)
 
-        def _fetch_by_hormone_only() -> List[Dict[str, Any]]:
-            """All recipes for this phase; case-insensitive ``hormone_id`` (DB may store ``P3`` vs ``p3``)."""
+        def _fetch_all_for_phase(client: Client) -> List[Dict[str, Any]]:
             r = (
-                tbl.select(NUTRITION_TABLE_SELECT)
-                .ilike("hormone_id", hormone_key)
+                client.table(table_name)
+                .select(NUTRITION_TABLE_SELECT)
+                .in_("hormone_id", variants)
+                .order("recipe_name")
+                .execute()
+            )
+            return list(r.data or [])
+
+        def _fetch_cuisine_narrow(client: Client) -> List[Dict[str, Any]]:
+            r = (
+                client.table(table_name)
+                .select(NUTRITION_TABLE_SELECT)
+                .in_("hormone_id", variants)
+                .ilike("cuisine", f"%{cuisine_query}%")
                 .order("recipe_name")
                 .execute()
             )
@@ -489,18 +519,17 @@ async def get_nutrition(
 
         rows: List[Dict[str, Any]]
         if cuisine_query:
-            r_narrow = (
-                tbl.select(NUTRITION_TABLE_SELECT)
-                .ilike("hormone_id", hormone_key)
-                .ilike("cuisine", f"%{cuisine_query}%")
-                .order("recipe_name")
-                .execute()
-            )
-            rows = list(r_narrow.data or [])
+            rows = _fetch_cuisine_narrow(supabase)
             if not rows:
-                rows = _fetch_by_hormone_only()
+                rows = _fetch_all_for_phase(supabase)
+            if not rows and supabase_admin is not None:
+                rows = _fetch_cuisine_narrow(supabase_admin)
+                if not rows:
+                    rows = _fetch_all_for_phase(supabase_admin)
         else:
-            rows = _fetch_by_hormone_only()
+            rows = _fetch_all_for_phase(supabase)
+            if not rows and supabase_admin is not None:
+                rows = _fetch_all_for_phase(supabase_admin)
 
         rows = _sort_nutrition_by_recipe_name(rows)
 
@@ -559,14 +588,25 @@ async def get_exercises(
         favorite_exercise = current_user.get("favorite_exercise")
         favorite_exercise = str(favorite_exercise).strip() if favorite_exercise else None
 
-        table_name = f"exercises_{language}"
-        response = (
-            supabase.table(table_name)
-            .select(EXERCISES_TABLE_SELECT)
-            .eq("hormone_id", hormone_key)
-            .execute()
-        )
-        rows: List[Dict[str, Any]] = list(response.data or [])
+        variants = _hormone_id_variants(hormone_key)
+        if not variants:
+            return {"exercises": []}
+
+        lang = str(language or "en").strip().lower()
+        table_name = f"exercises_{lang}"
+
+        def _fetch_exercises(client: Client) -> List[Dict[str, Any]]:
+            r = (
+                client.table(table_name)
+                .select(EXERCISES_TABLE_SELECT)
+                .in_("hormone_id", variants)
+                .execute()
+            )
+            return list(r.data or [])
+
+        rows = _fetch_exercises(supabase)
+        if not rows and supabase_admin is not None:
+            rows = _fetch_exercises(supabase_admin)
 
         if category_query:
             narrowed = [
